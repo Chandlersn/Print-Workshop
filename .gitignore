@@ -10,5 +10,7 @@ Thumbs.db
 desktop.ini
 # 私人化数据资产：只在本地，不入仓库
 docs/开发经验总结.md
+docs/开发方案.md
+docs/开发计划.md
 data/print-bg/
 data/print-fonts/
