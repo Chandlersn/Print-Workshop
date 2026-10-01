@@ -47,10 +47,6 @@
       {
         "from": "build/seed",
         "to": "seed"
-      },
-      {
-        "from": "docs/usage-guide.html",
-        "to": "usage-guide.html"
       }
     ],
     "electronDownload": {

@@ -7,6 +7,7 @@ import { ref, watch, onMounted } from 'vue'
 import DatasetView from './views/DatasetView.vue'
 import TemplateView from './views/TemplateView.vue'
 import PrintCenterView from './views/PrintCenterView.vue'
+import GuideDialog from './components/GuideDialog.vue'
 import { cellNav } from './lib/cell-nav.js'
 
 const TABS = [
@@ -113,6 +114,7 @@ function skipOnboarding() {
 const meta = ref(null)
 const updateInfo = ref(null)
 const showAbout = ref(false)
+const showGuide = ref(false)
 const checkState = ref('') // '' | checking | newer | current | unavailable
 const foundVersion = ref('')
 
@@ -132,10 +134,6 @@ async function onCheckUpdate() {
   } catch {
     checkState.value = 'unavailable'
   }
-}
-
-async function onOpenGuide() {
-  try { await window.printpress.openGuide() } catch { /* 打开失败交系统报错，不阻塞 */ }
 }
 
 onMounted(async () => {
@@ -179,6 +177,7 @@ onMounted(async () => {
       <button class="theme-toggle" :title="theme === 'dark' ? '切换浅色' : '切换深色'" @click="toggleTheme">
         {{ theme === 'dark' ? '浅色' : '深色' }}
       </button>
+      <button class="theme-toggle" @click="showGuide = true">说明</button>
       <button class="theme-toggle" @click="showAbout = true">关于</button>
     </header>
 
@@ -260,7 +259,7 @@ onMounted(async () => {
           </div>
           <div class="about-row">
             <span class="ar-label">使用说明</span>
-            <button class="footer-btn" @click="onOpenGuide">打开使用说明</button>
+            <button class="footer-btn" @click="showGuide = true">查看使用说明</button>
           </div>
           <div class="about-row">
             <span class="ar-label">下载 / 更新</span>
@@ -281,6 +280,9 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- 应用内使用说明 -->
+    <GuideDialog v-if="showGuide" @close="showGuide = false" />
 
     <!-- 数据目录迁移后的重启确认 -->
     <div v-if="showRestart" class="onboard-mask">
