@@ -1,0 +1,73 @@
+{
+  "name": "printpress",
+  "version": "0.1.0",
+  "description": "批印坊 PrintPress - 本地离线通用批量打印工具",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "electron .",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5199 && electron .\"",
+    "smoke": "electron . --smoke",
+    "test": "node test/m1-import.cjs && node test/m2-templates.cjs && node test/m3-render.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/scope-filters.cjs && node test/dataset-edit.cjs && node test/canvas-layout.cjs && node test/print-jobs.cjs && node test/version-check.cjs",
+    "test:e2e": "electron test/m3-e2e.cjs",
+    "dist": "npm run build && electron-builder --win --x64 -c.win.signAndEditExecutable=false"
+  },
+  "author": "lyq",
+  "license": "MIT",
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^8.2.2",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.9.1",
+    "vite": "^5.4.21",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.63.5",
+    "vue": "^3.5.30",
+    "xlsx": "^0.18.5"
+  },
+  "build": {
+    "appId": "com.lyq.printpress",
+    "productName": "批印坊",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraMetadata": {
+      "type": "commonjs"
+    },
+    "icon": "build/icon.png",
+    "extraResources": [
+      {
+        "from": "build/seed",
+        "to": "seed"
+      }
+    ],
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "批印坊"
+    }
+  }
+}

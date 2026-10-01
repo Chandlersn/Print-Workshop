@@ -1,0 +1,1218 @@
+<script setup>
+/**
+ * 模板工坊：模板列表 + 画布编辑器。
+ * - 底图上传：真实像素尺寸 → 纸张建议；比例差 >2% 变形预警
+ * - 画布：百分比坐标系拖拽排版，字号存 pt
+ * - 字段属性：字体（分组：默认/系统/上传）/ 字号 / 颜色 / 对齐 / 加粗
+ * - 预览：选中数据集首行真实数据，空值半透明提示（打印时将留空）
+ * 吸附对齐 / 多选 / 撤销重做在 M4。
+ */
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import CustomSelect from '../components/CustomSelect.vue'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { evenRow, columnSnap } from '../lib/field-layout.cjs'
+
+const CANVAS_W = 760 // 画布显示宽度 px
+const SNAP_PX = 6    // 吸附阈值（像素，源项目同值）
+
+const templates = ref([])
+const fonts = ref({ system: [], uploaded: [] })
+const datasets = ref([])
+const activeTpl = ref(null)
+const activeDatasetId = ref('')
+const catalog = ref([])
+const sampleRow = ref(null)
+const selectedIdx = ref(-1)
+const msg = ref('')
+const errorMsg = ref('')
+const dragState = ref(null)
+const canvasEl = ref(null)
+
+// ---- M4：多选 / 撤销重做 / 吸附辅助线 ----
+const multiSel = ref(new Set())      // 多选集合（含 selectedIdx）
+const undoStack = ref([])            // 字段快照栈（撤销）
+const redoStack = ref([])            // 重做栈
+const guideV = ref(null)             // 垂直辅助线（画布内 px 坐标）
+const guideH = ref(null)             // 水平辅助线
+const canUndo = computed(() => undoStack.value.length > 0)
+const canRedo = computed(() => redoStack.value.length > 0)
+/** 一键布局可用：多选 ≥2 或画布全部字段 ≥2 */
+const canLayout = computed(() => layoutTargets().length >= 2)
+
+const pageSizeOptions = computed(() => {
+  const sizes = window.__PAGE_SIZES__ || []
+  const opts = sizes.map((p) => ({ value: p.id, label: p.name }))
+  const cur = activeTpl.value && activeTpl.value.pageSize
+  if (cur && cur.id === 'custom' && !opts.some((o) => o.value === 'custom')) {
+    opts.push({ value: 'custom', label: `自定义 ${cur.w}×${cur.h}mm` })
+  }
+  return opts
+})
+
+// 数据集下拉：已激活打印字段的表自动置顶（用户在数据页列头点过「印」的），
+// 置顶组内按激活数降序——每次点印/取消都产生可见的位置变化，其余保持导入顺序
+const datasetOptions = computed(() => {
+  const ready = datasets.value.filter((d) => d.printCols > 0).sort((a, b) => b.printCols - a.printCols)
+  const rest = datasets.value.filter((d) => !(d.printCols > 0))
+  const label = (d) => (d.printCols > 0 ? `${d.name}（${d.printCols} 个打印字段）` : d.name)
+  return [...ready, ...rest].map((d) => ({ value: d.id, label: label(d) }))
+})
+
+const fieldOptions = computed(() =>
+  catalog.value
+    .filter((c) => c.printOn === true) // 只显示用户在数据页列头显式激活的字段
+    .map((c) => ({
+      value: c.key,
+      label: `${c.alias}（${c.fill}）`,
+      disabled: c.fillRate === 0,
+    })))
+
+// 未激活字段数（提醒用户去数据页开启）
+const hiddenFieldCount = computed(() =>
+  catalog.value.filter((c) => c.printOn !== true).length)
+
+const fontOptions = computed(() => [
+  { value: '', label: '默认字体', group: '默认' },
+  ...fonts.value.system.map((f) => ({ value: f.family, label: f.family, group: '系统字体' })),
+  ...fonts.value.uploaded.map((f) => ({ value: f.family, label: f.family, group: '上传字体' })),
+])
+
+const selectedField = computed(() => {
+  if (!activeTpl.value || selectedIdx.value < 0) return null
+  return activeTpl.value.fields[selectedIdx.value] || null
+})
+
+// 选中字段的填充率徽标（从字段目录派生，不在画布重复计算）
+const selectedFill = computed(() => {
+  const f = selectedField.value
+  if (!f) return null
+  return catalog.value.find((c) => c.key === (f.column || f.key)) || null
+})
+
+const bgUrl = computed(() =>
+  activeTpl.value && activeTpl.value.background
+    ? `pp://media/${activeTpl.value.background}`
+    : '')
+
+const bgRatioWarn = computed(() => {
+  const t = activeTpl.value
+  if (!t || !t.bgSize || !t.pageSize) return ''
+  const diff = Math.abs(t.bgSize.width / t.bgSize.height - t.pageSize.w / t.pageSize.h) / (t.pageSize.w / t.pageSize.h)
+  return diff > 0.02 ? `底图比例与纸张相差约 ${(diff * 100).toFixed(1)}%，打印时可能变形` : ''
+})
+
+const canvasH = computed(() => {
+  const t = activeTpl.value
+  if (!t) return 540
+  return Math.round((CANVAS_W * t.pageSize.h) / t.pageSize.w)
+})
+
+function ptToPx(pt) {
+  const t = activeTpl.value
+  if (!t) return pt
+  const pxPerMm = CANVAS_W / t.pageSize.w
+  return (pt * 25.4) / 72 * pxPerMm
+}
+
+async function refreshLists() {
+  templates.value = await window.printpress.listTemplates()
+  fonts.value = await window.printpress.listFonts()
+  datasets.value = await window.printpress.listDatasets()
+}
+
+function extractError(err) {
+  return String(err && err.message ? err.message : err).replace(
+    /^Error invoking remote method '[^']+': (Error: )?/, '')
+}
+
+function flash(text) {
+  msg.value = text
+  setTimeout(() => { if (msg.value === text) msg.value = '' }, 2500)
+}
+
+function newTemplate() {
+  errorMsg.value = '' // 切换编辑对象前清掉上一次的报错，避免提示张冠李戴
+  msg.value = ''
+  activeTpl.value = {
+    name: '未命名模板',
+    pageSize: { id: 'a4-landscape', w: 297, h: 210 },
+    background: '',
+    bgSize: null,
+    datasetId: '',
+    fields: [],
+  }
+  selectedIdx.value = -1
+  multiSel.value = new Set()
+  undoStack.value = []
+  redoStack.value = []
+  activeDatasetId.value = ''
+  catalog.value = []
+  sampleRow.value = null
+}
+
+async function openTemplate(id) {
+  try {
+    errorMsg.value = '' // 换模板即清掉旧报错——错误属于上一个模板，不该跟过来
+    msg.value = ''
+    activeTpl.value = await window.printpress.getTemplate(id)
+    selectedIdx.value = -1
+    multiSel.value = new Set()
+    undoStack.value = []
+    redoStack.value = []
+    // 绑定的数据集已被删除：目录加载必然失败，提前给用户可读的出路提示
+    if (activeTpl.value.datasetId && !datasets.value.some((d) => d.id === activeTpl.value.datasetId)) {
+      activeDatasetId.value = ''
+      catalog.value = []
+      sampleRow.value = null
+      errorMsg.value = '该模板关联的数据集已被删除：请重新选择数据集，并删除画布上的失效字段后保存'
+      return
+    }
+    if (activeTpl.value.datasetId) {
+      activeDatasetId.value = activeTpl.value.datasetId
+      await loadCatalog(activeDatasetId.value)
+    } else {
+      activeDatasetId.value = ''
+      catalog.value = []
+      sampleRow.value = null
+    }
+  } catch (err) {
+    errorMsg.value = extractError(err)
+  }
+}
+
+async function loadCatalog(dsId) {
+  catalog.value = []
+  sampleRow.value = null
+  if (!dsId) return
+  try {
+    catalog.value = await window.printpress.fieldCatalog(dsId)
+    const ds = await window.printpress.getDataset(dsId)
+    sampleRow.value = ds.rows.find((r) => Object.values(r).some((v) => String(v).trim())) || ds.rows[0] || null
+  } catch (err) {
+    errorMsg.value = extractError(err)
+  }
+}
+
+watch(activeDatasetId, (id) => {
+  if (activeTpl.value) activeTpl.value.datasetId = id
+  loadCatalog(id)
+})
+
+function onPageSizeChange(id) {
+  const t = activeTpl.value
+  if (!t) return
+  const hit = (window.__PAGE_SIZES__ || []).find((p) => p.id === id)
+  if (hit) t.pageSize = { id: hit.id, w: hit.w, h: hit.h }
+}
+
+async function uploadBackground() {
+  if (!activeTpl.value) return
+  errorMsg.value = ''
+  try {
+    const result = await window.printpress.uploadBackgroundDialog()
+    if (result.canceled) return
+    const t = activeTpl.value
+    t.background = result.background
+    t.bgSize = { width: result.width, height: result.height }
+    if (result.suggest.matched) {
+      t.pageSize = { id: result.suggest.page.id, w: result.suggest.page.w, h: result.suggest.page.h }
+      flash(`底图已上传，纸张匹配为${result.suggest.page.name}`)
+    } else {
+      t.pageSize = { id: 'custom', w: result.suggest.page.w, h: result.suggest.page.h }
+      flash('底图已上传，非标准比例，按像素换算为自定义纸张')
+    }
+  } catch (err) {
+    errorMsg.value = extractError(err)
+  }
+}
+
+// ---- 撤销 / 重做：字段布局快照栈（上限 50 条） ----
+function snapshotFields() {
+  return JSON.stringify(activeTpl.value ? activeTpl.value.fields : [])
+}
+
+function pushUndo() {
+  if (!activeTpl.value) return
+  const snap = snapshotFields()
+  // 去重：连续触发（focus/pointerdown 叠加）且状态未变时不重复入栈
+  if (undoStack.value.length && undoStack.value[undoStack.value.length - 1] === snap) return
+  undoStack.value.push(snap)
+  if (undoStack.value.length > 50) undoStack.value.shift()
+  redoStack.value = []
+}
+
+function restoreSnapshot(json) {
+  if (!activeTpl.value) return
+  activeTpl.value.fields = JSON.parse(json)
+  if (selectedIdx.value >= activeTpl.value.fields.length) {
+    selectedIdx.value = activeTpl.value.fields.length - 1
+  }
+  multiSel.value = new Set(
+    [...multiSel.value].filter((i) => i < activeTpl.value.fields.length),
+  )
+}
+
+function undo() {
+  if (!undoStack.value.length) return
+  redoStack.value.push(snapshotFields())
+  restoreSnapshot(undoStack.value.pop())
+}
+
+function redo() {
+  if (!redoStack.value.length) return
+  undoStack.value.push(snapshotFields())
+  restoreSnapshot(redoStack.value.pop())
+}
+
+function addField(key) {
+  const t = activeTpl.value
+  if (!t || !key) return
+  pushUndo()
+  const col = catalog.value.find((c) => c.key === key)
+  t.fields.push({
+    column: key, // 权威属性：渲染引擎与打印校验读 column
+    label: col ? col.alias : key,
+    x: 40,
+    y: 40,
+    fontSize: 24,
+    color: '#2b2622',
+    align: 'center',
+    bold: false,
+    fontFamily: '',
+  })
+  selectedIdx.value = t.fields.length - 1
+  multiSel.value = new Set([selectedIdx.value])
+}
+
+function removeField() {
+  const t = activeTpl.value
+  if (!t || selectedIdx.value < 0) return
+  pushUndo()
+  const victims = multiSel.value.size > 1 ? [...multiSel.value].sort((a, b) => b - a) : [selectedIdx.value]
+  for (const i of victims) t.fields.splice(i, 1)
+  selectedIdx.value = -1
+  multiSel.value = new Set()
+}
+
+function fieldStyle(f) {
+  return {
+    left: `${f.x}%`,
+    top: `${f.y}%`,
+    fontSize: `${ptToPx(f.fontSize)}px`,
+    color: f.color,
+    fontFamily: f.fontFamily ? `"${f.fontFamily}"` : 'inherit',
+    fontWeight: f.bold ? 700 : 400,
+    textAlign: f.align,
+  }
+}
+
+function fieldText(f) {
+  const v = sampleRow.value ? String(sampleRow.value[f.column || f.key] || '').trim() : ''
+  return v || f.label
+}
+
+function fieldEmpty(f) {
+  return !sampleRow.value || !String(sampleRow.value[f.column || f.key] || '').trim()
+}
+
+// 失效字段：模板字段的列在当前数据集中不存在（如旧模板残留字段）——画布标红，定位打印中心「字段不匹配」警告的来源
+function fieldMissing(f) {
+  if (!catalog.value.length) return false
+  const col = f.column || f.key
+  return Boolean(col) && !catalog.value.some((c) => c.key === col)
+}
+
+function onFieldPointerDown(e, idx) {
+  // Ctrl/Shift 点击：切换多选成员；普通点击：单选
+  if (e.ctrlKey || e.metaKey || e.shiftKey) {
+    const next = new Set(multiSel.value)
+    if (next.has(idx) && next.size > 1) next.delete(idx)
+    else next.add(idx)
+    multiSel.value = next
+  } else {
+    multiSel.value = new Set([idx])
+  }
+  selectedIdx.value = idx
+
+  const rect = canvasEl.value.getBoundingClientRect()
+  const f = activeTpl.value.fields[idx]
+  pushUndo()
+
+  // 拖拽起点：抓取偏移 + 多选成员初始坐标 + 自身盒子尺寸 + 吸附目标
+  const starts = [...multiSel.value].map((i) => ({ i, x: activeTpl.value.fields[i].x, y: activeTpl.value.fields[i].y }))
+  const ownEl = canvasEl.value.querySelectorAll('.field-box')[idx]
+  const ownRect = ownEl ? ownEl.getBoundingClientRect() : rect
+  const boxW = ownRect.width
+  const boxH = ownRect.height
+  const targetsV = [rect.width / 2]
+  const targetsH = [rect.height / 2]
+  canvasEl.value.querySelectorAll('.field-box').forEach((el, i) => {
+    if (multiSel.value.has(i)) return
+    const r = el.getBoundingClientRect()
+    targetsV.push(r.left - rect.left, r.left - rect.left + r.width / 2, r.right - rect.left)
+    targetsH.push(r.top - rect.top, r.top - rect.top + r.height / 2, r.bottom - rect.top)
+  })
+
+  dragState.value = {
+    idx,
+    grabX: e.clientX - rect.left - (f.x / 100) * rect.width,
+    grabY: e.clientY - rect.top - (f.y / 100) * rect.height,
+    rect,
+    starts,
+    boxW,
+    boxH,
+    targetsV,
+    targetsH,
+  }
+  window.addEventListener('pointermove', onPointerMove)
+  window.addEventListener('pointerup', onPointerUp)
+}
+
+/** 吸附：自身盒子左/中/右（上/中/下）靠近目标线 6px 内则吸附，返回 [值, 线位置] */
+function snap(valueEdges, targets) {
+  let best = null
+  for (const [offset, label] of valueEdges) {
+    for (const t of targets) {
+      const diff = Math.abs(offset - t)
+      if (diff <= SNAP_PX && (!best || diff < best.diff)) {
+        best = { diff, adjust: t - offset, line: t }
+      }
+    }
+  }
+  return best
+}
+
+function onPointerMove(e) {
+  if (!dragState.value || !canvasEl.value) return
+  const d = dragState.value
+  const rawX = ((e.clientX - d.rect.left - d.grabX) / d.rect.width) * 100
+  const rawY = ((e.clientY - d.rect.top - d.grabY) / d.rect.height) * 100
+  const f = activeTpl.value.fields[d.idx]
+  f.x = clamp(rawX)
+  f.y = clamp(rawY)
+
+  // 多选：全体成员跟随同一位移
+  if (d.starts.length > 1) {
+    const dx = f.x - d.starts.find((s) => s.i === d.idx).x
+    const dy = f.y - d.starts.find((s) => s.i === d.idx).y
+    for (const s of d.starts) {
+      if (s.i === d.idx) continue
+      const m = activeTpl.value.fields[s.i]
+      m.x = clamp(s.x + dx)
+      m.y = clamp(s.y + dy)
+    }
+  }
+
+  // 吸附检测（以主拖拽字段为准）
+  const own = d.starts.find((s) => s.i === d.idx)
+  const pxX = (v) => (v / 100) * d.rect.width
+  const pxY = (v) => (v / 100) * d.rect.height
+  const snapV = snap(
+    [[pxX(f.x), 'l'], [pxX(f.x) + d.boxW / 2, 'c'], [pxX(f.x) + d.boxW, 'r']],
+    d.targetsV,
+  )
+  const snapH = snap(
+    [[pxY(f.y), 't'], [pxY(f.y) + d.boxH / 2, 'm'], [pxY(f.y) + d.boxH, 'b']],
+    d.targetsH,
+  )
+  if (snapV) { f.x = clamp(rawX + (snapV.adjust / d.rect.width) * 100); guideV.value = snapV.line } else guideV.value = null
+  if (snapH) { f.y = clamp(rawY + (snapH.adjust / d.rect.height) * 100); guideH.value = snapH.line } else guideH.value = null
+}
+
+function onPointerUp() {
+  dragState.value = null
+  guideV.value = null
+  guideH.value = null
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+}
+
+// ---- 多选对齐：以选中盒子的实际包围盒为基准 ----
+function measureSelected() {
+  const els = canvasEl.value.querySelectorAll('.field-box')
+  return [...multiSel.value]
+    .filter((i) => els[i])
+    .map((i) => {
+      const r = els[i].getBoundingClientRect()
+      const c = canvasEl.value.getBoundingClientRect()
+      return { i, left: r.left - c.left, top: r.top - c.top, w: r.width, h: r.height }
+    })
+}
+
+function alignSelected(kind) {
+  if (!activeTpl.value || multiSel.value.size < 2 || !canvasEl.value) return
+  pushUndo()
+  const boxes = measureSelected()
+  if (!boxes.length) return
+  const minLeft = Math.min(...boxes.map((b) => b.left))
+  const maxRight = Math.max(...boxes.map((b) => b.left + b.w))
+  const minTop = Math.min(...boxes.map((b) => b.top))
+  const maxBottom = Math.max(...boxes.map((b) => b.top + b.h))
+  const W = canvasEl.value.getBoundingClientRect().width
+  const H = canvasEl.value.getBoundingClientRect().height
+  for (const b of boxes) {
+    const f = activeTpl.value.fields[b.i]
+    if (kind === 'left') f.x = clamp((minLeft / W) * 100)
+    if (kind === 'center-h') f.x = clamp(((minLeft + maxRight) / 2 - b.w / 2) / W * 100)
+    if (kind === 'right') f.x = clamp(((maxRight - b.w) / W) * 100)
+    if (kind === 'top') f.y = clamp((minTop / H) * 100)
+    if (kind === 'center-v') f.y = clamp(((minTop + maxBottom) / 2 - b.h / 2) / H * 100)
+    if (kind === 'bottom') f.y = clamp(((maxBottom - b.h) / H) * 100)
+  }
+}
+
+// ---- 一键布局：均分横排 / 列对齐（锚点百分比语义，与渲染引擎一致）----
+// 目标：多选 ≥2 时作用于选中字段，否则作用于画布全部字段（新模板起步一键铺开）
+function layoutTargets() {
+  const t = activeTpl.value
+  if (!t) return []
+  return multiSel.value.size > 1
+    ? [...multiSel.value].map((i) => t.fields[i]).filter(Boolean)
+    : t.fields
+}
+
+function applyEvenRow() {
+  const targets = layoutTargets()
+  if (targets.length < 2) return
+  pushUndo()
+  const plan = evenRow(targets)
+  targets.forEach((f, j) => { f.x = plan[j].x; f.y = plan[j].y })
+  flash(`已均分横排 ${targets.length} 个字段`)
+}
+
+function applyColumnSnap() {
+  const targets = layoutTargets()
+  if (targets.length < 2) return
+  pushUndo()
+  const plan = columnSnap(targets)
+  targets.forEach((f, j) => { f.x = plan[j].x })
+  flash(`已按列对齐 ${targets.length} 个字段`)
+}
+
+// ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除、Ctrl+Z/Y 撤销重做 ----
+function onKeydown(e) {
+  const tag = (e.target && e.target.tagName) || ''
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+  if (!activeTpl.value) return
+
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return }
+  if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z')
+    || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y')) { e.preventDefault(); redo(); return }
+
+  const targets = multiSel.value.size > 0 ? [...multiSel.value] : (selectedIdx.value >= 0 ? [selectedIdx.value] : [])
+  if (!targets.length) return
+
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeField(); return }
+
+  const step = e.shiftKey ? 1 : 0.1
+  let dx = 0
+  let dy = 0
+  if (e.key === 'ArrowLeft') dx = -step
+  else if (e.key === 'ArrowRight') dx = step
+  else if (e.key === 'ArrowUp') dy = -step
+  else if (e.key === 'ArrowDown') dy = step
+  else return
+  e.preventDefault()
+  pushUndo()
+  for (const i of targets) {
+    const f = activeTpl.value.fields[i]
+    if (!f) continue
+    f.x = clamp(f.x + dx)
+    f.y = clamp(f.y + dy)
+  }
+}
+
+function clamp(v) {
+  return Math.min(100, Math.max(0, Math.round(v * 10) / 10))
+}
+
+async function saveTemplate() {
+  if (!activeTpl.value) return
+  errorMsg.value = ''
+  if (!activeDatasetId.value) {
+    errorMsg.value = '模板必须关联数据集：请先在工具栏选择数据集，再保存'
+    return
+  }
+  try {
+    const payload = JSON.parse(JSON.stringify(activeTpl.value))
+    payload.datasetId = activeDatasetId.value // 模板 × 数据集绑定：打印中心按模板直接带出
+    const saved = await window.printpress.saveTemplate(payload)
+    activeTpl.value = saved
+    await refreshLists()
+    flash('模板已保存')
+  } catch (err) {
+    errorMsg.value = extractError(err)
+  }
+}
+
+// ---- 危险操作确认（应用内统一弹窗，替代原生 confirm） ----
+const pendingConfirm = ref(null)
+
+function onConfirmConfirmed() {
+  const c = pendingConfirm.value
+  pendingConfirm.value = null
+  if (c) c.action()
+}
+
+async function removeTemplate() {
+  const t = activeTpl.value
+  if (!t || !t.id) { activeTpl.value = null; return }
+  pendingConfirm.value = {
+    message: `确定删除模板「${t.name}」？\n该操作不可恢复。`,
+    action: async () => {
+      try {
+        await window.printpress.deleteTemplate(t.id)
+        activeTpl.value = null
+        selectedIdx.value = -1
+        await refreshLists()
+        flash('模板已删除')
+      } catch (err) {
+        errorMsg.value = extractError(err)
+      }
+    },
+  }
+}
+
+async function uploadFont() {
+  errorMsg.value = ''
+  try {
+    const result = await window.printpress.uploadFontDialog()
+    if (result.canceled) return
+    fonts.value = await window.printpress.listFonts()
+    flash(`字体「${result.family}」已上传`)
+  } catch (err) {
+    errorMsg.value = extractError(err)
+  }
+}
+
+async function removeFont(file) {
+  const family = file.replace(/\.[^.]+$/, '')
+  pendingConfirm.value = {
+    message: `确定删除字体「${family}」？`,
+    action: async () => {
+      errorMsg.value = ''
+      try {
+        await window.printpress.deleteFont(file)
+        fonts.value = await window.printpress.listFonts()
+      } catch (err) {
+        errorMsg.value = extractError(err)
+      }
+    },
+  }
+}
+
+onMounted(async () => {
+  // 纸张常量由主进程下发（单一权威定义源）
+  try {
+    const env = await window.printpress.getEnv()
+    window.__PAGE_SIZES__ = env.pageSizes || []
+  } catch { window.__PAGE_SIZES__ = [] }
+  window.addEventListener('keydown', onKeydown)
+  await refreshLists()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+})
+</script>
+
+<template>
+  <section class="page">
+    <div class="page-head">
+      <h2 class="page-title">模板工坊</h2>
+      <div class="head-actions">
+        <span v-if="msg" class="ok-text">{{ msg }}</span>
+        <span v-if="errorMsg" class="error-text">{{ errorMsg }}</span>
+        <button class="btn-primary" @click="newTemplate">新建模板</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <aside class="side">
+        <h3 class="side-title">模板</h3>
+        <div class="tpl-list">
+          <button
+            v-for="t in templates"
+            :key="t.id"
+            class="tpl-item"
+            :class="{ active: activeTpl && activeTpl.id === t.id }"
+            @click="openTemplate(t.id)"
+          >
+            <span class="tpl-name">{{ t.name }}</span>
+            <span class="tpl-meta">{{ t.fieldCount }} 个字段{{ t.hasBackground ? ' · 有底图' : '' }}</span>
+          </button>
+          <p v-if="templates.length === 0" class="side-empty">还没有模板</p>
+        </div>
+
+        <h3 class="side-title">字体管理</h3>
+        <div class="font-panel">
+          <div class="font-actions">
+            <button class="btn-ghost" @click="uploadFont">上传字体</button>
+            <a
+              class="btn-ghost font-download"
+              href="https://www.maoken.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="猫啃网：国内收录最全的免费商用中文字体站（800+ 款，授权清晰），下载 ttf/otf 后点「上传字体」装入"
+            >下载字体</a>
+          </div>
+          <div class="font-list">
+            <div v-for="f in fonts.system" :key="'s-' + f.family" class="font-row">
+              <span class="font-name">{{ f.family }}</span>
+              <span class="font-tag">系统</span>
+            </div>
+            <div v-for="f in fonts.uploaded" :key="'u-' + f.file" class="font-row">
+              <span class="font-name">{{ f.family }}</span>
+              <button class="font-del" title="删除字体" @click="removeFont(f.file)">删除</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div v-if="!activeTpl" class="editor-empty">
+        <p class="hint-main">新建或打开一个模板开始排版</p>
+        <p class="hint-sub">上传底图 → 选数据集 → 摆放字段 → 保存</p>
+      </div>
+
+      <div v-else class="editor">
+        <div class="toolbar">
+          <input v-model="activeTpl.name" class="name-input" placeholder="模板名称" />
+          <CustomSelect
+            :model-value="activeTpl.pageSize.id"
+            :options="pageSizeOptions"
+            width="130px"
+            @change="onPageSizeChange"
+          />
+          <button class="btn-ghost" @click="uploadBackground">上传底图</button>
+          <CustomSelect
+            v-model="activeDatasetId"
+            :options="datasetOptions"
+            placeholder="选择数据集"
+            width="150px"
+          />
+          <button class="btn-ghost btn-icon" :disabled="!canUndo" title="撤销（Ctrl+Z）" @click="undo">撤销</button>
+          <button class="btn-ghost btn-icon" :disabled="!canRedo" title="重做（Ctrl+Y）" @click="redo">重做</button>
+          <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）按 x 顺序等距排成一行，y 取中位数" @click="applyEvenRow">均分横排</button>
+          <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）中 x 相近的对齐成一列" @click="applyColumnSnap">列对齐</button>
+          <button class="btn-primary" @click="saveTemplate">保存</button>
+          <button class="btn-danger" @click="removeTemplate">删除</button>
+        </div>
+
+        <!-- 多选对齐条：选中 ≥2 个字段时出现 -->
+        <div v-if="multiSel.size > 1" class="align-bar">
+          <span class="align-label">已选 {{ multiSel.size }} 个字段</span>
+          <button class="btn-ghost btn-mini" @click="alignSelected('left')">左对齐</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('center-h')">水平居中</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('right')">右对齐</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('top')">顶对齐</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('center-v')">垂直居中</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('bottom')">底对齐</button>
+        </div>
+
+        <p v-if="!activeDatasetId" class="warn-line">先选择数据集，字段面板和真实数据预览才会出现</p>
+        <p v-if="activeDatasetId && hiddenFieldCount" class="warn-line">
+          {{ hiddenFieldCount }} 个字段未启用打印（数据表格列头点「印」可开启）
+        </p>
+        <p v-if="bgRatioWarn" class="warn-line warn-strong">{{ bgRatioWarn }}</p>
+
+        <!-- 字段面板：数据页启用「印」的字段平铺于此，点击即加入画布 -->
+        <div v-if="activeDatasetId" class="field-palette">
+          <span class="palette-label">字段面板</span>
+          <button
+            v-for="opt in fieldOptions"
+            :key="opt.value"
+            class="palette-chip"
+            :disabled="opt.disabled"
+            :title="opt.disabled ? '整列为空，点击后打印将留空' : `点击把「${opt.label}」加入画布`"
+            @click="addField(opt.value)"
+          >{{ opt.label }}</button>
+          <span v-if="!fieldOptions.length" class="palette-empty">
+            没有已启用的字段——去数据页表格列头点「印」开启
+          </span>
+        </div>
+
+        <div class="workbench">
+          <div class="canvas-wrap">
+            <div
+              ref="canvasEl"
+              class="canvas"
+              :style="{ height: canvasH + 'px' }"
+            >
+              <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+              <!-- 吸附辅助线（朱砂红，拖拽靠近时出现） -->
+              <div v-if="guideV !== null" class="snap-guide guide-v" :style="{ left: guideV + 'px' }"></div>
+              <div v-if="guideH !== null" class="snap-guide guide-h" :style="{ top: guideH + 'px' }"></div>
+              <div
+                v-for="(f, idx) in activeTpl.fields"
+                :key="idx"
+                class="field-box"
+                :class="{
+                  selected: idx === selectedIdx,
+                  inmulti: multiSel.has(idx) && multiSel.size > 1,
+                  nodata: fieldEmpty(f) && !fieldMissing(f),
+                  stale: fieldMissing(f),
+                }"
+                :style="fieldStyle(f)"
+                @pointerdown.prevent="onFieldPointerDown($event, idx)"
+              >
+                {{ fieldText(f) }}
+              </div>
+              <p v-if="activeTpl.fields.length === 0" class="canvas-hint">
+                {{ activeDatasetId ? '点击上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
+              </p>
+            </div>
+          </div>
+
+          <aside class="props" :class="{ disabled: !selectedField }">
+            <h3 class="side-title">字段属性</h3>
+            <template v-if="selectedField">
+              <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">
+                该字段的数据列在当前数据集中不存在——请删除本字段，或从上方字段面板重新添加
+              </div>
+              <div v-if="selectedFill" class="fill-badge" :class="{ warn: selectedFill.suggestSkip }">
+                填充 {{ selectedFill.fill }}<template v-if="selectedFill.suggestSkip"> · 建议跳过</template>
+              </div>
+              <label class="prop-row">
+                <span class="prop-label">显示名</span>
+                <input v-model="selectedField.label" class="prop-input" @focus="pushUndo" />
+              </label>
+              <div class="prop-row">
+                <span class="prop-label">字体</span>
+                <CustomSelect v-model="selectedField.fontFamily" :options="fontOptions" width="130px" @open="pushUndo" />
+              </div>
+              <label class="prop-row">
+                <span class="prop-label">字号 pt</span>
+                <input v-model.number="selectedField.fontSize" type="number" min="6" max="200" class="prop-input" @focus="pushUndo" />
+              </label>
+              <label class="prop-row">
+                <span class="prop-label">颜色</span>
+                <input v-model="selectedField.color" type="color" class="prop-color" @pointerdown="pushUndo" />
+              </label>
+              <div class="prop-row">
+                <span class="prop-label">对齐</span>
+                <CustomSelect
+                  v-model="selectedField.align"
+                  :options="[
+                    { value: 'left', label: '左对齐' },
+                    { value: 'center', label: '居中' },
+                    { value: 'right', label: '右对齐' },
+                  ]"
+                  width="130px"
+                  @open="pushUndo"
+                />
+              </div>
+              <label class="prop-row">
+                <span class="prop-label">加粗</span>
+                <input v-model="selectedField.bold" type="checkbox" class="prop-check" @pointerdown="pushUndo" />
+              </label>
+              <div class="prop-row">
+                <span class="prop-label">位置</span>
+                <span class="prop-meta">x {{ selectedField.x }}% · y {{ selectedField.y }}%</span>
+              </div>
+              <button class="btn-danger prop-remove" @click="removeField">移除字段</button>
+              <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除</p>
+            </template>
+            <p v-else class="props-empty">点击画布中的字段查看属性，拖拽调整位置</p>
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <!-- 危险操作确认（删除模板/字体） -->
+    <ConfirmDialog
+      v-if="pendingConfirm"
+      title="确认删除"
+      :message="pendingConfirm.message"
+      confirm-text="删除"
+      @confirm="onConfirmConfirmed"
+      @cancel="pendingConfirm = null"
+    />
+  </section>
+</template>
+
+<style scoped>
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 18px;
+  color: var(--ink);
+  border-left: 4px solid var(--cinnabar);
+  padding-left: 10px;
+}
+
+.head-actions { display: flex; align-items: center; gap: 12px; }
+
+.ok-text { font-size: 12px; color: var(--ok); }
+.error-text { font-size: 12px; color: var(--cinnabar); }
+
+.btn-primary {
+  padding: 7px 18px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 6px;
+  background: var(--cinnabar);
+  color: #fff;
+  font-size: 13px;
+}
+
+.btn-ghost {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.btn-ghost:hover { border-color: var(--cinnabar); color: var(--cinnabar); }
+
+.btn-danger {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--cinnabar);
+  font-size: 12px;
+}
+
+.btn-danger:hover { border-color: var(--cinnabar); background: var(--cinnabar-soft); }
+
+.layout { display: flex; gap: 20px; align-items: flex-start; }
+
+.side { width: 230px; flex-shrink: 0; }
+
+.side-title {
+  font-size: 13px;
+  color: var(--ink-2);
+  margin: 0 0 8px;
+  padding-left: 8px;
+  border-left: 3px solid var(--line-strong);
+}
+
+.tpl-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 20px; }
+
+.tpl-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-card);
+  text-align: left;
+}
+
+.tpl-item:hover { border-color: var(--line-strong); }
+.tpl-item.active { border-color: var(--cinnabar); background: var(--cinnabar-soft); }
+
+.tpl-name { font-size: 13px; font-weight: 600; color: var(--ink); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-meta { font-size: 11px; color: var(--stone); }
+.side-empty { font-size: 12px; color: var(--stone); }
+
+.font-panel { display: flex; flex-direction: column; gap: 8px; }
+
+.font-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.font-actions .btn-ghost { flex: 1; }
+
+.font-download {
+  text-decoration: none;
+  text-align: center;
+  color: var(--stone);
+}
+
+.font-download:hover { border-color: var(--cinnabar); color: var(--cinnabar); }
+.font-list { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
+
+.font-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+}
+
+.font-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.font-tag { font-size: 10px; color: var(--stone); border: 1px solid var(--line); border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+
+.font-del {
+  border: none;
+  background: transparent;
+  color: var(--cinnabar);
+  font-size: 11px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+
+.editor-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 15vh;
+}
+
+.hint-main { font-size: 15px; color: var(--ink-2); }
+.hint-sub { font-size: 12px; color: var(--stone); }
+
+.editor { flex: 1; min-width: 0; }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-card);
+  margin-bottom: 10px;
+}
+
+.name-input {
+  width: 140px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.warn-line { font-size: 12px; color: var(--stone); margin: 4px 0; }
+.warn-strong { color: var(--warn); }
+
+.workbench { display: flex; gap: 16px; align-items: flex-start; }
+
+.canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
+
+.canvas {
+  position: relative;
+  width: 760px;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.canvas-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+}
+
+.field-box {
+  position: absolute;
+  max-width: 90%;
+  padding: 2px 6px;
+  border: 1px dashed transparent;
+  cursor: move;
+  user-select: none;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.field-box:hover { border-color: var(--line-strong); }
+
+.field-box.selected {
+  border-color: var(--cinnabar);
+  outline: 1px solid var(--cinnabar-soft);
+}
+
+.field-box.nodata {
+  opacity: 0.45;
+  border: 1px dashed var(--cinnabar);
+}
+
+/* 失效字段：数据列不存在——朱砂警示标，一眼定位打印中心「字段不匹配」的来源 */
+.field-box.stale {
+  border: 1px dashed var(--cinnabar);
+  background: var(--cinnabar-soft);
+}
+
+.field-box.stale::after {
+  content: '已失效';
+  position: absolute;
+  top: -15px;
+  left: -1px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--cinnabar);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.canvas-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--stone);
+  font-size: 13px;
+}
+
+.props {
+  width: 210px;
+  flex-shrink: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-card);
+}
+
+.props.disabled { opacity: 0.75; }
+
+.prop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.prop-label { font-size: 12px; color: var(--ink-2); flex-shrink: 0; }
+
+.prop-input {
+  width: 120px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.prop-color { width: 60px; height: 28px; border: 1px solid var(--line-strong); background: var(--input-bg); }
+
+.btn-icon { padding: 6px 10px; }
+.btn-icon:disabled { opacity: 0.4; cursor: default; }
+
+.align-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 6px;
+  background: var(--cinnabar-soft);
+}
+
+/* ---- 字段面板：数据页启用「印」的字段，点击即加入画布 ---- */
+.field-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--paper-card);
+}
+
+.palette-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--stone);
+}
+
+.palette-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.palette-chip:hover:not(:disabled) {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+}
+
+.palette-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.palette-empty { font-size: 12px; color: var(--stone); }
+
+.align-label { font-size: 12px; color: var(--cinnabar); margin-right: 4px; }
+
+.btn-mini { padding: 3px 10px; font-size: 12px; }
+
+.snap-guide {
+  position: absolute;
+  background: var(--cinnabar);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.guide-v { top: 0; bottom: 0; width: 1px; }
+.guide-h { left: 0; right: 0; height: 1px; }
+
+.field-box.inmulti {
+  border-color: var(--cinnabar);
+  border-style: dashed;
+}
+
+.fill-badge {
+  font-size: 11px;
+  color: var(--ok);
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  padding: 1px 8px;
+  width: fit-content;
+  margin-bottom: 10px;
+}
+
+.fill-badge.warn {
+  color: var(--cinnabar);
+  border-color: var(--cinnabar);
+}
+
+.fill-badge.warn-strong {
+  color: #fff;
+  border-color: var(--cinnabar);
+  background: var(--cinnabar);
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.kbd-hint {
+  font-size: 11px;
+  color: var(--stone);
+  margin: 10px 0 0;
+  line-height: 1.6;
+}
+
+.prop-check { width: 16px; height: 16px; accent-color: var(--cinnabar); }
+
+.prop-meta { font-size: 11px; color: var(--stone); }
+
+.prop-remove { width: 100%; margin-top: 4px; }
+
+.props-empty { font-size: 12px; color: var(--stone); }
+</style>

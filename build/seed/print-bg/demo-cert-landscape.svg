@@ -1,0 +1,12 @@
+<svg viewBox="0 0 1754 1240" width="1754" height="1240" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1754" height="1240" fill="#faf7ef"/>
+      <rect x="36" y="36" width="1682" height="1168" fill="none" stroke="#b08d3f" stroke-width="5"/>
+      <rect x="56" y="56" width="1642" height="1128" fill="none" stroke="#b08d3f" stroke-width="1.5"/>
+      <circle cx="36" cy="36" r="14" fill="#b08d3f"/>
+      <circle cx="1718" cy="36" r="14" fill="#b08d3f"/>
+      <circle cx="36" cy="1204" r="14" fill="#b08d3f"/>
+      <circle cx="1718" cy="1204" r="14" fill="#b08d3f"/>
+      <text x="877" y="300" text-anchor="middle" font-family="SimSun,KaiTi,serif" font-size="130" font-weight="bold" fill="#8a6a2f" letter-spacing="30">荣誉证书</text>
+      <rect x="577" y="346" width="600" height="3" fill="#b08d3f"/>
+      <text x="877" y="1130" text-anchor="middle" font-family="SimSun,serif" font-size="36" fill="#8c8577" letter-spacing="8">CERTIFICATE OF HONOR</text>
+    </svg>

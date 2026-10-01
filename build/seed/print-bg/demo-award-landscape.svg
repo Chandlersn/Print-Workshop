@@ -1,0 +1,12 @@
+<svg viewBox="0 0 1754 1240" width="1754" height="1240" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1754" height="1240" fill="#fbf6e8"/>
+      <rect x="28" y="28" width="1698" height="1184" fill="none" stroke="#b03a2e" stroke-width="7"/>
+      <rect x="48" y="48" width="1658" height="1144" fill="none" stroke="#b03a2e" stroke-width="2"/>
+      <rect x="16" y="16" width="24" height="24" fill="#b03a2e"/>
+      <rect x="1714" y="16" width="24" height="24" fill="#b03a2e"/>
+      <rect x="16" y="1200" width="24" height="24" fill="#b03a2e"/>
+      <rect x="1714" y="1200" width="24" height="24" fill="#b03a2e"/>
+      <text x="877" y="290" text-anchor="middle" font-family="KaiTi,SimSun,serif" font-size="150" font-weight="bold" fill="#b03a2e" letter-spacing="40">奖 状</text>
+      <rect x="677" y="340" width="400" height="4" fill="#b08d3f"/>
+      <text x="877" y="1140" text-anchor="middle" font-family="KaiTi,SimSun,serif" font-size="40" fill="#b08d3f" letter-spacing="10">荣誉见证 · 一路同行</text>
+    </svg>

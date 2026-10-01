@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+data/*.json
+data/*.tmp
+test/.tmp-*/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+data/print-bg/
+data/print-fonts/

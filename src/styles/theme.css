@@ -1,0 +1,57 @@
+/* 宣纸墨韵主题 token —— 全项目唯一色彩与质感定义源 */
+:root {
+  --paper: #f6f2e9;      /* 米白底 */
+  --paper-card: #fbf8f1; /* 卡片面 */
+  --ink: #2b2622;        /* 墨黑字 */
+  --ink-2: #6f675c;      /* 次级墨色 */
+  --line: #ddd4c3;       /* 淡墨描线 */
+  --line-strong: #c9bda6;
+  --cinnabar: #b03a2e;   /* 朱砂红 */
+  --cinnabar-soft: #f3e0dd;
+  --stone: #8c8577;      /* 石灰色（禁用/次级） */
+  --ok: #4a7c59;         /* 印章绿（成功态） */
+  --ok-soft: #eef3ee;    /* 印章绿软底 */
+  --ok-line: #c8d8c8;    /* 印章绿描线 */
+  --warn: #a8742c;       /* 琥珀警示 */
+  --cinnabar-line: #e3c4bf; /* 朱砂软描线 */
+  --shadow: 0 1px 4px rgba(43, 38, 34, 0.08);
+  --input-bg: #ffffff;   /* 输入控件底（暗色下切换） */
+}
+
+/* 暗色模式：夜宣纸（深褐底 / 米白字 / 朱砂提亮保对比度）。
+   对比度均已按 WCAG AA 校验：ink/paper ≈ 12:1，ink-2/paper-card ≈ 6.5:1，
+   cinnabar/paper-card ≈ 5.2:1（正常文字达标），stone 仅用于 ≥12px 辅助文字。 */
+:root[data-theme='dark'] {
+  --paper: #211c17;
+  --paper-card: #2a241d;
+  --ink: #ece5d8;
+  --ink-2: #bdb29d;
+  --line: #3d352b;
+  --line-strong: #55493a;
+  --cinnabar: #e06a5c;
+  --cinnabar-soft: #3f2a25;
+  --stone: #948b7c;
+  --ok: #7fb895;
+  --ok-soft: #22301f;
+  --ok-line: #3f5a44;
+  --warn: #d9a15e;
+  --cinnabar-line: #6b3c35;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  --input-bg: #1c1813;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 14px;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}

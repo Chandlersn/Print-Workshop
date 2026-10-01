@@ -1,0 +1,11 @@
+<svg viewBox="0 0 1240 1754" width="1240" height="1754" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1240" height="1754" fill="#fbf6e8"/>
+      <rect x="30" y="30" width="1180" height="1694" fill="none" stroke="#b03a2e" stroke-width="6"/>
+      <rect x="50" y="50" width="1140" height="1654" fill="none" stroke="#b03a2e" stroke-width="2"/>
+      <path d="M 30 30 h 120 M 30 30 v 120" stroke="#b03a2e" stroke-width="10" fill="none"/>
+      <path d="M 1210 30 h -120 M 1210 30 v 120" stroke="#b03a2e" stroke-width="10" fill="none"/>
+      <path d="M 30 1724 h 120 M 30 1724 v -120" stroke="#b03a2e" stroke-width="10" fill="none"/>
+      <path d="M 1210 1724 h -120 M 1210 1724 v -120" stroke="#b03a2e" stroke-width="10" fill="none"/>
+      <text x="620" y="340" text-anchor="middle" font-family="KaiTi,SimSun,serif" font-size="130" font-weight="bold" fill="#b03a2e" letter-spacing="40">证 书</text>
+      <rect x="470" y="388" width="300" height="4" fill="#b08d3f"/>
+    </svg>
