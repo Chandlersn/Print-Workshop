@@ -11,9 +11,9 @@
  * PRINTPRESS_UPDATE_URL 环境变量可覆盖检测地址（测试与私有部署用）。
  */
 
-const UPDATE_INFO_URL = 'https://cdn.jsdelivr.net/gh/PLACEHOLDER/REPO@main/latest.json'
-const RELEASES_URL = 'https://github.com/PLACEHOLDER/REPO/releases'
-const FEEDBACK_URL = 'https://github.com/PLACEHOLDER/REPO/issues'
+const UPDATE_INFO_URL = 'https://cdn.jsdelivr.net/gh/Chandlersn/Print-Workshop@main/latest.json'
+const RELEASES_URL = 'https://github.com/Chandlersn/Print-Workshop/releases'
+const FEEDBACK_URL = 'https://github.com/Chandlersn/Print-Workshop/issues'
 
 const CHECK_TIMEOUT_MS = 3000
 
