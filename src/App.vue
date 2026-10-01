@@ -134,6 +134,10 @@ async function onCheckUpdate() {
   }
 }
 
+async function onOpenGuide() {
+  try { await window.printpress.openGuide() } catch { /* 打开失败交系统报错，不阻塞 */ }
+}
+
 onMounted(async () => {
   try {
     const settings = await window.printpress.loadData('settings') || {}
@@ -253,6 +257,10 @@ onMounted(async () => {
               <span v-else-if="checkState === 'current'" class="cr cr-ok">已是最新</span>
               <span v-else-if="checkState === 'unavailable'" class="cr cr-fail">检测失败（离线或网络受限）</span>
             </span>
+          </div>
+          <div class="about-row">
+            <span class="ar-label">使用说明</span>
+            <button class="footer-btn" @click="onOpenGuide">打开使用说明</button>
           </div>
           <div class="about-row">
             <span class="ar-label">下载 / 更新</span>

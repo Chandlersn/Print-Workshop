@@ -27,6 +27,9 @@ contextBridge.exposeInMainWorld('printpress', {
     return () => ipcRenderer.removeListener('update:available', handler)
   },
 
+  // 使用说明：打开随包分发的本地 HTML
+  openGuide: () => ipcRenderer.invoke('app:openGuide'),
+
   // 通用 JSON 存储（后续被领域通道取代，M1 起逐步收敛）
   loadData: (name) => ipcRenderer.invoke('store:load', name),
   saveData: (name, value) => ipcRenderer.invoke('store:save', name, value),

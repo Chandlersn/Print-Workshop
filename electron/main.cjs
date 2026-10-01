@@ -139,6 +139,16 @@ function main() {
   ipcMain.handle('app:checkUpdate', async () =>
     versionCheck.checkForUpdate({ currentVersion: app.getVersion() }))
 
+  // 使用说明：随包分发的本地 HTML（宣纸墨韵），交系统默认浏览器打开
+  ipcMain.handle('app:openGuide', async () => {
+    const guidePath = app.isPackaged
+      ? path.join(process.resourcesPath, 'usage-guide.html')
+      : path.join(app.getAppPath(), 'docs', 'usage-guide.html')
+    const err = await shell.openPath(guidePath) // 成功返回空串，失败返回错误描述
+    if (err) throw new Error(err)
+    return { ok: true }
+  })
+
   // IPC 通道装配（store / 后续 dataset / template / print 引擎都在这里挂载）
   const { registerIpc } = require('./ipc.cjs')
   registerIpc()
