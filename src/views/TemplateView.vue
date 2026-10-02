@@ -10,7 +10,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { evenRow, columnSnap } from '../lib/field-layout.cjs'
+import { evenRow, columnSnap, anchorRatio } from '../lib/field-layout.cjs'
 
 const CANVAS_W = 760 // 画布显示宽度 px
 const SNAP_PX = 6    // 吸附阈值（像素，源项目同值）
@@ -468,10 +468,18 @@ function removeField() {
   multiSel.value = new Set()
 }
 
+/**
+ * 字段锚点比例来自 field-layout.cjs（与渲染引擎同一口径）：align=center 时锚点在盒中心
+ * （出片 translateX(-50%)，画布同样位移），right 在右缘，left 在左缘。
+ * 盒左缘 = x% - ratio × 盒宽 —— 拖拽 / 吸附 / 对齐换算都要过这个函数。
+ * v0.2.3 前画布缺这段位移，导致「画布看着居中、出片偏左半个身位」。
+ */
 function fieldStyle(f) {
+  const shift = anchorRatio(f)
   return {
     left: `${f.x}%`,
     top: `${f.y}%`,
+    transform: shift ? `translateX(-${shift * 100}%)` : 'none',
     fontSize: `${ptToPx(f.fontSize)}px`,
     color: f.color,
     fontFamily: f.fontFamily ? `"${f.fontFamily}"` : 'inherit',
@@ -529,6 +537,9 @@ function onFieldPointerDown(e, idx) {
   const ownRect = ownEl ? ownEl.getBoundingClientRect() : rect
   const boxW = ownRect.width
   const boxH = ownRect.height
+  // 抓取点相对「锚点」的偏移：锚点是 x% 对应的那条线（居中字段即盒中心线），
+  // 减去锚点在盒内的比例，pointermove 才能反解出正确的 x
+  const grabOffX = boxW * anchorRatio(f)
   const targetsV = [rect.width / 2]
   const targetsH = [rect.height / 2]
   refEl.querySelectorAll('.field-box').forEach((el, i) => {
@@ -540,12 +551,13 @@ function onFieldPointerDown(e, idx) {
 
   dragState.value = {
     idx,
-    grabX: e.clientX - rect.left - (f.x / 100) * rect.width,
+    grabX: e.clientX - rect.left - (f.x / 100) * rect.width + grabOffX,
     grabY: e.clientY - rect.top - (f.y / 100) * rect.height,
     rect,
     starts,
     boxW,
     boxH,
+    ratio: anchorRatio(f),
     targetsV,
     targetsH,
   }
@@ -588,12 +600,14 @@ function onPointerMove(e) {
     }
   }
 
-  // 吸附检测（以主拖拽字段为准）
+  // 吸附检测（以主拖拽字段为准）。三个自身边缘都要换算到「锚点 - 边缘 = 偏移」的口径：
+  // 盒左缘 = 锚点px - ratio×盒宽，故 pxX(f.x) 是锚点线，盒左/中/右需各自减去对应偏移
   const own = d.starts.find((s) => s.i === d.idx)
   const pxX = (v) => (v / 100) * d.rect.width
   const pxY = (v) => (v / 100) * d.rect.height
+  const off = d.ratio * d.boxW
   const snapV = snap(
-    [[pxX(f.x), 'l'], [pxX(f.x) + d.boxW / 2, 'c'], [pxX(f.x) + d.boxW, 'r']],
+    [[pxX(f.x) - off, 'l'], [pxX(f.x) - off + d.boxW / 2, 'c'], [pxX(f.x) - off + d.boxW, 'r']],
     d.targetsV,
   )
   const snapH = snap(
@@ -644,9 +658,12 @@ function alignSelected(kind) {
   const H = refRect.height
   for (const b of boxes) {
     const f = activeTpl.value.fields[b.i]
-    if (kind === 'left') f.x = clamp((minLeft / W) * 100)
-    if (kind === 'center-h') f.x = clamp(((minLeft + maxRight) / 2 - b.w / 2) / W * 100)
-    if (kind === 'right') f.x = clamp(((maxRight - b.w) / W) * 100)
+    // 对齐目标是盒边缘的像素位置，f.x 是锚点：写入时按该字段的对齐方式把边缘换算回锚点
+    // （居中字段锚点在盒中心，故左对齐时 x = 目标左缘 + 半个盒宽）
+    const r = anchorRatio(f)
+    if (kind === 'left') f.x = clamp(((minLeft + r * b.w) / W) * 100)
+    if (kind === 'center-h') f.x = clamp((((minLeft + maxRight) / 2) / W) * 100)
+    if (kind === 'right') f.x = clamp(((maxRight - (1 - r) * b.w) / W) * 100)
     if (kind === 'top') f.y = clamp((minTop / H) * 100)
     if (kind === 'center-v') f.y = clamp(((minTop + maxBottom) / 2 - b.h / 2) / H * 100)
     if (kind === 'bottom') f.y = clamp(((maxBottom - b.h) / H) * 100)
