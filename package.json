@@ -1,6 +1,6 @@
 {
   "name": "printpress",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "批印坊 PrintPress - 本地离线通用批量打印工具",
   "type": "module",
   "main": "electron/main.cjs",

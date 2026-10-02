@@ -102,7 +102,9 @@ async function main() {
     // ---- 模板工坊：打开多联模板 ----
     await evalJs(`[...document.querySelectorAll('.nav-item')].find(e=>e.querySelector('.nav-label')?.textContent.trim()==='模板')?.click()`)
     await sleep(800)
-    await evalJs(`document.querySelector('.tpl-item')?.click()`)
+    // 按名字精确点，不取第一个：v0.2.3 起模板按 updatedAt 倒序（最近编辑置顶），
+    // 首位的可能是种子模板而非本套件的夹具模板
+    await evalJs(`[...document.querySelectorAll('.tpl-item')].find(e=>e.textContent.includes('e2e-多联模板'))?.click()`)
     await sleep(2000)
 
     const studio = (await evalJs(
@@ -146,7 +148,8 @@ async function main() {
     await sleep(800)
     await evalJs(`document.querySelector('.toolbar .custom-select .cs-trigger')?.click()`)
     await sleep(400)
-    await evalJs(`document.querySelector('.cs-menu .cs-option')?.click()`)
+    // 同上：按名字选，别取第一个（模板按最近编辑置序，种子模板可能排在夹具前面）
+    await evalJs(`[...document.querySelectorAll('.cs-menu .cs-option')].find(e=>e.textContent.includes('e2e-多联模板'))?.click()`)
     await sleep(2500)
 
     const preview = (await evalJs(

@@ -10,8 +10,13 @@ const fs = require('fs')
 const { rmDeep } = require('./helpers/rm.cjs')
 
 const ROOT = path.join(__dirname, '..')
-const EXE = process.env.PRINTPRESS_EXE
-  || path.join(ROOT, 'release', 'win-unpacked', '批印坊.exe')
+// 打包目录不固定（换目录避开占用时会产生 release-024 之类），按候选列表取第一个存在的
+const EXE_CANDIDATES = [
+  process.env.PRINTPRESS_EXE,
+  path.join(ROOT, 'release', 'win-unpacked', '批印坊.exe'),
+  path.join(ROOT, 'release-024', 'win-unpacked', '批印坊.exe'),
+].filter(Boolean)
+const EXE = EXE_CANDIDATES.find((p) => fs.existsSync(p)) || EXE_CANDIDATES[1]
 const PORT = 9470
 const DATA = path.join(__dirname, '.tmp-data-jump')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -56,8 +61,10 @@ function seed() {
   }]
   fs.writeFileSync(path.join(DATA, 'datasets.json'), JSON.stringify(datasets))
   fs.writeFileSync(path.join(DATA, 'templates.json'), JSON.stringify(templates))
-  // 阻止首启种子：目录全新时 seedIfFirstRun 会种入示例数据，干扰确定性断言
-  fs.writeFileSync(path.join(DATA, 'settings.json'), JSON.stringify({ demoSeeded: true }))
+  // 阻止首启种子：目录全新时 seedIfFirstRun 会种入示例数据，干扰确定性断言。
+  // 必须写 seedVersion —— ver = seedVersion || (demoSeeded ? 1 : 0)，
+  // 只写 demoSeeded 会被判成 ver=1 而走「迁移」分支，照样种进示例数据。
+  fs.writeFileSync(path.join(DATA, 'settings.json'), JSON.stringify({ demoSeeded: true, seedVersion: 2 }))
 }
 
 async function main() {
@@ -107,7 +114,8 @@ async function main() {
     await sleep(800)
     await evalJs(`document.querySelector('.toolbar .custom-select .cs-trigger')?.click()`)
     await sleep(400)
-    await evalJs(`document.querySelector('.cs-menu .cs-option')?.click()`)
+    // 按名字选，不取第一个：模板按最近编辑置序，种子模板可能排在夹具前面
+    await evalJs(`[...document.querySelectorAll('.cs-menu .cs-option')].find(e=>e.textContent.includes('e2e-空值模板'))?.click()`)
     await sleep(2500) // 等预览渲染
     await evalJs(`[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='导出 PDF')?.click()`)
     await sleep(1500)

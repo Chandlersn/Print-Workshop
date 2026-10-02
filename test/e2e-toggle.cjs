@@ -6,7 +6,13 @@ const path = require('path')
 const fs = require('fs')
 const { rmDeep } = require('./helpers/rm.cjs')
 
-const EXE = path.join(__dirname, '..', 'release', 'win-unpacked', '批印坊.exe')
+// 打包目录不固定（换目录避开占用时会产生 release-024 之类），按候选列表取第一个存在的
+const EXE_CANDIDATES = [
+  process.env.PRINTPRESS_EXE,
+  path.join(__dirname, '..', 'release', 'win-unpacked', '批印坊.exe'),
+  path.join(__dirname, '..', 'release-024', 'win-unpacked', '批印坊.exe'),
+].filter(Boolean)
+const EXE = EXE_CANDIDATES.find((p) => fs.existsSync(p)) || EXE_CANDIDATES[1]
 const PORT = 9333
 const DATA = path.join(__dirname, '.tmp-data-e2e-toggle')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -27,8 +33,10 @@ function seed() {
   const datasets = [mk('ds-zero', 'e2e-zero.csv', 0), mk('ds-two', 'e2e-two.csv', 2), mk('ds-one', 'e2e-one.csv', 1)]
   fs.writeFileSync(path.join(DATA, 'datasets.json'), JSON.stringify(datasets))
   fs.writeFileSync(path.join(DATA, 'templates.json'), '[]')
-  // 阻止首启种子：目录全新时 seedIfFirstRun 会种入 demo.csv 示例数据，干扰确定性断言
-  fs.writeFileSync(path.join(DATA, 'settings.json'), JSON.stringify({ demoSeeded: true }))
+  // 阻止首启种子：目录全新时 seedIfFirstRun 会种入 demo.csv 示例数据，干扰确定性断言。
+  // 必须写 seedVersion —— seedIfFirstRun 算 ver = seedVersion || (demoSeeded ? 1 : 0)，
+  // 只写 demoSeeded 会被判成 ver=1 而走「迁移」分支，照样种进「示例名单·扩展」。
+  fs.writeFileSync(path.join(DATA, 'settings.json'), JSON.stringify({ demoSeeded: true, seedVersion: 2 }))
 }
 
 let pass = 0, fail = 0

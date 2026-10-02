@@ -116,7 +116,8 @@ async function main() {
     await sleep(800)
     await evalJs(`document.querySelector('.toolbar .custom-select .cs-trigger')?.click()`)
     await sleep(400)
-    await evalJs(`document.querySelector('.cs-menu .cs-option')?.click()`)
+    // 按名字选，不取第一个：模板按最近编辑置序，种子模板可能排在夹具前面
+    await evalJs(`[...document.querySelectorAll('.cs-menu .cs-option')].find(e=>e.textContent.includes('e2e-范围模板'))?.click()`)
     await sleep(2500) // 等预览 + 行数据加载
 
     // ---- 1. 默认应为全量 ----
