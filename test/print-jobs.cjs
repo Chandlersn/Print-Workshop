@@ -69,6 +69,26 @@ function main() {
   print.deleteJob(j3.id)
   ok(print.listJobs().length === 1 && print.listJobs()[0].id === j4.id, '删除不影响其他记录')
 
+  console.log('== 取消态不落盘快照 ==')
+  // 点了打印又取消：状态标 canceled，但不在磁盘写归档快照（无意义且占空间）
+  const jc = print.createJob({
+    templateId: 'tpl_t9',
+    templateName: '测试模板',
+    datasetId: 'ds_d9',
+    datasetName: '测试数据集',
+    mode: 'print',
+    recordCount: 5,
+    snapshotHtml: '<html>x</html>', // 即便传了快照内容也应被忽略
+    status: 'canceled',
+  })
+  ok(jc.status === 'canceled', '状态标记为取消')
+  ok(jc.snapshot === null, '取消态快照路径为 null', jc.snapshot)
+  ok(print.listJobs().some((j) => j.id === jc.id), '取消记录仍入历史')
+  // 取消态删除：无归档目录，仅删元数据且不报错
+  const rc = print.deleteJob(jc.id)
+  ok(rc.ok && rc.archiveRemoved, '取消态删除仍成功（无归档目录）', rc)
+  ok(!print.listJobs().some((j) => j.id === jc.id), '取消记录元数据已移除')
+
   rmDeep(TMP)
   console.log(`\n结果: ${passed} 项断言通过, ${failed} 项失败`)
   process.exit(failed ? 1 : 0)

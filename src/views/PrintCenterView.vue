@@ -548,7 +548,7 @@ onMounted(refreshAll)
             <td>{{ j.recordCount }}</td>
             <td><span class="det-flag" :class="'st-' + j.status">{{ statusLabel[j.status] || j.status }}</span></td>
             <td class="row-actions">
-              <button class="btn btn-mini" @click="openSnapshot(j.id)">归档件</button>
+              <button v-if="j.snapshot" class="btn btn-mini" @click="openSnapshot(j.id)">查看</button>
               <button class="btn btn-mini" :disabled="busy" @click="reprint(j)">重打</button>
               <button class="btn btn-mini job-del" @click="deleteJob(j)">删除</button>
             </td>

@@ -136,6 +136,38 @@ async function onCheckUpdate() {
   }
 }
 
+// 系统缓存：大小查询 + 一键释放（显示与按钮二合一）
+const cacheSize = ref(0)
+const clearingCache = ref(false)
+
+function fmtCacheSize(bytes) {
+  if (!bytes || bytes < 1024) return '0 KB'
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function openAbout() {
+  showAbout.value = true
+  refreshCacheInfo()
+}
+
+async function refreshCacheInfo() {
+  try {
+    const r = await window.printpress.getCacheInfo()
+    cacheSize.value = r && r.size ? r.size : 0
+  } catch { cacheSize.value = 0 }
+}
+
+async function onClearCache() {
+  if (clearingCache.value) return
+  clearingCache.value = true
+  try {
+    await window.printpress.clearCache()
+    await refreshCacheInfo()
+  } catch { /* 清理失败不阻塞，重试即可 */ }
+  finally { clearingCache.value = false }
+}
+
 onMounted(async () => {
   try {
     const settings = await window.printpress.loadData('settings') || {}
@@ -178,7 +210,7 @@ onMounted(async () => {
         {{ theme === 'dark' ? '浅色' : '深色' }}
       </button>
       <button class="theme-toggle" @click="showGuide = true">说明</button>
-      <button class="theme-toggle" @click="showAbout = true">关于</button>
+      <button class="theme-toggle" @click="openAbout">关于</button>
     </header>
 
     <!-- 新版本横幅：启动检测到远程版本更大时出现，带出口链接，可关闭 -->
@@ -255,6 +287,15 @@ onMounted(async () => {
               <span v-if="checkState === 'newer'" class="cr cr-new">发现新版本 v{{ foundVersion }}</span>
               <span v-else-if="checkState === 'current'" class="cr cr-ok">已是最新</span>
               <span v-else-if="checkState === 'unavailable'" class="cr cr-fail">检测失败（离线或网络受限）</span>
+            </span>
+          </div>
+          <div class="about-row">
+            <span class="ar-label">系统缓存</span>
+            <span class="ar-value check-group">
+              <button class="footer-btn" :disabled="clearingCache" @click="onClearCache">
+                {{ clearingCache ? '清理中…' : '清理缓存（' + fmtCacheSize(cacheSize) + '）' }}
+              </button>
+              <span v-if="!clearingCache && cacheSize === 0" class="cr cr-ok">已无可清理缓存</span>
             </span>
           </div>
           <div class="about-row">

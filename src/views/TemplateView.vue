@@ -173,10 +173,8 @@ const canLayout = computed(() => layoutTargets().length >= 2)
 const pageSizeOptions = computed(() => {
   const sizes = window.__PAGE_SIZES__ || []
   const opts = sizes.map((p) => ({ value: p.id, label: p.name }))
-  const cur = activeTpl.value && activeTpl.value.pageSize
-  if (cur && cur.id === 'custom' && !opts.some((o) => o.value === 'custom')) {
-    opts.push({ value: 'custom', label: `自定义 ${cur.w}×${cur.h}mm` })
-  }
+  // 纸张始终是「类型操作」：预设纸型（A3/A4/A5/B5/A6 横竖）+ 自定义尺寸，二者自由组合
+  opts.push({ value: 'custom', label: '自定义尺寸' })
   return opts
 })
 
@@ -340,8 +338,25 @@ watch(activeDatasetId, (id) => {
 function onPageSizeChange(id) {
   const t = activeTpl.value
   if (!t) return
+  if (id === 'custom') {
+    // 选「自定义尺寸」：保留当前宽高，等待用户在毫米输入框中自由填写
+    t.pageSize = { id: 'custom', w: Number(t.pageSize?.w) || 210, h: Number(t.pageSize?.h) || 297 }
+    return
+  }
   const hit = (window.__PAGE_SIZES__ || []).find((p) => p.id === id)
   if (hit) t.pageSize = { id: hit.id, w: hit.w, h: hit.h }
+}
+
+// 纸张自定义尺寸（毫米自由输入）：与成品尺寸对称，两个维度都能任意匹配
+function onPageDim(which, val) {
+  const t = activeTpl.value
+  if (!t) return
+  const n = Math.min(2000, Math.max(10, Math.round(Number(val) || 0)))
+  t.pageSize = {
+    id: 'custom',
+    w: which === 'w' ? n : Number(t.pageSize?.w) || 210,
+    h: which === 'h' ? n : Number(t.pageSize?.h) || 297,
+  }
 }
 
 async function uploadBackground() {
@@ -839,12 +854,35 @@ onBeforeUnmount(() => {
       <div v-else class="editor">
         <div class="toolbar">
           <input v-model="activeTpl.name" class="name-input" placeholder="模板名称" />
+          <span class="tb-label">纸张</span>
           <CustomSelect
             :model-value="activeTpl.pageSize.id"
             :options="pageSizeOptions"
             width="130px"
             @change="onPageSizeChange"
           />
+          <template v-if="activeTpl.pageSize.id === 'custom'">
+            <input
+              class="item-input"
+              type="number"
+              min="10"
+              max="2000"
+              :value="activeTpl.pageSize.w"
+              title="纸张宽度（mm）"
+              @change="onPageDim('w', $event.target.value)"
+            />
+            <span class="tb-unit">×</span>
+            <input
+              class="item-input"
+              type="number"
+              min="10"
+              max="2000"
+              :value="activeTpl.pageSize.h"
+              title="纸张高度（mm）"
+              @change="onPageDim('h', $event.target.value)"
+            />
+            <span class="tb-unit">mm</span>
+          </template>
           <!-- 版式：单页 = 一记录一页；多联 = 一页排多个成品（画布切换为单个成品） -->
           <CustomSelect
             :model-value="layoutMode"
@@ -853,6 +891,7 @@ onBeforeUnmount(() => {
             @change="onLayoutModeChange"
           />
           <template v-if="layoutMode === 'grid'">
+            <span class="tb-label">成品</span>
             <CustomSelect
               :model-value="itemSizeId"
               :options="itemSizeOptions"
@@ -1255,6 +1294,9 @@ onBeforeUnmount(() => {
 }
 
 .tb-unit { font-size: 12px; color: var(--stone); }
+
+/* 工具栏维度标签：明确区分「纸张」（整张大纸）与「成品」（单个底图小件）两类操作 */
+.tb-label { font-size: 12px; color: var(--ink); font-weight: 600; white-space: nowrap; }
 
 .cut-toggle {
   display: flex;

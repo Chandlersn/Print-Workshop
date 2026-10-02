@@ -48,6 +48,13 @@ function parseCsvGrid(text) {
         if (text[i + 1] === '"') { field += '"'; i += 2; continue }
         inQuotes = false; i += 1; continue
       }
+      // 引号内换行规范化 CRLF/CR → LF：Windows 导出的 CSV 全文 CRLF，
+      // 若原样保留会把 \r 混进单元格数据（打印渲染/比对都会带隐性回车）
+      if (ch === '\r') {
+        field += '\n'
+        i += (text[i + 1] === '\n') ? 2 : 1
+        continue
+      }
       field += ch; i += 1
       continue
     }

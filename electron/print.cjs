@@ -172,10 +172,16 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const jobId = `job_${now.getTime().toString(36)}${crypto.randomBytes(3).toString('hex')}`
-  const jobDir = path.join(ARCHIVE_ROOT, month, jobId)
-  fs.mkdirSync(jobDir, { recursive: true })
-  const snapshotRel = `archive/${month}/${jobId}/snapshot.html`
-  fs.writeFileSync(path.join(DATA_DIR, snapshotRel), snapshotHtml || '', 'utf-8')
+  // 取消态（点了打印又取消）不落盘快照：无意义且占空间，仅留历史痕迹（状态标「取消」）。
+  // 仅 ok / failed 这类「真正出片过」的历史才产出可回看的归档快照。
+  const isCanceled = status === 'canceled'
+  let snapshotRel = null
+  if (!isCanceled) {
+    const jobDir = path.join(ARCHIVE_ROOT, month, jobId)
+    fs.mkdirSync(jobDir, { recursive: true })
+    snapshotRel = `archive/${month}/${jobId}/snapshot.html`
+    fs.writeFileSync(path.join(DATA_DIR, snapshotRel), snapshotHtml || '', 'utf-8')
+  }
 
   const isPartial = Boolean(partial)
   const job = {
@@ -220,13 +226,18 @@ function deleteJob(jobId) {
   const jobs = listJobs()
   const job = jobs.find((j) => j.id === String(jobId))
   if (!job) throw new Error(`打印记录已不存在（可能已被删除）`)
-  const jobDir = path.join(DATA_DIR, path.dirname(job.snapshot))
+  // 取消态没有归档快照（snapshot 为 null），仅删元数据即可
+  const jobDir = job.snapshot ? path.join(DATA_DIR, path.dirname(job.snapshot)) : null
   let archiveRemoved = false
-  if (fs.existsSync(jobDir)) {
-    fs.rmSync(jobDir, { recursive: true, force: true })
-    archiveRemoved = !fs.existsSync(jobDir)
+  if (jobDir) {
+    if (fs.existsSync(jobDir)) {
+      fs.rmSync(jobDir, { recursive: true, force: true })
+      archiveRemoved = !fs.existsSync(jobDir)
+    } else {
+      archiveRemoved = true // 快照本就缺失（曾被手动清理），只删元数据即可
+    }
   } else {
-    archiveRemoved = true // 快照本就缺失（曾被手动清理），只删元数据即可
+    archiveRemoved = true
   }
   saveJson(JOBS_STORE, jobs.filter((j) => j.id !== String(jobId)))
   return { ok: true, archiveRemoved }

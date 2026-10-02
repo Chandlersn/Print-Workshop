@@ -1,6 +1,6 @@
 node_modules/
 dist/
-release/
+release*/
 release-*/
 data/*.json
 data/*.tmp
@@ -10,6 +10,8 @@ vite.config.js.timestamp-*.mjs
 .DS_Store
 Thumbs.db
 desktop.ini
+# WorkBuddy 本地工作记忆（agent 会话数据，不入仓库）
+.workbuddy/
 # 私人化数据资产：只在本地，不入仓库
 docs/开发经验总结.md
 docs/开发方案.md
@@ -20,4 +22,5 @@ docs/assets/结构总览.svg
 docs/assets/路线图.svg
 data/print-bg/
 data/print-fonts/
+data/archive/
 .workbuddy-ai/

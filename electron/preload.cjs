@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('printpress', {
   openDataDir: () => ipcRenderer.invoke('app:openDataDir'),
   relaunchApp: () => ipcRenderer.invoke('app:relaunch'),
 
+  // 系统缓存：大小查询与一键释放
+  getCacheInfo: () => ipcRenderer.invoke('app:cacheInfo'),
+  clearCache: () => ipcRenderer.invoke('app:clearCache'),
+
   // 版本与更新：meta 为版本号 + 出口链接；checkUpdate 手动触发检测；
   // onUpdateAvailable 订阅启动自动检测结果（返回退订函数）
   getAppMeta: () => ipcRenderer.invoke('app:meta'),

@@ -26,6 +26,9 @@ function ok(cond, name, extra) {
 rmDeep(DATA)
 fs.mkdirSync(path.join(DATA, 'print-fonts'), { recursive: true })
 fs.writeFileSync(path.join(DATA, 'print-fonts/测试楷体.ttf'), 'FAKE_TTF')
+// 造一张真实存在的底图，验证它会被内联为 base64（而非继续走 pp://）
+fs.mkdirSync(path.join(DATA, 'print-bg'), { recursive: true })
+fs.writeFileSync(path.join(DATA, 'print-bg/bg.png'), Buffer.from('FAKE_PNG_BYTES'))
 
 const dsRows = [
   { 姓名: '张三', 奖项: '一等奖', 备注: '含<标签>&"引号' },
@@ -74,8 +77,8 @@ const ds = loadJson('datasets')[0]
 const html = engine.buildHtml(tpl, ds.rows, { withToolbar: true })
 ok((html.match(/<div class="page">/g) || []).length === 3, '一记录一页（3 页）')
 ok(html.includes('@page { size: 297mm 210mm; margin: 0; }'), 'A4 横向毫米尺寸', html.match(/@page[^}]+/)?.[0])
-ok(html.includes("url('pp://media/print-bg/bg.png')"), '底图走 pp:// 协议')
-ok(html.includes('font-face') && html.includes("'测试楷体'") && html.includes("pp://media/print-fonts/"), '上传字体 @font-face 声明')
+ok(html.includes("url('data:image") && !html.includes('pp://media/print-bg/bg.png'), '底图内联为 base64 data URI（脱离 pp://，直打/外部分查看均可见）')
+ok(html.includes('font-face') && html.includes("'测试楷体'") && html.includes('data:'), '上传字体 @font-face 内联为 base64 data URI（脱离 pp://，快照外部可看）')
 ok(html.includes('含&lt;标签&gt;&amp;&quot;引号'), '记录值转义渲染')
 ok(html.includes('width: 297mm; height: 210mm;'), '页面物理尺寸')
 ok(html.includes('window.print()') && html.includes('缩放 = 100%'), '浏览器回看工具条（withToolbar）')

@@ -36,6 +36,61 @@ function registerIpc() {
     itemSizes: templates.ITEM_SIZES,
   }))
 
+  /**
+   * 系统缓存（Chromium 运行时在 userData 下自动生成的目录，可安全清理、
+   * 必要时自动重建）：cacheInfo 汇总大小；clearCache 释放并返回释放字节。
+   * 刻意排除 data（用户数据）/ Local Storage / Session Storage / config，
+   * 避免误删应用状态与用户数据。
+   */
+  const SYSTEM_CACHE_DIRS = [
+    'Cache', 'GPUCache', 'Code Cache', 'DawnCache', 'DawnGraphiteCache',
+    'blob_storage', 'ShaderCache', 'GrShaderCache', 'Media Cache',
+  ]
+  function dirSize(dir) {
+    let total = 0
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, entry.name)
+        try {
+          if (entry.isDirectory()) total += dirSize(p)
+          else total += fs.statSync(p).size
+        } catch { /* 个别文件无权读取，跳过 */ }
+      }
+    } catch { /* 目录不存在/无权限，视为 0 */ }
+    return total
+  }
+  ipcMain.handle('app:cacheInfo', () => {
+    const base = app.getPath('userData')
+    let size = 0
+    const entries = []
+    for (const name of SYSTEM_CACHE_DIRS) {
+      const d = path.join(base, name)
+      if (fs.existsSync(d)) {
+        const s = dirSize(d)
+        size += s
+        entries.push({ name, size: s })
+      }
+    }
+    return { size, entries, base }
+  })
+  ipcMain.handle('app:clearCache', () => {
+    const base = app.getPath('userData')
+    let freed = 0
+    const removed = []
+    for (const name of SYSTEM_CACHE_DIRS) {
+      const d = path.join(base, name)
+      if (fs.existsSync(d)) {
+        const s = dirSize(d)
+        try {
+          fs.rmSync(d, { recursive: true, force: true })
+          freed += s
+          removed.push(name)
+        } catch { /* 个别文件锁住，跳过，不阻断其余 */ }
+      }
+    }
+    return { freed, removed }
+  })
+
   // ---- 数据目录自定义 ----
   // 选择新目录 → 可写校验 + 嵌套守卫 → 整目录迁移现有数据 → 写引导配置 → 重启生效
   ipcMain.handle('app:changeDataDir', async () => {
@@ -267,9 +322,20 @@ function registerIpc() {
   ipcMain.handle('job:list', () => printDomain.listJobs())
 
   ipcMain.handle('job:openSnapshot', async (_e, id) => {
-    const abs = printDomain.resolveSnapshot(String(id))
-    const err = await shell.openPath(abs)
-    if (err) throw new Error(err)
+    const jobId = String(id)
+    const abs = printDomain.resolveSnapshot(jobId)
+    const job = printDomain.listJobs().find((j) => j.id === jobId)
+    // 应用内窗口打开（不再 shell.openPath 甩给系统浏览器）：
+    // 快照为自包含 HTML（底图/字体已 base64 内联），file:// 直接渲染即可，
+    // 保留在应用内的完整体验（无跨进程焦点丢失、与主窗口同一套窗口管理）。
+    const win = new BrowserWindow({
+      width: 1000,
+      height: 780,
+      autoHideMenuBar: true,
+      title: `归档快照${job && job.templateName ? ` · ${job.templateName}` : ''}`,
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    })
+    await win.loadURL(require('url').pathToFileURL(abs).toString())
     return { ok: true }
   })
 

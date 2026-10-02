@@ -21,8 +21,13 @@ const PAGE_SIZES = [
   { id: 'a3-portrait', name: 'A3 竖版', w: 297, h: 420 },
   { id: 'a4-landscape', name: 'A4 横版', w: 297, h: 210 },
   { id: 'a4-portrait', name: 'A4 竖版', w: 210, h: 297 },
+  // B5 用国内市售复印纸规格（JIS 182×257），面积介于 A4 与 A5 之间
+  { id: 'b5-landscape', name: 'B5 横版', w: 257, h: 182 },
+  { id: 'b5-portrait', name: 'B5 竖版', w: 182, h: 257 },
   { id: 'a5-landscape', name: 'A5 横版', w: 210, h: 148 },
   { id: 'a5-portrait', name: 'A5 竖版', w: 148, h: 210 },
+  { id: 'a6-landscape', name: 'A6 横版', w: 148, h: 105 },
+  { id: 'a6-portrait', name: 'A6 竖版', w: 105, h: 148 },
 ]
 
 /**

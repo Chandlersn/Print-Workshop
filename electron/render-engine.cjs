@@ -6,8 +6,54 @@
  * - 字号单位 pt，@page 毫米尺寸，page-break-after 分页
  * 与源项目的差异点：底图/上传字体走 pp:// 协议读本地数据目录（无 HTTP 服务器）。
  */
+const fs = require('fs')
+const path = require('path')
 const fonts = require('./fonts.cjs')
 const { PAGE_SIZES } = require('./templates.cjs')
+
+// 媒体根目录（主进程启动即设定；测试也会注入）。文件缺失时回退到 pp://。
+const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
+
+/**
+ * 媒体文件相对路径 → base64 data URI，内联进 HTML。
+ *
+ * 为什么要内联（而非继续用 pp://media/...）：
+ * - 渲染产物（直打 HTML / PDF / 归档快照）会在三种上下文被消费：
+ *   ① 打印/导出用的隐藏窗口，以 `data:text/html` 加载 → 从该 opaque origin
+ *      请求 pp:// 资源会被浏览器拦截，底图直接丢；
+ *   ② 归档快照经 `shell.openPath` 在**系统默认浏览器**打开，pp:// 在浏览器里
+ *      是无意义协议，底图、字体全失；
+ *   ③ 内联后产物完全自包含，上述上下文一律正常，且快照可长期独立留存。
+ * 文件不存在（被手动删/测试夹具未建）时回退 pp://，保持历史口径、缺图不崩。
+ */
+function mimeFor(rel) {
+  const ext = String(rel).split('.').pop().toLowerCase()
+  const map = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+    ttf: 'font/ttf', otf: 'font/otf', ttc: 'font/collection',
+    woff: 'font/woff', woff2: 'font/woff2',
+  }
+  return map[ext] || 'application/octet-stream'
+}
+
+function readMediaFile(rel) {
+  if (!DATA_DIR || !rel) return null
+  try {
+    const abs = path.join(DATA_DIR, String(rel).replace(/\\/g, '/'))
+    if (!fs.existsSync(abs)) return null
+    return fs.readFileSync(abs)
+  } catch {
+    return null
+  }
+}
+
+/** 媒体相对路径 → 内联 data URI；文件缺失回退 pp:// */
+function inlineUrl(rel) {
+  const buf = readMediaFile(rel)
+  if (!buf) return mediaUrl(rel)
+  return `data:${mimeFor(rel)};base64,${buf.toString('base64')}`
+}
 
 // 扩展名 → @font-face format（与 workbench _FONT_FORMAT 一致，补 ttc）
 const FONT_FORMATS = {
@@ -60,7 +106,7 @@ function fontFaceCss() {
     const ext = f.file.split('.').pop().toLowerCase()
     const fmt = FONT_FORMATS[ext]
     if (!fmt) continue
-    rules.push(`@font-face { font-family:'${f.family}'; src:url('${mediaUrl('print-fonts/' + f.file)}') format('${fmt}'); }`)
+    rules.push(`@font-face { font-family:'${f.family}'; src:url('${inlineUrl('print-fonts/' + f.file)}') format('${fmt}'); }`)
   }
   return rules.join('\n')
 }
@@ -137,7 +183,7 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
   const spec = pageSpec(template.pageSize)
   const widthMm = spec.w
   const heightMm = spec.h
-  const bg = template.background ? mediaUrl(template.background) : ''
+  const bg = template.background ? inlineUrl(template.background) : ''
   const fields = (template.fields || [])
     .filter((f) => f.column || f.key) // column 为权威属性，key 是旧版 UI 的存法（兼容读取）
   const layout = resolveLayout(template.layout, spec)
@@ -160,7 +206,6 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
         const cy = layout.offsetY + Math.floor(k / layout.cols) * layout.itemH
         return `<div class="cell${layout.showCutMarks ? ' cut' : ''}" style="`
           + `left:${cx}mm;top:${cy}mm;width:${layout.itemW}mm;height:${layout.itemH}mm;`
-          + (bg ? `background-image:url('${bg}');` : '')
           + `">${fieldsHtml(rec)}</div>`
       })
       return `<div class="page">${cells.join('')}</div>`
@@ -185,9 +230,12 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
     !layout.enabled && bg ? `background-image: url('${bg}'); background-size: 100% 100%; ` : '',
     'background-repeat: no-repeat; page-break-after: always; overflow: hidden; }\n',
     '.page:last-child { page-break-after: auto; }\n',
-    // 多联格子：底图铺满一格，字段以格子为定位参照系（.cell 是 absolute，成为 .pf 的包含块）
+    // 多联格子：底图铺满一格，字段以格子为定位参照系（.cell 是 absolute，成为 .pf 的包含块）。
+    // 底图放在 .cell 类里（只写一次），而非逐格内联，避免大图在多页多格时重复膨胀 HTML。
     '.cell { position: absolute; overflow: hidden; background-repeat: no-repeat; '
-      + 'background-size: 100% 100%; }\n',
+      + 'background-size: 100% 100%;'
+      + (layout.enabled && bg ? ` background-image: url('${bg}');` : '')
+      + ' }\n',
     // 裁切线：格边虚线，仅供手工裁切对位（0.2mm 极细，裁掉即不可见）
     '.cell.cut { border: 0.2mm dashed rgba(0,0,0,0.35); }\n',
     '.pf { position: absolute; white-space: nowrap; }\n',
