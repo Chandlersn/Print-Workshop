@@ -6,6 +6,13 @@ process.env.PRINTPRESS_DATA_DIR = require('path').join(__dirname, '.tmp-data-m2'
 const fs = require('fs')
 const path = require('path')
 
+// 本套件断言里有「清单 1 条」「清单清空」这类精确计数，必须从空目录起跑：
+// 沿用上次的 .tmp-data-m2 会让残留模板把计数顶掉，报出与代码无关的假失败。
+// 放在 require 领域模块之前——它们在加载时就会读这个目录。
+const { rmDeep } = require('./helpers/rm.cjs')
+rmDeep(process.env.PRINTPRESS_DATA_DIR)
+fs.mkdirSync(process.env.PRINTPRESS_DATA_DIR, { recursive: true })
+
 const { pngSize, jpegSize, imageSize } = require('../electron/images.cjs')
 const templates = require('../electron/templates.cjs')
 const fonts = require('../electron/fonts.cjs')

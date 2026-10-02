@@ -8,7 +8,7 @@
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
-const { loadJson, saveJson } = require('./store.cjs')
+const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
 const { imageSize } = require('./images.cjs')
 const dataset = require('./dataset.cjs')
 
@@ -48,7 +48,7 @@ const ITEM_SIZES = [
 ]
 
 function loadAll() {
-  return loadJson(STORE_NAME) || []
+  return loadJson(STORE_NAME, { expect: 'array' }) || []
 }
 
 function persistAll(list) {
@@ -118,10 +118,16 @@ function deleteTemplate(id) {
   persistAll(rest)
   // 连带清理底图文件：上传时文件名唯一（时间戳前缀），一个底图只被一条模板记录引用；
   // 不清理会让 print-bg 目录随删模板持续膨胀（孤儿文件无任何应用内释放入口）
+  // 路径必须过守卫：background 来自可被手工编辑的 JSON，`../` 会删到数据目录外
   if (t.background) {
     const stillUsed = rest.some((x) => x.background === t.background)
     if (!stillUsed) {
-      try { fs.unlinkSync(path.join(process.env.PRINTPRESS_DATA_DIR, t.background)) } catch { /* 文件已缺失不影响删除结果 */ }
+      try {
+        fs.unlinkSync(resolveInsideDataDir(t.background))
+      } catch (err) {
+        // 路径越界说明存储被改过：留痕但不让删除模板整体失败（模板记录已删干净）
+        console.warn(`[templates] 底图清理跳过（${err.message}）`)
+      }
     }
   }
   return { ok: true }

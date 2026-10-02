@@ -13,7 +13,7 @@
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
-const { loadJson, saveJson } = require('./store.cjs')
+const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
 const renderEngine = require('./render-engine.cjs')
@@ -208,7 +208,9 @@ function buildBatchHtml(datasetId, templateId, rows) {
       ? (layout.fold
         ? { enabled: true, fold: true, perPage: 1 }
         : { enabled: true, cols: layout.cols, rows: layout.rows, perPage: layout.perPage })
-      : { enabled: false },
+      // 回退时必须带上 mode 与 reason：少了它们，前端无法区分「多联放不下已按单页出片」
+      // 与「本来就是单页版式」，用户只会看到结果和预期不符却不知发生了什么
+      : { enabled: false, mode: tpl.layout?.mode || 'single', reason: layout.reason || '' },
     templateName: tpl.name,
     datasetName: ds.name,
     page: { id: spec.id, name: spec.name, w: spec.w, h: spec.h },
@@ -261,19 +263,28 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     detail: detail || '',
     snapshot: snapshotRel,
   }
-  saveJson(JOBS_STORE, [job, ...(loadJson(JOBS_STORE) || [])])
+  const prev = loadJson(JOBS_STORE, { expect: 'array' }) || []
+  // 只保留最近 200 条：历史无上限会让 print-jobs.json 无限膨胀（实测 60 条
+  // 带 5000 行 selection 即 3.4MB），而 listJobs 每次都要全量解析，久了会卡主进程。
+  // 快照目录不在此清理范围内——删记录走 deleteJob，保留期内的归档留在盘上由用户自行处理。
+  saveJson(JOBS_STORE, [job, ...prev].slice(0, 200))
   return job
 }
 
 function listJobs() {
-  return loadJson(JOBS_STORE) || []
+  return loadJson(JOBS_STORE, { expect: 'array' }) || []
 }
 
-/** 留痕记录里的快照相对路径 → 绝对路径（不存在即抛错） */
+/**
+ * 留痕记录里的快照相对路径 → 绝对路径（不存在即抛错）。
+ * 路径必须过守卫：snapshot 来自可被手工编辑的 JSON，`../` 会读到数据目录外的文件，
+ * 且该路径会直接交给 BrowserWindow 渲染。
+ */
 function resolveSnapshot(jobId) {
   const job = listJobs().find((j) => j.id === String(jobId))
   if (!job) throw new Error(`打印记录已不存在（可能已被删除）`)
-  const abs = path.join(DATA_DIR, job.snapshot)
+  if (!job.snapshot) throw new Error('该记录没有归档快照（取消的打印不落盘）')
+  const abs = resolveInsideDataDir(job.snapshot)
   if (!fs.existsSync(abs)) throw new Error(`归档快照文件已丢失（可能被手动清理），无法查看`)
   return abs
 }
@@ -285,20 +296,31 @@ function resolveSnapshot(jobId) {
  */
 function deleteJob(jobId) {
   const jobs = listJobs()
-  const job = jobs.find((j) => j.id === String(jobId))
-  if (!job) throw new Error(`打印记录已不存在（可能已被删除）`)
-  // 取消态没有归档快照（snapshot 为 null），仅删元数据即可
-  const jobDir = job.snapshot ? path.join(DATA_DIR, path.dirname(job.snapshot)) : null
-  let archiveRemoved = false
-  if (jobDir) {
-    if (fs.existsSync(jobDir)) {
-      fs.rmSync(jobDir, { recursive: true, force: true })
-      archiveRemoved = !fs.existsSync(jobDir)
-    } else {
-      archiveRemoved = true // 快照本就缺失（曾被手动清理），只删元数据即可
+  // 遍历全部匹配项而非 find 首条：id 意外重复时（外部改过 JSON），
+  // 只清首条目录会让另一条变成无元数据的孤儿快照，永久占盘
+  const matched = jobs.filter((j) => j.id === String(jobId))
+  if (!matched.length) throw new Error(`打印记录已不存在（可能已被删除）`)
+  let archiveRemoved = true
+  for (const job of matched) {
+    // 取消态没有归档快照（snapshot 为 null），仅删元数据即可
+    if (!job.snapshot) continue
+    let jobDir
+    try {
+      jobDir = resolveInsideDataDir(path.dirname(job.snapshot))
+    } catch (err) {
+      // 路径越界说明存储被改过：跳过清理但仍删元数据，不让删除整体失败
+      console.warn(`[print] 归档清理跳过（${err.message}）`)
+      continue
     }
-  } else {
-    archiveRemoved = true
+    if (fs.existsSync(jobDir)) {
+      try {
+        fs.rmSync(jobDir, { recursive: true, force: true })
+        archiveRemoved = archiveRemoved && !fs.existsSync(jobDir)
+      } catch (err) {
+        archiveRemoved = false
+        console.warn(`[print] 归档目录删除失败 ${jobDir}: ${err.message}`)
+      }
+    }
   }
   saveJson(JOBS_STORE, jobs.filter((j) => j.id !== String(jobId)))
   return { ok: true, archiveRemoved }

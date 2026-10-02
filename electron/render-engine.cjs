@@ -77,36 +77,81 @@ function mediaUrl(rel) {
 }
 
 /**
+ * 数值钳制：坐标/字号都来自可被手工编辑的 JSON，越界会让版式计算失真
+ * （实测 itemW=0.001 时 perPage 达 6.2e10）或让 Chromium 排版卡死。
+ * 渲染层 UI 已有同样的范围限制（颜色/字号输入框），这里是主进程侧的兜底。
+ */
+function clampNum(v, lo, hi, dflt) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return dflt
+  return Math.min(hi, Math.max(lo, n))
+}
+
+/** 颜色白名单：渲染层本就是 <input type="color">，只会产出 #rgb/#rrggbb */
+function safeColor(v) {
+  const s = String(v == null ? '' : v).trim()
+  return /^#[0-9a-f]{3,8}$/i.test(s) ? s : ''
+}
+
+/**
  * 字段定位样式（与 workbench _field_style 语义一致）。
  * 居中/右对齐用 translate 修正，因此不需要指定宽度。
+ *
+ * 安全：这里拼的是 `style="..."` 属性值，而模板 JSON 是用户可触达的文件。
+ * 属性值里出现一个 `"` 就能闭合属性、注入任意标签，且该 HTML 会被预览 iframe
+ * 与打印窗口渲染——所以每个拼进去的值都必须先钳制/转义，不能裸拼。
  */
 function fieldStyle(f) {
-  const x = f.x || 0
-  const y = f.y || 0
-  const align = f.align || 'center'
+  const x = clampNum(f.x, 0, 100, 0)
+  const y = clampNum(f.y, 0, 100, 0)
+  const rawAlign = f.align || 'center'
+  const align = ['left', 'center', 'right'].includes(rawAlign) ? rawAlign : 'center'
   const parts = [`left:${x}%;`, `top:${y}%;`]
   if (align === 'center') parts.push('transform:translateX(-50%);')
   else if (align === 'right') parts.push('transform:translateX(-100%);')
-  if (f.fontSize) parts.push(`font-size:${f.fontSize}pt;`)
+  const fontSize = clampNum(f.fontSize, 1, 500, 12)
+  if (fontSize) parts.push(`font-size:${fontSize}pt;`)
   if (f.bold) parts.push('font-weight:bold;')
-  if (f.color) parts.push(`color:${f.color};`)
+  const color = safeColor(f.color)
+  if (color) parts.push(`color:${color};`)
   if (f.fontFamily) {
-    // family 名里的引号直接剥掉（family 可能来自文件名）
-    const fam = String(f.fontFamily).replace(/'/g, '').replace(/"/g, '')
-    parts.push(`font-family:'${fam}';`)
+    // 用与 @font-face 声明相同的规范化，保证字段引用的名字能被匹配上
+    const fam = normalizeFamily(f.fontFamily)
+    if (fam) parts.push(`font-family:'${fam}';`)
   }
   parts.push(`text-align:${align};`)
   return parts.join('')
 }
 
-/** 为所有已上传字体生成 @font-face（family 名 = 去扩展名文件名，画布与渲染共用） */
-function fontFaceCss() {
+/**
+ * family 名规范化：上传文件名里可能带引号等 CSS 语法字符（`测试'楷体.ttf`），
+ * 而模板里存的往往也是用户手输的原名。@font-face 声明与字段引用必须归一到
+ * 同一个字符串，否则字体声明存在却匹配不上（表现为「字体没生效」）。
+ * 剔除集：引号、反斜杠、分号、大括号、圆括号——它们在 CSS 字符串内有语法意义。
+ */
+function normalizeFamily(name) {
+  return String(name == null ? '' : name).replace(/['"\\;{}()]/g, '').trim()
+}
+
+/**
+ * 为已上传字体生成 @font-face（family 名 = 去扩展名文件名，画布与渲染共用）。
+ * @param {string[]} [onlyFamilies] 只输出这些 family —— 传入模板实际用到的字体集合，
+ *   避免把用户上传的每一个字体都 base64 内联进每份 HTML（实测 4 个 3MB 字体
+ *   会让单份 HTML 膨胀到 16MB，且出片要构建 preview + snapshot 两份）。
+ */
+function fontFaceCss(onlyFamilies) {
+  const want = Array.isArray(onlyFamilies) && onlyFamilies.length
+    ? new Set(onlyFamilies.map(normalizeFamily).filter(Boolean))
+    : null
   const rules = []
   for (const f of fonts.uploadedFonts()) {
+    const fam = normalizeFamily(f.family)
+    if (!fam) continue
+    if (want && !want.has(fam)) continue
     const ext = f.file.split('.').pop().toLowerCase()
     const fmt = FONT_FORMATS[ext]
     if (!fmt) continue
-    rules.push(`@font-face { font-family:'${f.family}'; src:url('${inlineUrl('print-fonts/' + f.file)}') format('${fmt}'); }`)
+    rules.push(`@font-face { font-family:'${fam}'; src:url('${inlineUrl('print-fonts/' + f.file)}') format('${fmt}'); }`)
   }
   return rules.join('\n')
 }
@@ -174,8 +219,16 @@ function resolveLayout(layout, spec) {
   if (cols < 1 || rows < 1 || cols * rows < 2) {
     return {
       enabled: false,
-      reason: `纸张 ${spec.w}×${spec.h}mm 放不下 2 个 ${itemW}×${itemH}mm 的成品`,
+      // 回退必须带 reason：上层要把这句话透传到打印中心界面，
+      // 否则「配了多联却按单页出片」对用户完全静默（纸张改小/成品改大就会触发）
+      reason: `纸张 ${spec.w}×${spec.h}mm 放不下 2 个 ${Math.round(itemW)}×${Math.round(itemH)}mm 的成品，已按单页出片`,
     }
+  }
+  // 每页格数上限：成品尺寸被改到极小值时 cols*rows 会爆到 1e10 量级，
+  // 页数报告与渲染循环都会失真（实测 itemW=0.001 → perPage 62370000000）
+  const MAX_PER_PAGE = 400
+  if (cols * rows > MAX_PER_PAGE) {
+    return { enabled: false, reason: `每页将排 ${cols * rows} 个成品（上限 ${MAX_PER_PAGE}），成品尺寸可能过小，已按单页出片` }
   }
   return {
     enabled: true,
@@ -246,10 +299,13 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
     pages = records.map((rec) => `<div class="page">${fieldsHtml(rec)}</div>`)
   }
 
+  // 只内联本模板实际用到的字体：全部内联会让单份 HTML 随字体库无限膨胀（实测 16MB/份）
+  const usedFamilies = [...new Set(fields.map((f) => f.fontFamily).filter(Boolean))]
+  const fontCss = fontFaceCss(usedFamilies)
   return [
     '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n',
     `<title>${escapeHtml(template.name || '打印预览')}</title>\n<style>\n`,
-    fontFaceCss() ? fontFaceCss() + '\n' : '',
+    fontCss ? fontCss + '\n' : '',
     `@page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }\n`,
     '* { box-sizing: border-box; }\n',
     'body { margin: 0; background: #f0f0f0; }\n',

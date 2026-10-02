@@ -19,7 +19,7 @@ const { listSheets, readWorkbookGrids, detectHeaderRow, sliceFromHeader } = requ
 const STORE_NAME = 'datasets'
 
 function loadAll() {
-  return loadJson(STORE_NAME) || []
+  return loadJson(STORE_NAME, { expect: 'array' }) || []
 }
 
 function persistAll(list) {

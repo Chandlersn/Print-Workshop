@@ -533,6 +533,7 @@ onMounted(refreshAll)
             :style="{ width: frameW + 4 + 'px', height: frameTotalH + 'px', transform: 'scale(' + zoomK + ')' }"
             :srcdoc="previewHtml"
             title="打印预览"
+            sandbox=""
           ></iframe>
         </div>
       </div>
