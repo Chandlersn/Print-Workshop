@@ -108,6 +108,19 @@ async function main() {
   assert(got2.name === '测试证书改', '全量快照更新')
   assert(got2.updatedAt >= before, 'updatedAt 刷新')
   assert(templates.listTemplates().length === 1, '清单 1 条')
+  // 无底图白纸版式（多联证卡/对折桌牌）必须可见：v0.1 起下拉误过滤 hasBackground，v0.2.3 修正
+  const listed = templates.listTemplates()[0]
+  assert(listed && listed.fieldCount > 0, '无底图模板也进清单（可被打印中心选中）', listed)
+  // 最近编辑置顶：后保存/后更新的排前面
+  const later = templates.saveTemplate({
+    name: '测试后保存', datasetId: ds.id,
+    pageSize: { w: 210, h: 297 },
+    fields: [{ key: '姓名', label: '姓名', x: 1, y: 1, fontSize: 1, color: '#000', align: 'left', bold: false }],
+  })
+  const order = templates.listTemplates().map((x) => x.id)
+  assert(order[0] === later.id, '最近保存的模板置顶', order)
+  templates.saveTemplate({ ...JSON.parse(JSON.stringify(templates.getTemplate(tpl.id))), name: '测试证书再改' })
+  assert(templates.listTemplates()[0].id === tpl.id, '更新旧模板后它反超置顶')
 
   console.log('== 5. 字体管理与引用校验 ==')
   const fakeFont = path.join(FIXTURES, '测试楷体.ttf')
@@ -154,6 +167,7 @@ async function main() {
   const bgAbs = path.join(process.env.PRINTPRESS_DATA_DIR, tpl.background || bg.background)
   assert(fs.existsSync(bgAbs), '删除前底图文件真实在盘')
   templates.deleteTemplate(tpl.id)
+  templates.deleteTemplate(later.id)
   assert(templates.fontUsedBy('测试楷体').length === 0, '模板删除后引用解除')
   assert(!fs.existsSync(bgAbs), '删除模板连带清理底图文件（不留孤儿）')
   assert(templates.listTemplates().length === 0, '模板清单清空')

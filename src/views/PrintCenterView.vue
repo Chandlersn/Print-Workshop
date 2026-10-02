@@ -30,9 +30,11 @@ const hasMissingIssue = computed(() =>
 
 const dsOptions = computed(() =>
   datasets.value.map((d) => ({ value: d.id, label: `${d.name}（${d.rowCount} 行）` })))
+// 只挡「画布上一个字段都没有」的半成品模板；无底图的白纸版式（多联证卡/对折桌牌）是合法可打的，
+// v0.1 起误加 hasBackground 条件把这类模板全部挡在下拉外，v0.2.3 修正
 const tplOptions = computed(() =>
   templates.value
-    .filter((t) => t.hasBackground && t.fieldCount > 0)
+    .filter((t) => t.fieldCount > 0)
     .map((t) => ({ value: t.id, label: t.datasetName ? `${t.name} × ${t.datasetName}` : t.name })))
 const ready = computed(() => Boolean(selDs.value && selTpl.value))
 const dsTotalRows = computed(() => datasets.value.find((d) => d.id === selDs.value)?.rowCount ?? 0)

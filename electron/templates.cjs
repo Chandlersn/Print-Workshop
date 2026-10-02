@@ -70,6 +70,8 @@ function listTemplates() {
       updatedAt: t.updatedAt,
     }
   })
+  // 最近编辑的置顶：刚保存的模板在下拉/列表里第一眼就能看到
+  .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
 }
 
 function getTemplate(id) {
