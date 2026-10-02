@@ -45,7 +45,7 @@
 
 ### 方式一：直接运行（推荐，本机自用）
 
-双击 **`release/win-unpacked/批印坊.exe`** 即可运行，无需安装；要装进系统就双击 `release/批印坊 Setup x.x.x.exe` 按提示安装（Windows 10/11 x64）。
+**从 [GitHub Releases](https://github.com/Chandlersn/Print-Workshop/releases/latest) 下载最新安装包**（如 `批印坊-Setup-x.x.x-x64.exe`），双击安装即可——自动创建桌面 / 开始菜单快捷方式，后续版本也在同一页面发布。也可以在本仓库克隆后自行构建：`npm install && npm run dist`，产物在 `release/win-unpacked/`。
 
 **首次安装弹出「Windows 已保护你的电脑」？** 这是未购买代码签名证书的正常提示（不代表有安全问题），点「更多信息」→「仍要运行」即可继续。
 
