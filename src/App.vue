@@ -317,7 +317,7 @@ onMounted(async () => {
         </div>
         <div class="onboard-actions">
           <span class="onboard-note">更新检测仅读取仓库中的版本号文件，不收集任何本机数据</span>
-          <button class="onboard-next" @click="showAbout = false">关闭</button>
+          <button class="footer-btn" @click="showAbout = false">关闭</button>
         </div>
       </div>
     </div>
