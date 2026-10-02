@@ -139,7 +139,7 @@ node test/e2e-cell-jump.cjs     # CDP 真机 e2e：空值直达补录全链（�
 node test/e2e-scope.cjs         # CDP 真机 e2e：行级出片范围全链（默认全量→取消全选→搜索勾选→部分出片）
 node test/e2e-grid.cjs          # CDP 真机 e2e：多联版式全链（画布切成品尺寸→每页格数→预览页数）
 node test/e2e-drag-snap.cjs     # CDP 真机 e2e：拖拽跟手性 + 居中吸附全链（按下不跳、吸附贴线）
-npm run dist                    # 打 NSIS 安装包（免签名，signAndEditExecutable=false）
+npm run dist                    # 打 NSIS 安装包（未配证书时自动跳过签名，图标与版本信息正常写入 EXE）
 ```
 
 领域层测试里有四个套件专门守数据安全与出片正确性，值得单独跑：

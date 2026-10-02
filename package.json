@@ -13,7 +13,7 @@
     "test": "node test/m1-import.cjs && node test/m2-templates.cjs && node test/m3-render.cjs && node test/render-grid.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/placeholder.cjs && node test/print-scope.cjs && node test/dataset-edit.cjs && node test/canvas-layout.cjs && node test/print-jobs.cjs && node test/version-check.cjs && node test/storage-guard.cjs && node test/print-failure.cjs && node test/robustness.cjs && node test/ipc-hardening.cjs",
     "test:e2e": "electron test/m3-e2e.cjs",
     "bench:storage": "node test/bench-storage.cjs",
-    "dist": "npm run build && electron-builder --win --x64 -c.win.signAndEditExecutable=false"
+    "dist": "npm run build && electron-builder --win --x64"
   },
   "author": "lyq",
   "license": "MIT",
