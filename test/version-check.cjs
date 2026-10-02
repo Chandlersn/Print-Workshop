@@ -3,7 +3,9 @@
  * 更新检测单元测试：版本比较 / 载荷解析 / checkForUpdate 决策矩阵。
  * 全部用注入的 fake fetch，不发起真实网络请求，也不依赖数据目录。
  */
+let pass = 0, fail = 0
 const assert = (cond, name, detail) => {
+  if (cond) pass++; else fail++
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail !== undefined ? ' :: ' + JSON.stringify(detail) : ''}`)
   if (!cond) process.exitCode = 1
 }
@@ -78,7 +80,7 @@ async function main() {
   assert(/^https:\/\//.test(vc.RELEASES_URL) && /releases$/.test(vc.RELEASES_URL), 'RELEASES_URL 指向 releases 页')
   assert(/^https:\/\//.test(vc.FEEDBACK_URL), 'FEEDBACK_URL 是 https 地址')
 
-  console.log(`\n结果: ${process.exitCode ? '存在失败' : '全部通过'}`)
+  console.log(`\n结果: ${pass} 通过, ${fail} 失败`)
 }
 
 main()
