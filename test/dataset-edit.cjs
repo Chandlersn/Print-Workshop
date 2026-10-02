@@ -81,13 +81,12 @@ function main() {
   ok(!d4.rows.some((r) => r['姓名'] === '甲'), '被删行不存在')
   throws(() => dataset.deleteRow(ds.id, 4), '删除后旧行号越界抛错')
 
-  console.log('== 7. 编辑与出口联动（columnValues 跟随编辑） ==')
+  console.log('== 7. 编辑即时生效（读回的数据已变） ==')
   dataset.updateCell(ds.id, 2, '奖级', '铜奖') // 丁（删首行后在索引 2）：金奖 → 铜奖
-  const vals = dataset.columnValues(ds.id, '奖级', [])
-  const gold = vals.values.find((v) => v.value === '金奖')
-  const bronze = vals.values.find((v) => v.value === '铜奖')
-  ok(gold && gold.count === 1, '金奖只剩乙（甲被删、丁改走）', vals.values)
-  ok(bronze && bronze.count === 1, '铜奖清单出现新值', vals.values)
+  const d7 = dataset.getDataset(ds.id)
+  const golds = d7.rows.filter((r) => r['奖级'] === '金奖').map((r) => r['姓名'])
+  ok(golds.length === 1 && golds[0] === '乙', '金奖只剩乙（甲被删、丁改走）', golds)
+  ok(d7.rows[2]['奖级'] === '铜奖', '改格写回后读回即新值', d7.rows[2])
 
   const summary = dataset.listDatasets().find((s) => s.id === ds.id)
   ok(summary.rowCount === 4, '列表摘要行数同步')

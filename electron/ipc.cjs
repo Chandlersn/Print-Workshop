@@ -32,6 +32,8 @@ function registerIpc() {
     packaged: app.isPackaged,
     platform: process.platform,
     pageSizes: templates.PAGE_SIZES,
+    // 多联拼版的成品尺寸预设（与 PAGE_SIZES 同为主进程单一权威源）
+    itemSizes: templates.ITEM_SIZES,
   }))
 
   // ---- 数据目录自定义 ----
@@ -140,10 +142,6 @@ function registerIpc() {
 
   ipcMain.handle('catalog:fields', (_e, id) => dataset.fieldCatalog(String(id)))
 
-  // 列值清单（从真实数据派生）：筛选值选项 / 分组导出的组清单共用
-  ipcMain.handle('catalog:values', (_e, p) =>
-    dataset.columnValues(String(p.datasetId), String(p.key), p.filters))
-
   // ---- 模板 ----
   ipcMain.handle('template:list', () => templates.listTemplates())
   ipcMain.handle('template:get', (_e, id) => templates.getTemplate(String(id)))
@@ -184,16 +182,16 @@ function registerIpc() {
 
   // ---- 打印 ----
   // 出口校验：只报告空值/疑似占位，不拦截（可中断可放行由前端弹窗决定）
-  // filters：行筛选条件 [{ key, values }]，限定打印范围
+  // 出片范围：rows = 行级勾选索引集合（null/缺省 = 全量）
   ipcMain.handle('print:validate', (_e, p) =>
-    printDomain.validateBatch(String(p.datasetId), String(p.templateId), p.filters))
+    printDomain.validateBatch(String(p.datasetId), String(p.templateId), p.rows))
 
   // 组装批量 HTML（预览用，不落盘不留痕）
   ipcMain.handle('print:generate', (_e, p) =>
-    printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.filters))
+    printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows))
 
   ipcMain.handle('print:exportPdf', async (_e, p) => {
-    const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.filters)
+    const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
     const stamp = new Date().toISOString().slice(0, 10)
     // 挂父窗口：无主对话框在 Windows 上可能被主窗口压在后面，用户看起来像「没反应」
     const parent = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0]
@@ -205,7 +203,9 @@ function registerIpc() {
     if (result.canceled || !result.filePath) return { canceled: true }
     try {
       const r = await printer.exportPdf(built.html, result.filePath)
-      dataset.markPrinted(String(p.datasetId), 'pdf') // 状态回写：数据页侧栏「已打印」变色
+      // 状态回写（不变量「留痕必全，状态只认全量」）：只有全量出片才回写数据集「已打」状态；
+      // 部分出片（行级勾选）照常留痕，但不改侧栏徽标与变色，避免「打了 3 个人却显示整份已打」
+      if (printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'pdf')
       const job = printDomain.createJob({
         templateId: String(p.templateId),
         templateName: built.templateName,
@@ -213,11 +213,14 @@ function registerIpc() {
         datasetName: built.datasetName,
         mode: 'pdf',
         recordCount: built.recordCount,
+        totalRows: built.scope.total,
+        partial: built.scope.partial,
+        selection: built.selection,
         snapshotHtml: built.snapshotHtml,
         status: 'ok',
         detail: `${r.bytes} bytes → ${r.path}`,
       })
-      return { canceled: false, ...r, jobId: job.id }
+      return { canceled: false, ...r, jobId: job.id, scope: built.scope }
     } catch (err) {
       printDomain.createJob({
         templateId: String(p.templateId),
@@ -226,6 +229,9 @@ function registerIpc() {
         datasetName: built.datasetName,
         mode: 'pdf',
         recordCount: built.recordCount,
+        totalRows: built.scope.total,
+        partial: built.scope.partial,
+        selection: built.selection,
         snapshotHtml: built.snapshotHtml,
         status: 'failed',
         detail: String(err.message || err),
@@ -235,10 +241,11 @@ function registerIpc() {
   })
 
   ipcMain.handle('print:send', async (_e, p) => {
-    const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.filters)
+    const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
     const silent = Boolean(p && p.silent)
     const r = await printer.sendToPrinter(built.html, { silent })
-    if (r.ok) dataset.markPrinted(String(p.datasetId), 'print') // 只有真正送达才标记，取消不标
+    // 真正送达「且为全量出片」才回写（部分出片留痕但不改数据集状态）；取消不标
+    if (r.ok && printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'print')
     printDomain.createJob({
       templateId: String(p.templateId),
       templateName: built.templateName,
@@ -246,69 +253,17 @@ function registerIpc() {
       datasetName: built.datasetName,
       mode: 'print',
       recordCount: built.recordCount,
+      totalRows: built.scope.total,
+      partial: built.scope.partial,
+      selection: built.selection,
       snapshotHtml: built.snapshotHtml,
       status: r.ok ? 'ok' : 'canceled',
       detail: r.ok ? (silent ? '静默直打' : '打印对话框确认') : String(r.error || ''),
     })
-    return r
+    return { ...r, scope: built.scope }
   })
 
   // ---- 打印历史 ----
-  // 按列分组导出：在 filters 限定范围内，按某列的 distinct 值（真实数据派生）
-  // 逐组出 PDF，一组一个文件，命名「数据集名-组值.pdf」
-  ipcMain.handle('print:exportGrouped', async (_e, p) => {
-    const key = String(p.key)
-    const baseFilters = Array.isArray(p.filters) ? p.filters : []
-    const built0 = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), baseFilters)
-    const colInfo = dataset.columnValues(String(p.datasetId), key, baseFilters)
-    if (!colInfo.values.length) {
-      throw new Error(`「${colInfo.alias}」在当前打印范围内没有可分组的数据`)
-    }
-
-    const result = await dialog.showOpenDialog(dialogParent(), {
-      title: '选择分组 PDF 输出目录',
-      properties: ['openDirectory', 'createDirectory'],
-    })
-    if (result.canceled || !result.filePaths.length) return { canceled: true }
-    const outDir = result.filePaths[0]
-
-    const exported = []
-    const failed = []
-    let totalRows = 0
-    let firstSnapshot = ''
-    for (const g of colInfo.values) {
-      const groupFilters = [...baseFilters, { key, values: [g.value] }]
-      try {
-        const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), groupFilters)
-        if (!built.recordCount) continue
-        const fileName = `${printDomain.sanitizeFilename(built.datasetName)}-${printDomain.sanitizeFilename(g.value)}.pdf`
-        const r = await printer.exportPdf(built.html, path.join(outDir, fileName))
-        if (!firstSnapshot) firstSnapshot = built.snapshotHtml
-        totalRows += built.recordCount
-        exported.push({ value: g.value, rows: built.recordCount, file: r.path, bytes: r.bytes })
-      } catch (err) {
-        failed.push({ value: g.value, error: String(err.message || err) })
-      }
-    }
-    if (!exported.length && !failed.length) {
-      throw new Error('没有可导出的分组')
-    }
-
-    printDomain.createJob({
-      templateId: String(p.templateId),
-      templateName: built0.templateName,
-      datasetId: String(p.datasetId),
-      datasetName: built0.datasetName,
-      mode: 'pdf',
-      recordCount: totalRows,
-      snapshotHtml: firstSnapshot,
-      status: exported.length ? 'ok' : 'failed',
-      detail: `按「${colInfo.alias}」分组导出 ${exported.length} 个 PDF → ${outDir}`
-        + (failed.length ? `（${failed.length} 组失败）` : ''),
-    })
-    return { canceled: false, dir: outDir, groupLabel: colInfo.alias, exported, failed }
-  })
-
   ipcMain.handle('job:list', () => printDomain.listJobs())
 
   ipcMain.handle('job:openSnapshot', async (_e, id) => {

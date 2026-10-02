@@ -25,6 +25,23 @@ const PAGE_SIZES = [
   { id: 'a5-portrait', name: 'A5 竖版', w: 148, h: 210 },
 ]
 
+/**
+ * 常见小尺寸成品预设（mm）——多联拼版的「成品尺寸」选项。
+ * 覆盖证件照 / 相纸 / 常用卡片；用户也可填自定义尺寸（预设只是省事，不是限制）。
+ * 尺寸为国内通行规格：1 寸 25×35、2 寸 35×49、5 寸（5R）89×127 等。
+ */
+const ITEM_SIZES = [
+  { id: 'photo-1s', name: '小 1 寸 22×32', w: 22, h: 32 },
+  { id: 'photo-1', name: '1 寸 25×35', w: 25, h: 35 },
+  { id: 'photo-2s', name: '小 2 寸 35×45', w: 35, h: 45 },
+  { id: 'photo-2', name: '2 寸 35×49', w: 35, h: 49 },
+  { id: 'photo-3', name: '3 寸 54×89', w: 54, h: 89 },
+  { id: 'photo-5', name: '5 寸 89×127', w: 89, h: 127 },
+  { id: 'photo-6', name: '6 寸 102×152', w: 102, h: 152 },
+  { id: 'card-badge', name: '胸卡 85×54', w: 85, h: 54 },
+  { id: 'card-tent', name: '桌牌 200×100', w: 200, h: 100 },
+]
+
 function loadAll() {
   return loadJson(STORE_NAME) || []
 }
@@ -217,6 +234,7 @@ function rebindDataset(templateId, datasetId) {
 
 module.exports = {
   PAGE_SIZES,
+  ITEM_SIZES,
   listTemplates,
   getTemplate,
   saveTemplate,

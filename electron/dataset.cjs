@@ -15,7 +15,6 @@ const { loadJson, saveJson } = require('./store.cjs')
 const { buildColumns } = require('./keys.cjs')
 const { importGrid } = require('./importer/index.cjs')
 const { listSheets, readWorkbookGrids, detectHeaderRow, sliceFromHeader } = require('./importer/excel.cjs')
-const { applyFilters } = require('./rows.cjs')
 
 const STORE_NAME = 'datasets'
 
@@ -371,35 +370,6 @@ function fieldCatalog(id) {
 }
 
 /**
- * 列值清单：某列的非空 distinct 值及出现次数（清单从真实数据派生，非枚举写死）。
- * filters 先限定行范围，再在范围内统计——分组导出/筛选值选项共用。
- * distinct 超过 500 时截断并标记 truncated。
- */
-function columnValues(id, key, filters) {
-  const ds = findDs(id)
-  const col = ds.columns.find((c) => c.key === key)
-  if (!col) throw new Error(`列不存在: ${key}`)
-  const rows = applyFilters(ds.rows, filters)
-  const counts = new Map()
-  for (const r of rows) {
-    const v = String(r[key] ?? '').trim()
-    if (!v) continue
-    counts.set(v, (counts.get(v) || 0) + 1)
-  }
-  const all = [...counts.entries()]
-    .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value, 'zh'))
-  return {
-    key,
-    alias: col.alias,
-    total: rows.length,
-    distinct: all.length,
-    truncated: all.length > 500,
-    values: all.slice(0, 500),
-  }
-}
-
-/**
  * 打印/导出成功的状态回写（工作簿级）：数据页侧栏变色显示，用户对照
  * 哪些工作簿已经打过、哪些还没打。只在导出/打印成功后调用（失败不标）。
  */
@@ -418,7 +388,6 @@ module.exports = {
   importFromFile,
   inspectFile,
   importSheets,
-  columnValues,
   listDatasets,
   getDataset,
   deleteDataset,

@@ -68,31 +68,106 @@ function fontFaceCss() {
 // 未知纸张的回退默认显式命名，不依赖数组顺序（顺序只管下拉展示）
 const DEFAULT_PAGE_ID = 'a4-landscape'
 
-function pageSpec(pageSizeId) {
-  return PAGE_SIZES.find((p) => p.id === pageSizeId)
+/**
+ * 纸张规格解析。**兼容两种存法**：
+ * - 字符串 id（早期调用 / 单元测试）
+ * - 对象 `{ id, w, h }`——模板里存的就是对象，且上传非标准比例底图时会存 `id: 'custom'`
+ *
+ * 早期只按字符串比对，导致传对象时永远匹配不上、静默回退成 A4 横版：
+ * 竖版模板与自定义纸张都会被渲染成 297×210。此处按对象优先取真实尺寸。
+ */
+function pageSpec(pageSize) {
+  if (pageSize && typeof pageSize === 'object') {
+    const hit = PAGE_SIZES.find((p) => p.id === pageSize.id)
+    if (hit) return hit
+    const w = Number(pageSize.w)
+    const h = Number(pageSize.h)
+    if (w > 0 && h > 0) {
+      return { id: pageSize.id || 'custom', name: pageSize.name || '自定义', w, h }
+    }
+  }
+  return PAGE_SIZES.find((p) => p.id === pageSize)
     || PAGE_SIZES.find((p) => p.id === DEFAULT_PAGE_ID)
     || PAGE_SIZES[0]
+}
+
+/**
+ * 多联版式解析（纯函数，模板页 / 渲染引擎 / 打印中心共用同一口径）。
+ *
+ * 语义：底图在**多联模式下代表「单个成品图」**，而不是整页；用户给出成品尺寸（mm），
+ * 系统按纸张算出能放几列几行，并把网格在纸张上居中（四周留边）。
+ * 放不下 2 个成品时退回单页（enabled=false，附 reason 供 UI 提示）。
+ */
+function resolveLayout(layout, spec) {
+  if (!layout || layout.mode !== 'grid') return { enabled: false }
+  const itemW = Number(layout.itemW)
+  const itemH = Number(layout.itemH)
+  if (!(itemW > 0) || !(itemH > 0)) return { enabled: false, reason: '成品尺寸未填写' }
+  const cols = Math.floor(spec.w / itemW)
+  const rows = Math.floor(spec.h / itemH)
+  if (cols < 1 || rows < 1 || cols * rows < 2) {
+    return {
+      enabled: false,
+      reason: `纸张 ${spec.w}×${spec.h}mm 放不下 2 个 ${itemW}×${itemH}mm 的成品`,
+    }
+  }
+  return {
+    enabled: true,
+    cols,
+    rows,
+    itemW,
+    itemH,
+    offsetX: (spec.w - cols * itemW) / 2,
+    offsetY: (spec.h - rows * itemH) / 2,
+    perPage: cols * rows,
+    showCutMarks: layout.showCutMarks !== false,
+  }
 }
 
 /**
  * 底图 + 字段叠加 → 一份含 N 页的可打印 HTML。
  * withToolbar=true 时带浏览器打印工具条（供归档快照在浏览器里回看）；
  * Electron 内部打印/PDF 通道应传 false。
+ *
+ * 单页模式（默认）：一记录一页，字段坐标相对整页。
+ * 多联模式：一页 M×N 格，一格一条记录；**字段坐标相对格子**，底图铺满每格，
+ *           故同一套排版在每格重复——输出契约（页数 × 纸张）不变。
  */
 function buildHtml(template, records, { withToolbar = true } = {}) {
   const spec = pageSpec(template.pageSize)
   const widthMm = spec.w
   const heightMm = spec.h
   const bg = template.background ? mediaUrl(template.background) : ''
-  const fields = template.fields || []
+  const fields = (template.fields || [])
+    .filter((f) => f.column || f.key) // column 为权威属性，key 是旧版 UI 的存法（兼容读取）
+  const layout = resolveLayout(template.layout, spec)
 
-  const pages = records.map((rec) => {
-    const inner = fields
-      .filter((f) => f.column || f.key) // column 为权威属性，key 是旧版 UI 的存法（兼容读取）
-      .map((f) => `<div class="pf" style="${fieldStyle(f)}">${escapeHtml(rec[f.column || f.key])}</div>`)
-      .join('')
-    return `<div class="page">${inner}</div>`
-  })
+  const fieldsHtml = (rec) => fields
+    .map((f) => `<div class="pf" style="${fieldStyle(f)}">${escapeHtml(rec[f.column || f.key])}</div>`)
+    .join('')
+
+  let pages
+  if (layout.enabled) {
+    const chunks = []
+    for (let i = 0; i < records.length; i += layout.perPage) {
+      chunks.push(records.slice(i, i + layout.perPage))
+    }
+    // 只渲染「有记录」的格子：空格子若铺上底图会印出空白卡片；
+    // 每格位置仍由自身序号推出，所以末页不满时位置依然正确
+    pages = chunks.map((chunk) => {
+      const cells = chunk.map((rec, k) => {
+        const cx = layout.offsetX + (k % layout.cols) * layout.itemW
+        const cy = layout.offsetY + Math.floor(k / layout.cols) * layout.itemH
+        return `<div class="cell${layout.showCutMarks ? ' cut' : ''}" style="`
+          + `left:${cx}mm;top:${cy}mm;width:${layout.itemW}mm;height:${layout.itemH}mm;`
+          + (bg ? `background-image:url('${bg}');` : '')
+          + `">${fieldsHtml(rec)}</div>`
+      })
+      return `<div class="page">${cells.join('')}</div>`
+    })
+  } else {
+    pages = records.map((rec) => `<div class="page">${fieldsHtml(rec)}</div>`)
+  }
 
   return [
     '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n',
@@ -106,9 +181,15 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
     withToolbar ? '' : 'html { overflow: hidden; }\n',
     '.page { position: relative; ',
     `width: ${widthMm}mm; height: ${heightMm}mm; `,
-    bg ? `background-image: url('${bg}'); background-size: 100% 100%; ` : '',
+    // 多联时底图归每格所有，整页不再铺底图
+    !layout.enabled && bg ? `background-image: url('${bg}'); background-size: 100% 100%; ` : '',
     'background-repeat: no-repeat; page-break-after: always; overflow: hidden; }\n',
     '.page:last-child { page-break-after: auto; }\n',
+    // 多联格子：底图铺满一格，字段以格子为定位参照系（.cell 是 absolute，成为 .pf 的包含块）
+    '.cell { position: absolute; overflow: hidden; background-repeat: no-repeat; '
+      + 'background-size: 100% 100%; }\n',
+    // 裁切线：格边虚线，仅供手工裁切对位（0.2mm 极细，裁掉即不可见）
+    '.cell.cut { border: 0.2mm dashed rgba(0,0,0,0.35); }\n',
     '.pf { position: absolute; white-space: nowrap; }\n',
     '@media print { body { background: #fff; } .no-print { display: none !important; } }\n',
     '</style>\n</head>\n<body>\n',
@@ -127,4 +208,12 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
   ].join('')
 }
 
-module.exports = { escapeHtml, mediaUrl, fieldStyle, fontFaceCss, pageSpec, buildHtml }
+module.exports = {
+  escapeHtml,
+  mediaUrl,
+  fieldStyle,
+  fontFaceCss,
+  pageSpec,
+  resolveLayout,
+  buildHtml,
+}

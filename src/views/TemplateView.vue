@@ -15,6 +15,137 @@ import { evenRow, columnSnap } from '../lib/field-layout.cjs'
 const CANVAS_W = 760 // 画布显示宽度 px
 const SNAP_PX = 6    // 吸附阈值（像素，源项目同值）
 
+// ---- 多联版式 ----
+// 语义：多联模式下底图代表「单个成品图」，画布切换为**单个成品**尺寸——
+// 小成品（如 1 寸照）在整页缩放下只有几十像素，根本没法拖字段。
+// 因此画布的定位参照系天然就是「格子」，拖拽/吸附/对齐逻辑无需改动。
+const ITEM_SIZE_PRESETS = ref([])
+const layoutMode = computed(() => (activeTpl.value?.layout?.mode === 'grid' ? 'grid' : 'single'))
+
+/** 设计参照物尺寸：多联 = 单个成品；单页 = 整张纸 */
+const itemSpec = computed(() => {
+  const t = activeTpl.value
+  if (!t) return { w: 210, h: 297 }
+  if (layoutMode.value === 'grid') {
+    const w = Number(t.layout?.itemW) || 0
+    const h = Number(t.layout?.itemH) || 0
+    return { w: w > 0 ? w : 85, h: h > 0 ? h : 54 }
+  }
+  return { w: t.pageSize.w, h: t.pageSize.h }
+})
+
+/**
+ * 版式摘要（仅用于界面提示；行列的权威计算在主进程 resolveLayout）。
+ * ok=false 表示当前纸张放不下 2 个成品，出片时会退回单页。
+ */
+const gridInfo = computed(() => {
+  const t = activeTpl.value
+  if (!t || layoutMode.value !== 'grid') return null
+  const cols = Math.floor(t.pageSize.w / itemSpec.value.w)
+  const rows = Math.floor(t.pageSize.h / itemSpec.value.h)
+  return { cols, rows, perPage: cols * rows, ok: cols >= 1 && rows >= 1 && cols * rows >= 2 }
+})
+
+const layoutOptions = [
+  { value: 'single', label: '单页' },
+  { value: 'grid', label: '多联' },
+]
+
+/** 是否多联版式 */
+const isGrid = computed(() => layoutMode.value === 'grid')
+/** 是否画裁切线（仅多联有意义） */
+const cutMarks = computed(() => activeTpl.value?.layout?.showCutMarks !== false)
+
+/**
+ * 多联格子阵列（百分比定位，与主进程 resolveLayout 同口径）。
+ * 放不下 2 个成品时返回空数组——不画网格，由下方红字提示原因。
+ */
+const gridCells = computed(() => {
+  const t = activeTpl.value
+  if (!t || !isGrid.value) return []
+  const iw = itemSpec.value.w
+  const ih = itemSpec.value.h
+  const cols = Math.max(1, Math.floor(t.pageSize.w / iw))
+  const rows = Math.max(1, Math.floor(t.pageSize.h / ih))
+  if (cols * rows < 2) return []
+  const offX = (t.pageSize.w - cols * iw) / 2
+  const offY = (t.pageSize.h - rows * ih) / 2
+  const w = (iw / t.pageSize.w) * 100
+  const h = (ih / t.pageSize.h) * 100
+  const out = []
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      out.push({
+        k: r * cols + c,
+        left: ((offX + c * iw) / t.pageSize.w) * 100,
+        top: ((offY + r * ih) / t.pageSize.h) * 100,
+        w,
+        h,
+      })
+    }
+  }
+  return out
+})
+
+/** 当前拖拽所在的格子（吸附辅助线画在这一格里；所有格子内容相同） */
+const activeCellIdx = ref(0)
+
+/** 定位参照系元素：多联 = 当前格，单页 = 整张画布 */
+function refFrameEl() {
+  if (!isGrid.value || !canvasEl.value) return canvasEl.value
+  const cells = canvasEl.value.querySelectorAll('.canvas-cell')
+  return cells[Math.min(activeCellIdx.value, cells.length - 1)] || canvasEl.value
+}
+
+/** 当前成品尺寸是否命中预设（未命中显示为「自定义」） */
+const itemSizeId = computed(() => {
+  const l = activeTpl.value?.layout
+  if (!l) return 'custom'
+  const hit = ITEM_SIZE_PRESETS.value.find(
+    (s) => s.w === Number(l.itemW) && s.h === Number(l.itemH))
+  return hit ? hit.id : 'custom'
+})
+const itemSizeOptions = computed(() => [
+  ...ITEM_SIZE_PRESETS.value.map((s) => ({ value: s.id, label: `${s.name}mm` })),
+  { value: 'custom', label: '自定义' },
+])
+
+function ensureLayout() {
+  const t = activeTpl.value
+  if (!t) return
+  if (!t.layout) t.layout = { mode: 'single', itemW: 85, itemH: 54, showCutMarks: true }
+}
+
+function onLayoutModeChange(mode) {
+  if (!activeTpl.value) return
+  ensureLayout()
+  activeTpl.value.layout.mode = mode === 'grid' ? 'grid' : 'single'
+}
+
+function onItemSizeChange(id) {
+  const t = activeTpl.value
+  if (!t) return
+  const hit = ITEM_SIZE_PRESETS.value.find((s) => s.id === id)
+  if (!hit) return
+  ensureLayout()
+  t.layout.itemW = hit.w
+  t.layout.itemH = hit.h
+}
+
+function onItemDim(which, val) {
+  const t = activeTpl.value
+  if (!t) return
+  const n = Math.min(500, Math.max(5, Math.round(Number(val) || 0)))
+  ensureLayout()
+  if (which === 'w') t.layout.itemW = n
+  else t.layout.itemH = n
+}
+
+function onCutMarks(on) {
+  ensureLayout()
+  activeTpl.value.layout.showCutMarks = Boolean(on)
+}
+
 const templates = ref([])
 const fonts = ref({ system: [], uploaded: [] })
 const datasets = ref([])
@@ -94,13 +225,18 @@ const bgUrl = computed(() =>
     ? `pp://media/${activeTpl.value.background}`
     : '')
 
+// 底图比例应与「设计参照物」一致：单页对纸张、多联对单个成品
 const bgRatioWarn = computed(() => {
   const t = activeTpl.value
-  if (!t || !t.bgSize || !t.pageSize) return ''
-  const diff = Math.abs(t.bgSize.width / t.bgSize.height - t.pageSize.w / t.pageSize.h) / (t.pageSize.w / t.pageSize.h)
-  return diff > 0.02 ? `底图比例与纸张相差约 ${(diff * 100).toFixed(1)}%，打印时可能变形` : ''
+  if (!t || !t.bgSize) return ''
+  const { w, h } = itemSpec.value
+  const diff = Math.abs(t.bgSize.width / t.bgSize.height - w / h) / (w / h)
+  const target = layoutMode.value === 'grid' ? '成品尺寸' : '纸张'
+  return diff > 0.02 ? `底图比例与${target}相差约 ${(diff * 100).toFixed(1)}%，打印时可能变形` : ''
 })
 
+// 画布始终按**整张纸**缩放：多联时页面上要画出 M 列 × N 行格子，
+// 整页统一缩放才能一眼看到真实拼版效果（字段位置与字号都随纸张比例走）
 const canvasH = computed(() => {
   const t = activeTpl.value
   if (!t) return 540
@@ -140,6 +276,8 @@ function newTemplate() {
     bgSize: null,
     datasetId: '',
     fields: [],
+    // 版式：默认单页；切到多联后画布变成「单个成品」，成品尺寸决定每页排几列几行
+    layout: { mode: 'single', itemW: 85, itemH: 54, showCutMarks: true },
   }
   selectedIdx.value = -1
   multiSel.value = new Set()
@@ -155,6 +293,7 @@ async function openTemplate(id) {
     errorMsg.value = '' // 换模板即清掉旧报错——错误属于上一个模板，不该跟过来
     msg.value = ''
     activeTpl.value = await window.printpress.getTemplate(id)
+    ensureLayout() // 旧模板没有 layout 字段：补默认单页，避免下游读到 undefined
     selectedIdx.value = -1
     multiSel.value = new Set()
     undoStack.value = []
@@ -334,19 +473,29 @@ function onFieldPointerDown(e, idx) {
   }
   selectedIdx.value = idx
 
-  const rect = canvasEl.value.getBoundingClientRect()
+  // 定位参照系：多联时是「被抓住的那一格」（字段坐标本就相对格子），单页时是整张画布。
+  // 吸附目标也只取同一格内的字段——否则会把别的格子里的同名字段当成对齐基准。
+  const cellEl = e.currentTarget && e.currentTarget.closest
+    ? e.currentTarget.closest('.canvas-cell')
+    : null
+  if (cellEl && canvasEl.value) {
+    const all = [...canvasEl.value.querySelectorAll('.canvas-cell')]
+    activeCellIdx.value = Math.max(0, all.indexOf(cellEl))
+  }
+  const refEl = cellEl || canvasEl.value
+  const rect = refEl.getBoundingClientRect()
   const f = activeTpl.value.fields[idx]
   pushUndo()
 
   // 拖拽起点：抓取偏移 + 多选成员初始坐标 + 自身盒子尺寸 + 吸附目标
   const starts = [...multiSel.value].map((i) => ({ i, x: activeTpl.value.fields[i].x, y: activeTpl.value.fields[i].y }))
-  const ownEl = canvasEl.value.querySelectorAll('.field-box')[idx]
+  const ownEl = refEl.querySelectorAll('.field-box')[idx]
   const ownRect = ownEl ? ownEl.getBoundingClientRect() : rect
   const boxW = ownRect.width
   const boxH = ownRect.height
   const targetsV = [rect.width / 2]
   const targetsH = [rect.height / 2]
-  canvasEl.value.querySelectorAll('.field-box').forEach((el, i) => {
+  refEl.querySelectorAll('.field-box').forEach((el, i) => {
     if (multiSel.value.has(i)) return
     const r = el.getBoundingClientRect()
     targetsV.push(r.left - rect.left, r.left - rect.left + r.width / 2, r.right - rect.left)
@@ -415,8 +564,12 @@ function onPointerMove(e) {
     [[pxY(f.y), 't'], [pxY(f.y) + d.boxH / 2, 'm'], [pxY(f.y) + d.boxH, 'b']],
     d.targetsH,
   )
-  if (snapV) { f.x = clamp(rawX + (snapV.adjust / d.rect.width) * 100); guideV.value = snapV.line } else guideV.value = null
-  if (snapH) { f.y = clamp(rawY + (snapH.adjust / d.rect.height) * 100); guideH.value = snapH.line } else guideH.value = null
+  // 辅助线用「画布坐标系」定位：多联时参照格有原点偏移，要加上去，否则线会画错位置
+  const cRect = canvasEl.value.getBoundingClientRect()
+  const offX = d.rect.left - cRect.left
+  const offY = d.rect.top - cRect.top
+  if (snapV) { f.x = clamp(rawX + (snapV.adjust / d.rect.width) * 100); guideV.value = offX + snapV.line } else guideV.value = null
+  if (snapH) { f.y = clamp(rawY + (snapH.adjust / d.rect.height) * 100); guideH.value = offY + snapH.line } else guideH.value = null
 }
 
 function onPointerUp() {
@@ -429,12 +582,13 @@ function onPointerUp() {
 
 // ---- 多选对齐：以选中盒子的实际包围盒为基准 ----
 function measureSelected() {
-  const els = canvasEl.value.querySelectorAll('.field-box')
+  const ref = refFrameEl()
+  const els = ref.querySelectorAll('.field-box')
   return [...multiSel.value]
     .filter((i) => els[i])
     .map((i) => {
       const r = els[i].getBoundingClientRect()
-      const c = canvasEl.value.getBoundingClientRect()
+      const c = ref.getBoundingClientRect()
       return { i, left: r.left - c.left, top: r.top - c.top, w: r.width, h: r.height }
     })
 }
@@ -448,8 +602,10 @@ function alignSelected(kind) {
   const maxRight = Math.max(...boxes.map((b) => b.left + b.w))
   const minTop = Math.min(...boxes.map((b) => b.top))
   const maxBottom = Math.max(...boxes.map((b) => b.top + b.h))
-  const W = canvasEl.value.getBoundingClientRect().width
-  const H = canvasEl.value.getBoundingClientRect().height
+  // 换算基准同样用参照格，保证多联下对齐结果是「格内坐标」
+  const refRect = refFrameEl().getBoundingClientRect()
+  const W = refRect.width
+  const H = refRect.height
   for (const b of boxes) {
     const f = activeTpl.value.fields[b.i]
     if (kind === 'left') f.x = clamp((minLeft / W) * 100)
@@ -602,11 +758,15 @@ async function removeFont(file) {
 }
 
 onMounted(async () => {
-  // 纸张常量由主进程下发（单一权威定义源）
+  // 纸张与成品尺寸常量由主进程下发（单一权威定义源）
   try {
     const env = await window.printpress.getEnv()
     window.__PAGE_SIZES__ = env.pageSizes || []
-  } catch { window.__PAGE_SIZES__ = [] }
+    ITEM_SIZE_PRESETS.value = env.itemSizes || []
+  } catch {
+    window.__PAGE_SIZES__ = []
+    ITEM_SIZE_PRESETS.value = []
+  }
   window.addEventListener('keydown', onKeydown)
   await refreshLists()
 })
@@ -685,6 +845,49 @@ onBeforeUnmount(() => {
             width="130px"
             @change="onPageSizeChange"
           />
+          <!-- 版式：单页 = 一记录一页；多联 = 一页排多个成品（画布切换为单个成品） -->
+          <CustomSelect
+            :model-value="layoutMode"
+            :options="layoutOptions"
+            width="96px"
+            @change="onLayoutModeChange"
+          />
+          <template v-if="layoutMode === 'grid'">
+            <CustomSelect
+              :model-value="itemSizeId"
+              :options="itemSizeOptions"
+              width="150px"
+              @change="onItemSizeChange"
+            />
+            <input
+              class="item-input"
+              type="number"
+              min="5"
+              max="500"
+              :value="itemSpec.w"
+              title="成品宽度（mm）"
+              @change="onItemDim('w', $event.target.value)"
+            />
+            <span class="tb-unit">×</span>
+            <input
+              class="item-input"
+              type="number"
+              min="5"
+              max="500"
+              :value="itemSpec.h"
+              title="成品高度（mm）"
+              @change="onItemDim('h', $event.target.value)"
+            />
+            <span class="tb-unit">mm</span>
+            <label class="cut-toggle" title="在格子边缘画 0.2mm 虚线，便于手工裁切">
+              <input
+                type="checkbox"
+                :checked="activeTpl.layout.showCutMarks !== false"
+                @change="onCutMarks($event.target.checked)"
+              />
+              裁切线
+            </label>
+          </template>
           <button class="btn-ghost" @click="uploadBackground">上传底图</button>
           <CustomSelect
             v-model="activeDatasetId"
@@ -715,6 +918,17 @@ onBeforeUnmount(() => {
         <p v-if="activeDatasetId && hiddenFieldCount" class="warn-line">
           {{ hiddenFieldCount }} 个字段未启用打印（数据表格列头点「印」可开启）
         </p>
+        <!-- 多联版式摘要：明确告诉用户「现在设计的是单个成品、每页能排几个」 -->
+        <p v-if="gridInfo" class="warn-line" :class="{ 'warn-strong': !gridInfo.ok }">
+          <template v-if="gridInfo.ok">
+            多联版式：{{ activeTpl.pageSize.w }}×{{ activeTpl.pageSize.h }}mm 纸排
+            <b>{{ gridInfo.cols }} 列 × {{ gridInfo.rows }} 行 = 每页 {{ gridInfo.perPage }} 个</b>
+            {{ itemSpec.w }}×{{ itemSpec.h }}mm 成品；字段按单个成品排版，画布上每一格同步生效
+          </template>
+          <template v-else>
+            当前纸张放不下 2 个 {{ itemSpec.w }}×{{ itemSpec.h }}mm 的成品——请换更大的纸张，或缩小成品尺寸
+          </template>
+        </p>
         <p v-if="bgRatioWarn" class="warn-line warn-strong">{{ bgRatioWarn }}</p>
 
         <!-- 字段面板：数据页启用「印」的字段平铺于此，点击即加入画布 -->
@@ -740,26 +954,62 @@ onBeforeUnmount(() => {
               class="canvas"
               :style="{ height: canvasH + 'px' }"
             >
-              <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
-              <!-- 吸附辅助线（朱砂红，拖拽靠近时出现） -->
+              <!-- 单页：整页底图 + 字段 -->
+              <template v-if="!isGrid">
+                <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                <div
+                  v-for="(f, idx) in activeTpl.fields"
+                  :key="idx"
+                  class="field-box"
+                  :class="{
+                    selected: idx === selectedIdx,
+                    inmulti: multiSel.has(idx) && multiSel.size > 1,
+                    nodata: fieldEmpty(f) && !fieldMissing(f),
+                    stale: fieldMissing(f),
+                  }"
+                  :style="fieldStyle(f)"
+                  @pointerdown.prevent="onFieldPointerDown($event, idx)"
+                >
+                  {{ fieldText(f) }}
+                </div>
+              </template>
+
+              <!-- 多联：一页 M 列 × N 行格子，每格铺一张成品底图 + 同一套字段 -->
+              <template v-else>
+                <div
+                  v-for="c in gridCells"
+                  :key="c.k"
+                  class="canvas-cell"
+                  :class="{ cut: cutMarks }"
+                  :style="{ left: c.left + '%', top: c.top + '%', width: c.w + '%', height: c.h + '%' }"
+                >
+                  <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                  <div
+                    v-for="(f, idx) in activeTpl.fields"
+                    :key="idx"
+                    class="field-box"
+                    :class="{
+                      selected: idx === selectedIdx,
+                      inmulti: multiSel.has(idx) && multiSel.size > 1,
+                      nodata: fieldEmpty(f) && !fieldMissing(f),
+                      stale: fieldMissing(f),
+                    }"
+                    :style="fieldStyle(f)"
+                    @pointerdown.prevent="onFieldPointerDown($event, idx)"
+                  >
+                    {{ fieldText(f) }}
+                  </div>
+                </div>
+                <p v-if="!gridCells.length" class="canvas-hint">
+                  当前纸张放不下 2 个成品——请调整纸张或成品尺寸
+                </p>
+              </template>
+
+              <!-- 吸附辅助线（朱砂红，拖拽靠近时出现；按画布坐标系定位） -->
               <div v-if="guideV !== null" class="snap-guide guide-v" :style="{ left: guideV + 'px' }"></div>
               <div v-if="guideH !== null" class="snap-guide guide-h" :style="{ top: guideH + 'px' }"></div>
-              <div
-                v-for="(f, idx) in activeTpl.fields"
-                :key="idx"
-                class="field-box"
-                :class="{
-                  selected: idx === selectedIdx,
-                  inmulti: multiSel.has(idx) && multiSel.size > 1,
-                  nodata: fieldEmpty(f) && !fieldMissing(f),
-                  stale: fieldMissing(f),
-                }"
-                :style="fieldStyle(f)"
-                @pointerdown.prevent="onFieldPointerDown($event, idx)"
-              >
-                {{ fieldText(f) }}
-              </div>
-              <p v-if="activeTpl.fields.length === 0" class="canvas-hint">
+
+              <p v-if="!isGrid && activeTpl.fields.length === 0" class="canvas-hint">
                 {{ activeDatasetId ? '点击上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
               </p>
             </div>
@@ -992,6 +1242,30 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+/* ---- 多联版式控件 ---- */
+.item-input {
+  width: 62px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-unit { font-size: 12px; color: var(--stone); }
+
+.cut-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .warn-line { font-size: 12px; color: var(--stone); margin: 4px 0; }
 .warn-strong { color: var(--warn); }
 
@@ -1015,6 +1289,19 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: fill;
   user-select: none;
+}
+
+/* ---- 多联格子：页面上的一个成品位 ---- */
+/* 必须是 absolute 且形成包含块，字段的百分比坐标才是「相对格子」——
+   与渲染引擎输出（.cell）保持同一语义，画布所见即打印所得 */
+.canvas-cell {
+  position: absolute;
+  overflow: hidden;
+}
+
+.canvas-cell.cut {
+  outline: 1px dashed var(--cinnabar);
+  outline-offset: -1px;
 }
 
 .field-box {

@@ -45,11 +45,16 @@ const dsPrintStats = computed(() => {
   const ds = datasets.value.find((d) => d.id === selDs.value)
   if (!ds) return null
   const mine = jobs.value.filter((j) => j.datasetId === selDs.value && j.status === 'ok')
+  // 主口径只算全量出片（与数据页侧栏「已打」徽标一致）；补打单独统计，不混进主数字
+  const full = mine.filter((j) => !j.partial)
+  const part = mine.filter((j) => j.partial)
   return {
     name: ds.name,
     rowCount: ds.rowCount,
-    times: mine.length,
-    pages: mine.reduce((s, j) => s + (j.recordCount || 0), 0),
+    times: full.length,
+    pages: full.reduce((s, j) => s + (j.recordCount || 0), 0),
+    partialTimes: part.length,
+    partialRows: part.reduce((s, j) => s + (j.recordCount || 0), 0),
     last: mine[0]?.createdAt || '',
   }
 })
@@ -57,6 +62,92 @@ const dsPrintStats = computed(() => {
 const boundDsMissing = computed(() =>
   Boolean(boundTpl.value && boundTpl.value.datasetId
     && !datasets.value.some((d) => d.id === boundTpl.value.datasetId)))
+
+// ---- 行级出片范围（不变量「留痕必全，状态只认全量」）----
+// selRows = null 表示全量；数组为 0 基索引集合（基于数据集全量行序）。
+// 部分出片不回写数据集「已打」状态，避免「打了 3 个人却显示整份已打」。
+const selRows = ref(null)
+const selRowsMeta = ref(null) // { dsId, rowCount }：行数漂移守卫比对基准
+const dsDetail = ref(null)    // 当前数据集完整数据（行选择面板用）
+const scopeOpen = ref(false)
+const scopeSearch = ref('')
+const scopePicked = ref(new Set())
+const SCOPE_RENDER_CAP = 300  // 面板最多渲染行数（大表防卡顿，搜索仍作用于全量）
+
+const dsRowCount = computed(() => dsDetail.value?.rows.length ?? 0)
+const scopeLabel = computed(() =>
+  (selRows.value ? `已选 ${selRows.value.length} / ${dsRowCount.value} 行` : `全部 ${dsRowCount.value} 行`))
+
+/** 搜索命中行（匹配任一列的值，大小写不敏感） */
+const scopeFiltered = computed(() => {
+  const all = dsDetail.value?.rows || []
+  const kw = scopeSearch.value.trim().toLowerCase()
+  const idxs = all.map((_, i) => i)
+  if (!kw) return idxs
+  return idxs.filter((i) => Object.values(all[i]).some((v) => String(v ?? '').toLowerCase().includes(kw)))
+})
+const scopeVisible = computed(() => scopeFiltered.value.slice(0, SCOPE_RENDER_CAP))
+
+function rowPreview(row) {
+  const cols = dsDetail.value?.columns || []
+  const vals = cols.slice(0, 4).map((c) => String(row[c.key] ?? '').trim()).filter(Boolean)
+  return vals.join(' · ') || '（空行）'
+}
+
+async function loadDetail() {
+  dsDetail.value = null
+  if (!selDs.value) return
+  try { dsDetail.value = await window.printpress.getDataset(selDs.value) } catch { /* 预览/打印会兜底报错 */ }
+}
+
+/** 设置出片范围：null = 全量；数组 = 部分。同时记录行数快照供漂移守卫比对 */
+function setScope(rows) {
+  selRows.value = Array.isArray(rows) && rows.length ? [...rows].sort((a, b) => a - b) : null
+  selRowsMeta.value = selRows.value ? { dsId: selDs.value, rowCount: dsRowCount.value } : null
+}
+
+/** 漂移守卫：数据集增删行会让旧索引错位，必须重置为全量，否则会打错人 */
+function guardScope() {
+  if (!selRows.value || !selRowsMeta.value) return
+  const cur = datasets.value.find((d) => d.id === selRowsMeta.value.dsId)
+  if (!cur || cur.rowCount !== selRowsMeta.value.rowCount) {
+    selRows.value = null
+    selRowsMeta.value = null
+    say('数据集行数已变化，出片范围已重置为全部')
+  }
+}
+
+function openScope() {
+  if (!dsDetail.value) return
+  scopeSearch.value = ''
+  scopePicked.value = new Set(selRows.value || Array.from({ length: dsRowCount.value }, (_, i) => i))
+  scopeOpen.value = true
+}
+
+function toggleScopeRow(i) {
+  const s = new Set(scopePicked.value)
+  if (s.has(i)) s.delete(i); else s.add(i)
+  scopePicked.value = s
+}
+
+function scopeSelectAll() { scopePicked.value = new Set(Array.from({ length: dsRowCount.value }, (_, i) => i)) }
+function scopeSelectNone() { scopePicked.value = new Set() }
+function scopeAddFiltered() {
+  const s = new Set(scopePicked.value)
+  for (const i of scopeFiltered.value) s.add(i)
+  scopePicked.value = s
+}
+
+function confirmScope() {
+  const picked = [...scopePicked.value].sort((a, b) => a - b)
+  if (!picked.length) { say('请至少勾选一行'); return }
+  // 勾满全部 = 全量：走默认路径，仍回写数据集状态（与不变量口径一致）
+  setScope(picked.length === dsRowCount.value ? null : picked)
+  scopeOpen.value = false
+  say(selRows.value
+    ? `出片范围：已选 ${selRows.value.length} / ${dsRowCount.value} 行（部分出片，不改数据集状态）`
+    : '出片范围：全部行')
+}
 
 // ---- 换绑数据集：模板 × 数据集字段匹配校验（缺失即阻止） ----
 const rebindShow = ref(false)
@@ -79,8 +170,9 @@ const zoomK = computed(() => Number(zoom.value) / 100)
 // 页面毫米 → px（96dpi），iframe 视口 = 内容全宽（毫米换算像素），transform 只负责显示缩放
 const frameW = computed(() => previewInfo.value ? Math.round(previewInfo.value.page.w * 96 / 25.4) : 794)
 const frameH = computed(() => previewInfo.value ? Math.round(previewInfo.value.page.h * 96 / 25.4) : 1123)
-/** iframe 高度铺满全部页数 +8px 余量：内部出现任何滚动条都会吃掉宽度造成横向裁边 */
-const frameTotalH = computed(() => frameH.value * (previewInfo.value?.recordCount || 1) + 8)
+// iframe 高度铺满全部页数 +8px 余量：内部出现任何滚动条都会吃掉宽度造成横向裁边。
+// 注意用 pageCount（纸张页数）而非 recordCount——多联下一页装多条记录，用记录数会把 iframe 撑高
+const frameTotalH = computed(() => frameH.value * (previewInfo.value?.pageCount || 1) + 8)
 
 function say(msg) {
   toast.value = msg
@@ -93,6 +185,7 @@ async function refreshAll() {
   jobs.value = await window.printpress.listJobs()
   if (!datasets.value.some((d) => d.id === selDs.value)) selDs.value = ''
   if (!templates.value.some((t) => t.id === selTpl.value)) selTpl.value = ''
+  guardScope() // 行数漂移则重置范围（打印不改行数，故正常打印后选择保留）
 }
 
 async function rebuildPreview() {
@@ -114,9 +207,15 @@ async function rebuildPreview() {
   }
 }
 
-/** 统一的打印请求载荷：数据集 × 模板，始终作用于全部数据行。 */
+/** 统一的打印请求载荷：数据集 × 模板 × 出片范围（rows=null 即全量，作用于全部行） */
 function buildPayload() {
-  return { datasetId: selDs.value, templateId: selTpl.value }
+  return {
+    datasetId: selDs.value,
+    templateId: selTpl.value,
+    // rows 必须是普通数组：Vue 响应式数组是 Proxy，经 IPC 结构化克隆会抛
+    // 「An object could not be cloned.」，故显式拷贝一份再传
+    rows: selRows.value ? [...selRows.value] : null,
+  }
 }
 
 // 模板切换 → 自动带出绑定的数据集（模板保存时已绑定；旧模板未绑定时才需手选）
@@ -178,7 +277,13 @@ async function confirmRebind() {
   }
 }
 
-watch([selDs, selTpl], rebuildPreview)
+// 数据集变化 → 清空行级范围（旧索引对新数据集无意义）并重载行数据
+watch(selDs, async () => {
+  setScope(null)
+  await loadDetail()
+})
+// 范围变化同样要重建预览（预览与出片共用同一份范围）
+watch([selDs, selTpl, selRows], rebuildPreview)
 
 /** 校验 → 有空值先弹窗（可中断可放行），字段缺失不可放行；无问题直接执行 */
 async function runAction(action) {
@@ -235,7 +340,7 @@ async function execute(action) {
     if (action === 'pdf') {
       const r = await window.printpress.printExportPdf(payload)
       if (r.canceled) { say('已取消导出'); return }
-      say(`PDF 已导出（${previewInfo.value ? previewInfo.value.recordCount : '?'} 页）`)
+      say(`PDF 已导出（${previewInfo.value ? previewInfo.value.pageCount : '?'} 页）`)
     } else {
       const r = await window.printpress.printSend(payload)
       if (r.ok) say('已发送打印机')
@@ -349,6 +454,20 @@ onMounted(refreshAll)
       </span>
     </div>
 
+    <!-- 出片范围：默认全量；可切换为行级勾选（部分出片不回写数据集「已打」状态） -->
+    <div v-if="ready" class="scope-bar range-bar">
+      <span class="det-flag" :class="selRows ? 'st-partial' : 'st-ok'">
+        {{ selRows ? '部分出片' : '全量出片' }}
+      </span>
+      <span class="scope-note">
+        出片范围：{{ scopeLabel }}
+        <template v-if="selRows">· 不改数据集「已打」状态，仅留痕</template>
+      </span>
+      <span class="tb-spacer"></span>
+      <button class="btn btn-mini" :disabled="busy || !dsDetail" @click="openScope">选择打印行</button>
+      <button v-if="selRows" class="btn btn-mini" :disabled="busy" @click="setScope(null)">恢复全量</button>
+    </div>
+
     <!-- 打印统计：从留痕自动聚合，对照工作簿是否遗漏 -->
     <div v-if="ready && dsPrintStats" class="scope-bar stats-bar">
       <span class="det-flag" :class="dsPrintStats.times ? 'st-ok' : 'st-failed'">
@@ -357,7 +476,8 @@ onMounted(refreshAll)
       <span class="scope-note">
         「{{ dsPrintStats.name }}」（共 {{ dsPrintStats.rowCount }} 行）：
         <template v-if="dsPrintStats.times">已打印/导出 {{ dsPrintStats.times }} 次 · 累计 {{ dsPrintStats.pages }} 份 · 最近 {{ fmtTime(dsPrintStats.last) }}</template>
-        <template v-else>尚无打印或导出记录——如果这份名单本来就要出片，这里就是遗漏提醒</template>
+        <template v-else>尚无全量打印或导出记录——如果这份名单本来就要出片，这里就是遗漏提醒</template>
+        <template v-if="dsPrintStats.partialTimes">（另有补打 {{ dsPrintStats.partialTimes }} 次 · {{ dsPrintStats.partialRows }} 行，不计入全量）</template>
       </span>
     </div>
 
@@ -370,7 +490,11 @@ onMounted(refreshAll)
       <div class="preview-bar">
         <span v-if="previewInfo" class="preview-meta">
           {{ previewInfo.templateName }} × {{ previewInfo.datasetName }}
-          · {{ previewInfo.recordCount }} 页 · {{ previewInfo.page.name }}
+          · {{ previewInfo.pageCount }} 页
+          <template v-if="previewInfo.layout?.enabled">
+            （{{ previewInfo.recordCount }} 条 × 每页 {{ previewInfo.layout.cols }}×{{ previewInfo.layout.rows }}）
+          </template>
+          · {{ previewInfo.page.name }}
         </span>
         <span class="tb-spacer"></span>
         <span class="tb-label">缩放</span>
@@ -413,7 +537,14 @@ onMounted(refreshAll)
             <td>{{ fmtTime(j.createdAt) }}</td>
             <td>{{ j.templateName }}</td>
             <td>{{ j.datasetName }}</td>
-            <td>{{ modeLabel[j.mode] || j.mode }}</td>
+            <td>
+              {{ modeLabel[j.mode] || j.mode }}
+              <span
+                v-if="j.partial"
+                class="partial-tag"
+                :title="`仅出片 ${j.recordCount} 行，数据集共 ${j.totalRows} 行；不影响「已打」状态`"
+              >部分 {{ j.recordCount }}/{{ j.totalRows }}</span>
+            </td>
             <td>{{ j.recordCount }}</td>
             <td><span class="det-flag" :class="'st-' + j.status">{{ statusLabel[j.status] || j.status }}</span></td>
             <td class="row-actions">
@@ -503,6 +634,39 @@ onMounted(refreshAll)
         <div class="modal-actions">
           <button class="btn" @click="rebindShow = false">取消</button>
           <button class="btn btn-primary" :disabled="!rebindResult?.ok || rebindBusy" @click="confirmRebind">确认换绑</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 行级出片范围选择：默认全选，可取消后搜索勾选（补打 / 分批） -->
+    <div v-if="scopeOpen" class="modal-mask">
+      <div class="modal modal-wide">
+        <h3 class="modal-title">选择打印行</h3>
+        <p class="modal-sub">
+          默认全选；可「取消全选」后搜索、逐个勾选。仅作用于本次出片，不写入数据集状态。
+        </p>
+        <div class="scope-toolbar">
+          <input v-model="scopeSearch" class="scope-input" placeholder="搜索姓名 / 机构等任意列内容…" />
+          <button class="btn btn-mini" @click="scopeSelectAll">全选</button>
+          <button class="btn btn-mini" @click="scopeSelectNone">取消全选</button>
+          <button v-if="scopeSearch.trim()" class="btn btn-mini" @click="scopeAddFiltered">勾选命中项</button>
+        </div>
+        <div class="scope-list">
+          <label v-for="i in scopeVisible" :key="i" class="scope-row" :class="{ on: scopePicked.has(i) }">
+            <input type="checkbox" :checked="scopePicked.has(i)" @change="toggleScopeRow(i)" />
+            <span class="scope-no">第 {{ i + 1 }} 行</span>
+            <span class="scope-text" :title="rowPreview(dsDetail.rows[i])">{{ rowPreview(dsDetail.rows[i]) }}</span>
+          </label>
+          <p v-if="!scopeFiltered.length" class="hint-sub">没有匹配的行</p>
+          <p v-else-if="scopeFiltered.length > SCOPE_RENDER_CAP" class="hint-sub">
+            共 {{ scopeFiltered.length }} 行命中，仅列出前 {{ SCOPE_RENDER_CAP }} 行；请用搜索缩小范围
+          </p>
+        </div>
+        <div class="modal-actions">
+          <span class="scope-count">已选 {{ scopePicked.size }} / 共 {{ dsRowCount }} 行</span>
+          <span class="tb-spacer"></span>
+          <button class="btn" @click="scopeOpen = false">取消</button>
+          <button class="btn btn-primary" :disabled="!scopePicked.size" @click="confirmScope">确定</button>
         </div>
       </div>
     </div>
@@ -850,7 +1014,88 @@ onMounted(refreshAll)
 .modal-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 10px;
+}
+
+/* ---- 出片范围（行级勾选） ---- */
+.st-partial {
+  color: var(--cinnabar);
+  border-color: var(--cinnabar);
+}
+
+.partial-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--cinnabar);
+  white-space: nowrap;
+}
+
+.modal-wide { width: 560px; }
+
+.scope-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.scope-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.scope-list {
+  overflow-y: auto;
+  max-height: 46vh;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 4px 2px;
+  margin-bottom: 14px;
+}
+
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.scope-row:hover { background: var(--paper); }
+.scope-row.on { background: var(--cinnabar-soft); }
+
+.scope-no {
+  flex-shrink: 0;
+  min-width: 64px;
+  font-size: 12px;
+  color: var(--stone);
+  font-variant-numeric: tabular-nums;
+}
+
+.scope-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-count {
+  font-size: 12px;
+  color: var(--stone);
 }
 
 .toast {

@@ -52,7 +52,6 @@ contextBridge.exposeInMainWorld('printpress', {
   setColumnPrint: (datasetId, key, printOn) =>
     ipcRenderer.invoke('dataset:setColumnPrint', { datasetId, key, printOn }),
   fieldCatalog: (id) => ipcRenderer.invoke('catalog:fields', id),
-  columnValues: (payload) => ipcRenderer.invoke('catalog:values', payload),
 
   // 模板
   listTemplates: () => ipcRenderer.invoke('template:list'),
@@ -73,7 +72,6 @@ contextBridge.exposeInMainWorld('printpress', {
   printGenerate: (payload) => ipcRenderer.invoke('print:generate', payload),
   printExportPdf: (payload) => ipcRenderer.invoke('print:exportPdf', payload),
   printSend: (payload) => ipcRenderer.invoke('print:send', payload),
-  printExportGrouped: (payload) => ipcRenderer.invoke('print:exportGrouped', payload),
 
   // 打印历史
   listJobs: () => ipcRenderer.invoke('job:list'),

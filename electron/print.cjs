@@ -4,6 +4,11 @@
  *
  * 校验分层（承袭源项目原则）：字段目录数据驱动 → 画布半透明提示 →
  * 【本层】打印前空值报告（前端弹窗，可中断可放行）→ 渲染时空值留白兜底。
+ *
+ * 出片范围（不变量「留痕必全，状态只认全量」）：
+ * - 范围可为全量，也可为行级勾选（rows = 0 基索引集合，基于数据集全量行序）；
+ * - 无论范围大小，每一次出片都留痕（createJob 记录 scope）；
+ * - 但数据集级「已打」状态只由全量出片回写——判定依据 scope.partial，回写动作在 ipc 层。
  */
 const path = require('path')
 const fs = require('fs')
@@ -12,7 +17,7 @@ const { loadJson, saveJson } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
 const renderEngine = require('./render-engine.cjs')
-const { applyFilters, isPlaceholder } = require('./rows.cjs')
+const { isPlaceholder } = require('./placeholder.cjs')
 
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
 const ARCHIVE_ROOT = path.join(DATA_DIR, 'archive')
@@ -22,17 +27,53 @@ function isEmpty(v) {
   return v === null || v === undefined || String(v).trim() === ''
 }
 
+/** 规范化行级选择：去重、越界丢弃、按原行序升序——打印顺序跟随名单顺序，而非勾选顺序 */
+function normalizeSelection(selection, total) {
+  return [...new Set(selection.map(Number))]
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < total)
+    .sort((a, b) => a - b)
+}
+
 /**
- * 出口校验：打印范围（行筛选）× 模板字段 → 问题清单。
+ * 出片范围解析：rows 为行级勾选索引集合（null / 缺省 = 全量）。
+ * 返回 { rows, selection }：selection 为规范化索引集合，全量时为 null。
+ */
+function resolveScope(ds, { rows } = {}) {
+  if (Array.isArray(rows)) {
+    const selection = normalizeSelection(rows, ds.rows.length)
+    if (!selection.length) throw new Error('请至少勾选一行再出片')
+    return { rows: selection.map((i) => ds.rows[i]), selection }
+  }
+  return { rows: ds.rows, selection: null }
+}
+
+/** 范围摘要：selected 为本次出片行数；partial 表示非全量（据此决定是否回写数据集状态） */
+function scopeInfo(selection, total) {
+  const selected = selection ? selection.length : total
+  return { selected, total, partial: Boolean(selection) && selected !== total }
+}
+
+/**
+ * 是否回写数据集「已打」状态——**单一权威判定**（不变量「留痕必全，状态只认全量」）。
+ * 只有全量出片回写；部分出片（行级勾选 / 分组导出）一律不回写，否则
+ * 「打了 3 个人」会显示成「整份已打」，侧栏信号失真、用户判断被带偏。
+ */
+function shouldMarkPrinted(scope) {
+  return !(scope && scope.partial)
+}
+
+/**
+ * 出口校验：出片范围（全量 / 行级勾选）× 模板字段 → 问题清单。
  * 只提示不拦截：空值位置留白打印；疑似占位（值形态规则）单独提示。
  * 返回 issues 含空值或占位值 > 0 的字段；allEmptyFields 是整列为空的重点提示。
  */
-function validateBatch(datasetId, templateId, filters) {
+function validateBatch(datasetId, templateId, rows) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
   // column 为权威属性，key 是旧版 UI 的存法（兼容读取）
   const fields = (tpl.fields || []).filter((f) => f.column || f.key)
-  const rows = applyFilters(ds.rows, filters)
+  const scope = resolveScope(ds, { rows })
+  const list = scope.rows
 
   const issues = []
   const dsKeys = new Set((ds.columns || []).map((c) => c.key))
@@ -44,9 +85,9 @@ function validateBatch(datasetId, templateId, filters) {
         key: colName,
         label: f.label || colName,
         missing: true,
-        empty: rows.length,
+        empty: list.length,
         placeholder: 0,
-        total: rows.length,
+        total: list.length,
       })
       continue
     }
@@ -54,14 +95,16 @@ function validateBatch(datasetId, templateId, filters) {
     let placeholder = 0
     const cells = [] // 出错单元格坐标（0 基行号 + 列键），供「去补录」直达跳转；上限防 payload 膨胀
     const CELL_CAP = 30
-    for (let ri = 0; ri < rows.length; ri++) {
-      const v = rows[ri][colName]
+    for (let ri = 0; ri < list.length; ri++) {
+      // 行级勾选时行号须回填为「数据集全量行号」，否则「去补录直达」会跳到错误行
+      const fullIndex = scope.selection ? scope.selection[ri] : ri
+      const v = list[ri][colName]
       if (isEmpty(v)) {
         empty++
-        if (cells.length < CELL_CAP) cells.push({ rowIndex: ri, kind: 'empty' })
+        if (cells.length < CELL_CAP) cells.push({ rowIndex: fullIndex, kind: 'empty' })
       } else if (isPlaceholder(v)) {
         placeholder++
-        if (cells.length < CELL_CAP) cells.push({ rowIndex: ri, kind: 'placeholder' })
+        if (cells.length < CELL_CAP) cells.push({ rowIndex: fullIndex, kind: 'placeholder' })
       }
     }
     if (empty > 0 || placeholder > 0) {
@@ -70,35 +113,46 @@ function validateBatch(datasetId, templateId, filters) {
         label: f.label || colName,
         empty,
         placeholder,
-        total: rows.length,
+        total: list.length,
         cells,
         cellsTotal: empty + placeholder,
       })
     }
   }
   return {
-    recordCount: rows.length,
+    recordCount: list.length,
     totalCount: ds.rows.length,
-    filtered: rows.length !== ds.rows.length,
+    filtered: list.length !== ds.rows.length,
+    scope: scopeInfo(scope.selection, ds.rows.length),
     fieldCount: fields.length,
     issues,
     allEmptyFields: issues.filter((i) => i.empty === i.total).map((i) => i.label),
   }
 }
 
-/** 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；filters 限定打印范围 */
-function buildBatchHtml(datasetId, templateId, filters) {
+/** 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；范围由 rows（行级勾选）限定 */
+function buildBatchHtml(datasetId, templateId, rows) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
   const spec = renderEngine.pageSpec(tpl.pageSize)
-  const rows = applyFilters(ds.rows, filters)
+  const scope = resolveScope(ds, { rows })
+  const list = scope.rows
+  // 多联：一页装多条记录，页数 ≠ 记录数，必须分开报，否则预览会按记录数撑高
+  const layout = renderEngine.resolveLayout(tpl.layout, spec)
+  const pageCount = layout.enabled ? Math.ceil(list.length / layout.perPage) : list.length
   return {
-    html: renderEngine.buildHtml(tpl, rows, { withToolbar: false }),
-    snapshotHtml: renderEngine.buildHtml(tpl, rows, { withToolbar: true }),
-    recordCount: rows.length,
+    html: renderEngine.buildHtml(tpl, list, { withToolbar: false }),
+    snapshotHtml: renderEngine.buildHtml(tpl, list, { withToolbar: true }),
+    recordCount: list.length,
+    pageCount,
+    layout: layout.enabled
+      ? { enabled: true, cols: layout.cols, rows: layout.rows, perPage: layout.perPage }
+      : { enabled: false },
     templateName: tpl.name,
     datasetName: ds.name,
     page: { id: spec.id, name: spec.name, w: spec.w, h: spec.h },
+    scope: scopeInfo(scope.selection, ds.rows.length),
+    selection: scope.selection,
   }
 }
 
@@ -111,8 +165,10 @@ function sanitizeFilename(name) {
 /**
  * 留痕：快照 HTML 写入 archive/年-月/<jobId>/snapshot.html，
  * 任务元数据原子写入 print-jobs 存储。
+ * 范围字段：partial 标记部分出片（供 UI 标注「部分 N/总」并与全量区分），
+ * selection 仅在部分出片时落盘（全量为 null，避免冗余）。
  */
-function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, snapshotHtml, status, detail }) {
+function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, snapshotHtml, status, detail }) {
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const jobId = `job_${now.getTime().toString(36)}${crypto.randomBytes(3).toString('hex')}`
@@ -121,6 +177,7 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
   const snapshotRel = `archive/${month}/${jobId}/snapshot.html`
   fs.writeFileSync(path.join(DATA_DIR, snapshotRel), snapshotHtml || '', 'utf-8')
 
+  const isPartial = Boolean(partial)
   const job = {
     id: jobId,
     createdAt: now.toISOString(),
@@ -130,6 +187,9 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     datasetName: datasetName || '',
     mode: mode || 'pdf', // 'pdf' | 'print'
     recordCount: recordCount || 0,
+    totalRows: Number(totalRows) || recordCount || 0,
+    partial: isPartial,
+    selection: isPartial && Array.isArray(selection) ? selection : null,
     status: status || 'ok', // 'ok' | 'failed' | 'canceled'
     detail: detail || '',
     snapshot: snapshotRel,
@@ -180,5 +240,9 @@ module.exports = {
   deleteJob,
   resolveSnapshot,
   sanitizeFilename,
+  normalizeSelection,
+  resolveScope,
+  scopeInfo,
+  shouldMarkPrinted,
   ARCHIVE_ROOT,
 }
