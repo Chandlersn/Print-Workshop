@@ -553,9 +553,10 @@ function onFieldPointerDown(e, idx) {
   const ownRect = ownEl ? ownEl.getBoundingClientRect() : rect
   const boxW = ownRect.width
   const boxH = ownRect.height
-  // 抓取点相对「锚点」的偏移：锚点是 x% 对应的那条线（居中字段即盒中心线），
-  // 减去锚点在盒内的比例，pointermove 才能反解出正确的 x
-  const grabOffX = boxW * anchorRatio(f)
+  // grabX = 指针相对参照系原点的偏移 − 锚点当前px。反解 rawX = (clientX − rect.left − grabX)/W×100
+  // 恰好给出「新锚点」。锚点语义由 fieldStyle 的 translateX(-r×盒宽) 承担，这里不再补偿——
+  // 若在此多加 boxW×ratio，反解出的锚点会在按下瞬间左跳半个盒宽，
+  // 且 onPointerMove 的吸附边缘随之整体错位（吸附命中后字段停在线旁半个盒宽）。
   const targetsV = [rect.width / 2]
   const targetsH = [rect.height / 2]
   refEl.querySelectorAll('.field-box').forEach((el, i) => {
@@ -567,7 +568,7 @@ function onFieldPointerDown(e, idx) {
 
   dragState.value = {
     idx,
-    grabX: e.clientX - rect.left - (f.x / 100) * rect.width + grabOffX,
+    grabX: e.clientX - rect.left - (f.x / 100) * rect.width,
     grabY: e.clientY - rect.top - (f.y / 100) * rect.height,
     rect,
     starts,

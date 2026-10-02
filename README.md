@@ -138,6 +138,7 @@ node test/e2e-toggle.cjs        # CDP 真机 e2e：印开关 × 徽标 × 置顶
 node test/e2e-cell-jump.cjs     # CDP 真机 e2e：空值直达补录全链（自动隔离数据目录）
 node test/e2e-scope.cjs         # CDP 真机 e2e：行级出片范围全链（默认全量→取消全选→搜索勾选→部分出片）
 node test/e2e-grid.cjs          # CDP 真机 e2e：多联版式全链（画布切成品尺寸→每页格数→预览页数）
+node test/e2e-drag-snap.cjs     # CDP 真机 e2e：拖拽跟手性 + 居中吸附全链（按下不跳、吸附贴线）
 npm run dist                    # 打 NSIS 安装包（免签名，signAndEditExecutable=false）
 ```
 
