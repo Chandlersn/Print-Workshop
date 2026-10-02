@@ -145,6 +145,71 @@ function main() {
   const jobs = printDomain.listJobs()
   ok(jobs.length === 2 && jobs.every((j) => typeof j.partial === 'boolean'), '任务清单可读回且 partial 为布尔')
 
+  console.log('== 6. 出口校验增量：超宽估算与重复行（只提示不拦截） ==')
+  // 基线：原模板短值不误报
+  ok(!vAll.duplicates.length, '无重复行 → duplicates 为空', vAll.duplicates)
+  ok(!vAll.issues.some((i) => i.overlong > 0), '短值不触发超宽', vAll.issues)
+
+  // 超宽：锚点 x=95% 居中 → 可用宽度仅 10%（60mm 纸即 6mm），24pt 单个汉字 ≈ 8.5mm 必超
+  const tplNarrow = templates.saveTemplate({
+    name: '窄锚点模板',
+    pageSize: { id: 'custom', name: '自定义', w: 60, h: 40 },
+    background: '',
+    datasetId: ds.id,
+    fields: [
+      { column: '姓名', label: '姓名', x: 95, y: 30, fontSize: 24, color: '#000', align: 'center', bold: false, fontFamily: '' },
+    ],
+  })
+  const vNarrow = printDomain.validateBatch(ds.id, tplNarrow.id)
+  const narrow = vNarrow.issues.find((i) => i.key === '姓名')
+  ok(narrow && narrow.overlong === 6, '可用宽度不足时整列计超宽（6 行）', narrow)
+  ok(narrow && narrow.cells.every((c) => c.kind === 'overlong'), '超宽单元格 kind=overlong（直达 chips 可复用）', narrow && narrow.cells)
+
+  // 多联容器口径：单格宽（90mm）而非整页宽（210mm）
+  const tplGrid = templates.saveTemplate({
+    name: '多联超宽模板',
+    pageSize: { id: 'a4-portrait', w: 210, h: 297 },
+    background: '',
+    datasetId: ds.id,
+    layout: { mode: 'grid', itemW: 90, itemH: 60, showCutMarks: false },
+    fields: [
+      { column: '奖级', label: '奖级', x: 50, y: 50, fontSize: 24, color: '#000', align: 'center', bold: false, fontFamily: '' },
+    ],
+  })
+  const vGrid = printDomain.validateBatch(ds.id, tplGrid.id)
+  ok(!vGrid.issues.some((i) => i.overlong > 0), '多联按单格宽估算：2 字 24pt 在 90mm 格内不超宽', vGrid.issues)
+
+  // 重复行：整行所有列一致才算；行号回填全量行号
+  const dupCsv = path.join(TMP, 'dup.csv')
+  fs.writeFileSync(dupCsv, [
+    '姓名,奖级',
+    '张三,金奖',
+    '李四,银奖',
+    '张三,金奖',
+    '王五,铜奖',
+  ].join('\n'), 'utf-8')
+  const dsDup = dataset.getDataset(dataset.importFromFile(dupCsv).id)
+  for (const k of ['姓名', '奖级']) dataset.setColumnPrint(dsDup.id, k, true)
+  const tplDup = templates.saveTemplate({
+    name: '重复行模板',
+    pageSize: { id: 'a4-landscape', w: 297, h: 210 },
+    background: '',
+    datasetId: dsDup.id,
+    fields: [
+      { column: '姓名', label: '姓名', x: 50, y: 30, fontSize: 24, color: '#000', align: 'center', bold: false, fontFamily: '' },
+    ],
+  })
+  const vDup = printDomain.validateBatch(dsDup.id, tplDup.id)
+  ok(vDup.duplicates.length === 1 && vDup.duplicateTotal === 2, '识别 1 组 2 行重复', vDup.duplicates)
+  ok(JSON.stringify(vDup.duplicates[0].rowIdx) === '[0,2]', '重复行号为全量行号 [0,2]', vDup.duplicates[0] && vDup.duplicates[0].rowIdx)
+  ok(Boolean(vDup.duplicates[0].preview), '重复组带行摘要 preview', vDup.duplicates[0])
+  // 行级勾选只圈中重复行：同样回填全量行号；圈不齐则不报
+  const vDupPart = printDomain.validateBatch(dsDup.id, tplDup.id, [2, 0])
+  ok(vDupPart.duplicates.length === 1 && JSON.stringify(vDupPart.duplicates[0].rowIdx) === '[0,2]',
+    '行级勾选含重复两行 → 行号仍为全量行号', vDupPart.duplicates)
+  const vDupMiss = printDomain.validateBatch(dsDup.id, tplDup.id, [0, 1])
+  ok(!vDupMiss.duplicates.length, '行级勾选只圈中单行 → 不算重复', vDupMiss.duplicates)
+
   rmDeep(TMP)
   console.log(`\n共 ${passCount + failCount} 项断言：${passCount} 通过，${failCount} 失败`)
   process.exit(failCount ? 1 : 0)

@@ -1,5 +1,5 @@
 /**
- * 打印领域层：出口校验（空值报告，只提示不拦截）、批量 HTML 组装、
+ * 打印领域层：出口校验（空值 / 疑似占位 / 超宽 / 重复行报告，只提示不拦截）、批量 HTML 组装、
  * 打印任务留痕与归档（按月分目录，快照可回看）。
  *
  * 校验分层（承袭源项目原则）：字段目录数据驱动 → 画布半透明提示 →
@@ -25,6 +25,32 @@ const JOBS_STORE = 'print-jobs'
 
 function isEmpty(v) {
   return v === null || v === undefined || String(v).trim() === ''
+}
+
+/**
+ * 预检辅助：估算单行文字渲染宽度（mm）。
+ * CJK 及全角字符记 1em，其余（ASCII/半角）记 0.55em；1pt = 25.4/72 mm。
+ * 只求「明显超宽」的粗判（字数 × 字号 vs 可用宽度），不做像素级度量——
+ * 渲染层 .pf 是 nowrap，超宽即横向溢出被 overflow:hidden 裁掉，宁多报勿漏报。
+ */
+function estimateTextWidthMm(text, fontSizePt) {
+  let em = 0
+  for (const ch of String(text ?? '')) em += ch.charCodeAt(0) > 0xff ? 1 : 0.55
+  return em * (Number(fontSizePt) || 12) * 25.4 / 72
+}
+
+/** 字段锚点处的可用宽度（mm）：按对齐方式从 x% 推算（居中取两侧较窄一边的两倍） */
+function usableWidthMm(f, containerWmm) {
+  const x = Number(f.x) || 0
+  const align = f.align || 'center'
+  const pct = align === 'center' ? Math.min(x, 100 - x) * 2 : (align === 'right' ? x : 100 - x)
+  return containerWmm * pct / 100
+}
+
+/** 行摘要（重复行提示用）：前 3 个非空列值拼接 */
+function rowPreviewOf(ds, row) {
+  const vals = (ds.columns || []).map((c) => String(row[c.key] ?? '').trim()).filter(Boolean).slice(0, 3)
+  return vals.join(' · ') || '（空行）'
 }
 
 /** 规范化行级选择：去重、越界丢弃、按原行序升序——打印顺序跟随名单顺序，而非勾选顺序 */
@@ -64,8 +90,10 @@ function shouldMarkPrinted(scope) {
 
 /**
  * 出口校验：出片范围（全量 / 行级勾选）× 模板字段 → 问题清单。
- * 只提示不拦截：空值位置留白打印；疑似占位（值形态规则）单独提示。
- * 返回 issues 含空值或占位值 > 0 的字段；allEmptyFields 是整列为空的重点提示。
+ * 只提示不拦截：空值位置留白打印；疑似占位（值形态规则）单独提示；
+ * 超宽文字（估算越界）会被版面裁切；完全重复的行多为误粘贴（同名多份是合法需求，放行权在用户）。
+ * 返回 issues 含空值/占位/超宽 > 0 的字段；allEmptyFields 是整列为空的重点提示；
+ * duplicates 是内容完全一致的行分组。
  */
 function validateBatch(datasetId, templateId, rows) {
   const ds = dataset.getDataset(String(datasetId))
@@ -74,6 +102,10 @@ function validateBatch(datasetId, templateId, rows) {
   const fields = (tpl.fields || []).filter((f) => f.column || f.key)
   const scope = resolveScope(ds, { rows })
   const list = scope.rows
+  // 超宽估算的容器宽度：多联为单格宽，单页为整页宽（与渲染引擎 resolveLayout 口径一致）
+  const spec = renderEngine.pageSpec(tpl.pageSize)
+  const layout = renderEngine.resolveLayout(tpl.layout, spec)
+  const containerW = layout.enabled ? layout.itemW : spec.w
 
   const issues = []
   const dsKeys = new Set((ds.columns || []).map((c) => c.key))
@@ -87,12 +119,14 @@ function validateBatch(datasetId, templateId, rows) {
         missing: true,
         empty: list.length,
         placeholder: 0,
+        overlong: 0,
         total: list.length,
       })
       continue
     }
     let empty = 0
     let placeholder = 0
+    let overlong = 0
     const cells = [] // 出错单元格坐标（0 基行号 + 列键），供「去补录」直达跳转；上限防 payload 膨胀
     const CELL_CAP = 30
     for (let ri = 0; ri < list.length; ri++) {
@@ -105,20 +139,43 @@ function validateBatch(datasetId, templateId, rows) {
       } else if (isPlaceholder(v)) {
         placeholder++
         if (cells.length < CELL_CAP) cells.push({ rowIndex: fullIndex, kind: 'placeholder' })
+      } else if (estimateTextWidthMm(v, f.fontSize) > usableWidthMm(f, containerW)) {
+        overlong++
+        if (cells.length < CELL_CAP) cells.push({ rowIndex: fullIndex, kind: 'overlong' })
       }
     }
-    if (empty > 0 || placeholder > 0) {
+    if (empty > 0 || placeholder > 0 || overlong > 0) {
       issues.push({
         key: colName,
         label: f.label || colName,
         empty,
         placeholder,
+        overlong,
         total: list.length,
         cells,
-        cellsTotal: empty + placeholder,
+        cellsTotal: empty + placeholder + overlong,
       })
     }
   }
+
+  // 完全相同的行（所有列的值一致）：多为误粘贴 / 重复导入，只提示不拦截。
+  // 行号同样回填全量行号；单组展示上限 30 行，超出只报 total。
+  const DUP_CAP = 30
+  const seen = new Map()
+  const duplicates = []
+  for (let ri = 0; ri < list.length; ri++) {
+    const fullIndex = scope.selection ? scope.selection[ri] : ri
+    const sig = JSON.stringify((ds.columns || []).map((c) => list[ri][c.key] ?? ''))
+    let g = seen.get(sig)
+    if (!g) {
+      g = { preview: rowPreviewOf(ds, list[ri]), rowIdx: [], count: 0 }
+      seen.set(sig, g)
+    }
+    g.count++
+    if (g.rowIdx.length < DUP_CAP) g.rowIdx.push(fullIndex)
+  }
+  for (const g of seen.values()) if (g.count > 1) duplicates.push(g)
+
   return {
     recordCount: list.length,
     totalCount: ds.rows.length,
@@ -127,6 +184,8 @@ function validateBatch(datasetId, templateId, rows) {
     fieldCount: fields.length,
     issues,
     allEmptyFields: issues.filter((i) => i.empty === i.total).map((i) => i.label),
+    duplicates,
+    duplicateTotal: duplicates.reduce((s, g) => s + g.count, 0),
   }
 }
 
@@ -146,7 +205,9 @@ function buildBatchHtml(datasetId, templateId, rows) {
     recordCount: list.length,
     pageCount,
     layout: layout.enabled
-      ? { enabled: true, cols: layout.cols, rows: layout.rows, perPage: layout.perPage }
+      ? (layout.fold
+        ? { enabled: true, fold: true, perPage: 1 }
+        : { enabled: true, cols: layout.cols, rows: layout.rows, perPage: layout.perPage })
       : { enabled: false },
     templateName: tpl.name,
     datasetName: ds.name,

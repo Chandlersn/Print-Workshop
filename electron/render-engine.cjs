@@ -138,14 +138,34 @@ function pageSpec(pageSize) {
 }
 
 /**
- * 多联版式解析（纯函数，模板页 / 渲染引擎 / 打印中心共用同一口径）。
+ * 版式解析（纯函数，模板页 / 渲染引擎 / 打印中心共用同一口径）。
  *
- * 语义：底图在**多联模式下代表「单个成品图」**，而不是整页；用户给出成品尺寸（mm），
- * 系统按纸张算出能放几列几行，并把网格在纸张上居中（四周留边）。
- * 放不下 2 个成品时退回单页（enabled=false，附 reason 供 UI 提示）。
+ * 三种版式：
+ * - single：一记录一页，字段坐标相对整页。
+ * - grid：底图在多联模式下代表「单个成品图」，用户给出成品尺寸（mm），
+ *   系统按纸张算出能放几列几行，并把网格在纸张上居中（四周留边）。
+ *   放不下 2 个成品时退回单页（enabled=false，附 reason 供 UI 提示）。
+ * - fold（对折桌牌）：一页 = 一条记录 × 上下两个镜像半页，沿水平中线对折即成
+ *   双面台签——不依赖打印机双面功能。半页即成品（宽=纸宽，高=纸高一半），
+ *   无需成品尺寸输入；字段坐标相对半页，上联自动旋转 180°。
  */
 function resolveLayout(layout, spec) {
-  if (!layout || layout.mode !== 'grid') return { enabled: false }
+  if (!layout || layout.mode === 'single') return { enabled: false }
+  if (layout.mode === 'fold') {
+    return {
+      enabled: true,
+      fold: true,
+      cols: 1,
+      rows: 2,
+      itemW: spec.w, // 半页宽 = 纸宽（validateBatch 超宽估算的容器口径与渲染一致）
+      itemH: spec.h / 2,
+      offsetX: 0,
+      offsetY: 0,
+      perPage: 1, // 一页一条记录（上下联同内容互为镜像，不是两条记录）
+      showCutMarks: false, // 只有折线，没有裁切线
+    }
+  }
+  if (layout.mode !== 'grid') return { enabled: false }
   const itemW = Number(layout.itemW)
   const itemH = Number(layout.itemH)
   if (!(itemW > 0) || !(itemH > 0)) return { enabled: false, reason: '成品尺寸未填写' }
@@ -178,6 +198,7 @@ function resolveLayout(layout, spec) {
  * 单页模式（默认）：一记录一页，字段坐标相对整页。
  * 多联模式：一页 M×N 格，一格一条记录；**字段坐标相对格子**，底图铺满每格，
  *           故同一套排版在每格重复——输出契约（页数 × 纸张）不变。
+ * 对折模式（fold）：一记录一页，页内上下两个镜像半页，字段坐标相对半页。
  */
 function buildHtml(template, records, { withToolbar = true } = {}) {
   const spec = pageSpec(template.pageSize)
@@ -193,7 +214,18 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
     .join('')
 
   let pages
-  if (layout.enabled) {
+  if (layout.enabled && layout.fold) {
+    // 对折桌牌：上联旋转 180°（对折后从背面读是正的），下联正排，中线画折线。
+    // 上下联同一条记录——打印后沿折线对折，两面都能读
+    pages = records.map((rec) => {
+      const inner = fieldsHtml(rec)
+      return `<div class="page">`
+        + `<div class="fold-half flip">${inner}</div>`
+        + `<div class="fold-half">${inner}</div>`
+        + `<div class="fold-line"></div>`
+        + `</div>`
+    })
+  } else if (layout.enabled) {
     const chunks = []
     for (let i = 0; i < records.length; i += layout.perPage) {
       chunks.push(records.slice(i, i + layout.perPage))
@@ -238,6 +270,15 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
       + ' }\n',
     // 裁切线：格边虚线，仅供手工裁切对位（0.2mm 极细，裁掉即不可见）
     '.cell.cut { border: 0.2mm dashed rgba(0,0,0,0.35); }\n',
+    // 对折桌牌：上下两个半页，上联倒置；fold-line 为折线（对折参考，不裁切）
+    '.fold-half { position: absolute; left: 0; width: 100%; height: 50%; overflow: hidden; '
+      + 'background-repeat: no-repeat; background-size: 100% 100%;'
+      + (layout.enabled && layout.fold && bg ? ` background-image: url('${bg}');` : '')
+      + ' }\n',
+    '.fold-half.flip { top: 0; transform: rotate(180deg); }\n',
+    '.fold-half:not(.flip) { top: 50%; }\n',
+    '.fold-line { position: absolute; left: 0; top: 50%; width: 100%; '
+      + 'border-top: 0.3mm dashed rgba(0,0,0,0.35); }\n',
     '.pf { position: absolute; white-space: nowrap; }\n',
     '@media print { body { background: #fff; } .no-print { display: none !important; } }\n',
     '</style>\n</head>\n<body>\n',

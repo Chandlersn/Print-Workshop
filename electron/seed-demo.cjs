@@ -1,11 +1,12 @@
 /**
- * 首启种子：示例名单 + 10 套内置模板（seedVersion 2）。
- * 10 套 = 证书文书类 5（奖状/证书横/证书竖/聘书/邀请函）+ 会务证卡类 5（会议桌牌/考场座位贴/胸卡/工作证/姓名贴纸）。
+ * 首启种子：示例名单 + 7 套内置模板（seedVersion 2）。
+ * 7 套 = 证书文书类 3（奖状/荣誉证书/聘书）+ 会务证卡类 4（会议桌牌/考场座位贴/胸卡/姓名贴纸）。
  * 选型依据 2026-10 需求调查：SeatMark 226 套分类清单（座位贴/桌牌/胸卡/证卡居前）
  * + 邮件合并教程热度（奖状/证书为教师学期末刚需）+ 国际侧 badge 工具品类（90×55 胸牌为事实标准）。
+ * 内置贵精不贵多：7 套覆盖最高频品类，后续按用户真实反馈增补。
  *
- * 版本化：seedVersion 0 = 未种子（全新安装，全量种子）；1 = 旧版已种子（迁移：补 6 套新模板，
- *   绑定导入的扩展示例名单，不动老数据）；>=2 = 已就绪。
+ * 版本化：seedVersion 0 = 未种子（全新安装，全量种子）；1 = 旧版已种子（迁移：补会务证卡模板，
+ *   绑定导入的扩展示例名单，不动老数据）；>=2 = 已就绪（已装模板不回收，删种子定义≠删用户数据）。
  * 资源目录：开发态 build/seed，打包后 resources/seed（extraResources）。
  */
 const path = require('path')
@@ -16,7 +17,7 @@ const templates = require('./templates.cjs')
 
 const SEED_VERSION = 2
 
-// 示例名单：9 列覆盖全部 10 套模板的字段（证书文书 + 会务考务）
+// 示例名单：9 列覆盖全部 7 套模板的字段（证书文书 + 会务考务）
 const DEMO_ROWS = [
   ['姓名', '单位', '部门', '职务', '班级', '考场', '座位号', '奖项', '日期'],
   ['张明远', '市第一实验小学', '美术组', '参赛选手', '六年级一班', '第1考场', '05', '金奖', '2026-06-01'],
@@ -33,7 +34,9 @@ const DEMO_ROWS = [
   ['蒋承志', '星辉书画社', '创作部', '参赛选手', '书法班', '第3考场', '11', '二等奖', '2026-06-01'],
 ]
 
-// 证书文书类：带示例底图，字段坐标为页面百分比（单张版式）
+// 证书文书类：带示例底图，字段坐标为页面百分比（单张版式）。
+// 只留 3 套：横版奖状/荣誉证书风格已区分（楷体金字 vs 宋体金边），
+// 竖版留聘书（竖版证书、邀请函与横版字段同构，属低频装饰性品类，按反馈再补）
 const TPL_DOC_DEFS = [
   {
     name: '常用·奖状（横版 A4）',
@@ -60,18 +63,6 @@ const TPL_DOC_DEFS = [
     ],
   },
   {
-    name: '常用·证书（竖版 A4）',
-    pageSize: { id: 'a4-portrait', w: 210, h: 297 },
-    bg: 'print-bg/demo-cert-portrait.svg',
-    bgSize: { width: 1240, height: 1754 },
-    fields: [
-      { column: '姓名', label: '姓名', x: 50, y: 42, fontSize: 30, bold: true, color: '#2b2622', align: 'center', fontFamily: '楷体' },
-      { column: '奖项', label: '奖项', x: 50, y: 55, fontSize: 19, color: '#b03a2e', align: 'center', fontFamily: '楷体' },
-      { column: '单位', label: '单位', x: 50, y: 70, fontSize: 14, color: '#6f675c', align: 'center' },
-      { column: '日期', label: '日期', x: 50, y: 82, fontSize: 12, color: '#6f675c', align: 'center' },
-    ],
-  },
-  {
     name: '常用·聘书（竖版 A4）',
     pageSize: { id: 'a4-portrait', w: 210, h: 297 },
     bg: 'print-bg/demo-cert-portrait.svg',
@@ -83,19 +74,10 @@ const TPL_DOC_DEFS = [
       { column: '日期', label: '日期', x: 50, y: 88, fontSize: 11, color: '#6f675c', align: 'center' },
     ],
   },
-  {
-    name: '常用·邀请函（横版 A4）',
-    pageSize: { id: 'a4-landscape', w: 297, h: 210 },
-    bg: 'print-bg/demo-invite-landscape.svg',
-    bgSize: { width: 1754, height: 1240 },
-    fields: [
-      { column: '姓名', label: '姓名', x: 50, y: 52, fontSize: 30, bold: true, color: '#2b2622', align: 'center', fontFamily: '楷体' },
-      { column: '单位', label: '单位', x: 50, y: 68, fontSize: 15, color: '#6f675c', align: 'center' },
-    ],
-  },
 ]
 
-// 会务证卡类：多联拼版（无底图，白纸黑字 + 裁切线），字段坐标为单格百分比
+// 会务证卡类：多联拼版（无底图，白纸黑字 + 裁切线），字段坐标为单格百分比。
+// 只留 4 套：工作证卡贴与胸卡同为 85×54 且字段同构，属同一品类两块皮，砍一留一
 const TPL_GRID_DEFS = [
   {
     name: '常用·会议桌牌（台签 200×100，A4 两联）',
@@ -125,17 +107,6 @@ const TPL_GRID_DEFS = [
       { column: '姓名', label: '姓名', x: 50, y: 38, fontSize: 16, bold: true, color: '#2b2622', align: 'center' },
       { column: '单位', label: '单位', x: 50, y: 64, fontSize: 10, color: '#6f675c', align: 'center' },
       { column: '职务', label: '职务', x: 50, y: 82, fontSize: 10, color: '#6f675c', align: 'center' },
-    ],
-  },
-  {
-    name: '常用·工作证卡贴（85×54，A4 十联）',
-    pageSize: { id: 'a4-portrait', w: 210, h: 297 },
-    layout: { mode: 'grid', itemW: 85, itemH: 54, showCutMarks: true },
-    fields: [
-      { column: '单位', label: '单位', x: 50, y: 20, fontSize: 9, color: '#6f675c', align: 'center' },
-      { column: '姓名', label: '姓名', x: 50, y: 46, fontSize: 15, bold: true, color: '#2b2622', align: 'center' },
-      { column: '部门', label: '部门', x: 50, y: 70, fontSize: 10, color: '#6f675c', align: 'center' },
-      { column: '职务', label: '职务', x: 50, y: 88, fontSize: 10, color: '#6f675c', align: 'center' },
     ],
   },
   {
@@ -189,8 +160,8 @@ function saveTemplates(defs, dsId) {
 
 /**
  * 种子入口（版本化）。
- * - ver 0（全新安装）：复制底图 + 导入示例名单 + 全部 10 套模板
- * - ver 1（旧版已种子）：不动老数据，导入扩展示例名单 + 补 6 套会务证卡模板
+ * - ver 0（全新安装）：复制底图 + 导入示例名单 + 全部 7 套模板
+ * - ver 1（旧版已种子）：不动老数据，导入扩展示例名单 + 补会务证卡模板
  * - ver >=2：无事可做
  * 任一步失败都不阻塞启动（示例内容非关键路径），返回执行摘要。
  */
@@ -212,13 +183,13 @@ function seedIfFirstRun(seedDir) {
       }
       // 2. 示例名单走真实导入链路（列名规范化/类型推断全部生效）
       const ds = importDemoDataset(seedDir, '示例名单.csv', '示例名单')
-      // 3. 全部 10 套模板绑定该数据集（预览即有真实数据）
+      // 3. 全部 7 套模板绑定该数据集（预览即有真实数据）
       const created = saveTemplates([...TPL_DOC_DEFS, ...TPL_GRID_DEFS], ds.id)
       saveJson('settings', { ...settings, demoSeeded: true, seedVersion: SEED_VERSION })
       return { seeded: true, migrated: false, datasetId: ds.id, templates: created }
     }
 
-    // ver 1 → 2 迁移：老 4 套与老数据原样保留；扩展名单 + 6 套会务证卡模板
+    // ver 1 → 2 迁移：老 4 套与老数据原样保留；扩展名单 + 会务证卡模板
     const ds = importDemoDataset(seedDir, '示例名单-扩展.csv', '示例名单·扩展')
     const created = saveTemplates(TPL_GRID_DEFS, ds.id)
     saveJson('settings', { ...settings, seedVersion: SEED_VERSION })

@@ -24,3 +24,4 @@ data/print-bg/
 data/print-fonts/
 data/archive/
 .workbuddy-ai/
+*.exe

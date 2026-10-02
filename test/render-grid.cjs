@@ -130,6 +130,35 @@ function main() {
   ok(/\.page \{[^}]*background-image/.test(htmlSingle), '单页模式整页铺底图')
   ok(engine.resolveLayout(undefined, A4_PORTRAIT).enabled === false, '无 layout 仍走单页')
 
+  console.log('== 5. 对折桌牌（fold）：一页一条记录 × 上下镜像半页 ==')
+  const fLayout = resolveLayout({ mode: 'fold' }, A4_PORTRAIT)
+  ok(fLayout.enabled === true && fLayout.fold === true, 'fold 模式启用', fLayout)
+  ok(fLayout.perPage === 1, '一页一条记录（上下联同内容互为镜像，不是两条）', fLayout.perPage)
+  ok(fLayout.itemW === 210 && fLayout.itemH === 148.5, '半页成品 = 纸宽 × 纸高一半', fLayout)
+  ok(fLayout.showCutMarks === false, '对折只有折线，无裁切线')
+
+  const foldTpl = {
+    name: '桌牌测试',
+    pageSize: A4_PORTRAIT,
+    background: 'print-bg/tent.png',
+    layout: { mode: 'fold' },
+    fields: [
+      { column: '姓名', label: '姓名', x: 50, y: 40, fontSize: 30, color: '#000', align: 'center' },
+    ],
+  }
+  const htmlFold = engine.buildHtml(foldTpl, [{ 姓名: '张三' }, { 姓名: '李四' }], { withToolbar: false })
+  ok(countPages(htmlFold) === 2, '2 条记录 → 2 页（一页一份桌牌）', countPages(htmlFold))
+  ok(countCells(htmlFold) === 0, 'fold 不产生多联格子', countCells(htmlFold))
+  ok((htmlFold.match(/class="fold-half flip"/g) || []).length === 2, '每页上联带倒置类（2 页共 2 处）')
+  ok((htmlFold.match(/<div class="fold-half">/g) || []).length === 2, '每页下联正排（2 页共 2 处）')
+  ok((htmlFold.match(/class="fold-line"/g) || []).length === 2, '每页中线画折线（2 页共 2 处）')
+  ok((htmlFold.match(/张三/g) || []).length === 2, '同一记录上下联各渲染一次（张三 ×2）', (htmlFold.match(/张三/g) || []).length)
+  ok(htmlFold.includes('.fold-half.flip { top: 0; transform: rotate(180deg); }'), '倒置由 CSS rotate(180deg) 实现')
+  ok(/\.fold-half \{[^}]*background-image: url\(/.test(htmlFold),
+    '底图铺满半页（fold-half 类统一持有底图，不逐页内联）')
+  ok(!htmlFold.includes('class="cell'), 'fold 与多联格子类互不沾染')
+  ok(/@page \{ size: 210mm 297mm;/.test(htmlFold), '纸张口径不变（对折在页内完成）')
+
   rmDeep(TMP)
   console.log(`\n共 ${passCount + failCount} 项断言：${passCount} 通过，${failCount} 失败`)
   process.exit(failCount ? 1 : 0)

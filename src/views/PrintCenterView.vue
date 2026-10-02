@@ -291,7 +291,7 @@ async function runAction(action) {
   busy.value = true
   try {
     const v = await window.printpress.printValidate(buildPayload())
-    if (v.issues.length > 0) {
+    if (v.issues.length > 0 || (v.duplicates && v.duplicates.length)) {
       validateResult.value = v
       pendingAction.value = action
       showValidate.value = true
@@ -332,6 +332,23 @@ function goFixCell(issue, cell) {
   pendingAction.value = ''
   validateResult.value = null
   gotoCell(selDs.value, cell.rowIndex, issue.key)
+}
+
+/** 校验问题格的悬浮说明（空值 / 疑似占位 / 超宽） */
+function cellHint(kind) {
+  if (kind === 'placeholder') return '疑似占位值，点击去核对'
+  if (kind === 'overlong') return '文字可能超出版面被裁切，点击去核对'
+  return '空值，点击去填写'
+}
+
+/** 重复行直达：重复是行级问题，落到该行第一列进入编辑即可 */
+function goDupRow(rowIndex) {
+  const key = dsDetail.value?.columns?.[0]?.key
+  if (!key) return
+  showValidate.value = false
+  pendingAction.value = ''
+  validateResult.value = null
+  gotoCell(selDs.value, rowIndex, key)
 }
 
 async function execute(action) {
@@ -491,7 +508,8 @@ onMounted(refreshAll)
         <span v-if="previewInfo" class="preview-meta">
           {{ previewInfo.templateName }} × {{ previewInfo.datasetName }}
           · {{ previewInfo.pageCount }} 页
-          <template v-if="previewInfo.layout?.enabled">
+          <template v-if="previewInfo.layout?.fold">（对折桌牌 · 每页 1 份）</template>
+          <template v-else-if="previewInfo.layout?.enabled">
             （{{ previewInfo.recordCount }} 条 × 每页 {{ previewInfo.layout.cols }}×{{ previewInfo.layout.rows }}）
           </template>
           · {{ previewInfo.page.name }}
@@ -565,7 +583,7 @@ onMounted(refreshAll)
         <p v-if="hasMissingIssue" class="modal-sub">
           存在<b>字段缺失</b>（模板字段在数据集中不存在）——补值无法解决，请回模板工坊调整字段后再打印：
         </p>
-        <p v-else class="modal-sub">空值位置将留白打印；疑似占位值（括号包裹、纯符号等形态）按原样打印：</p>
+        <p v-else class="modal-sub">空值位置将留白打印；疑似占位值（括号包裹、纯符号等形态）按原样打印；超宽文字会被版面裁掉：</p>
         <div class="issue-list">
           <div v-for="i in validateResult.issues" :key="i.key" class="det-row">
             <span class="issue-label">{{ i.label }}</span>
@@ -573,8 +591,10 @@ onMounted(refreshAll)
               <template v-if="i.missing">字段不存在</template>
               <template v-else>
                 <template v-if="i.empty">空 {{ i.empty }}</template>
-                <template v-if="i.empty && i.placeholder"> · </template>
+                <template v-if="i.empty && (i.placeholder || i.overlong)"> · </template>
                 <template v-if="i.placeholder">疑似占位 {{ i.placeholder }}</template>
+                <template v-if="i.placeholder && i.overlong"> · </template>
+                <template v-if="i.overlong">超宽 {{ i.overlong }}</template>
                 / {{ i.total }} 行
               </template>
             </span>
@@ -589,11 +609,32 @@ onMounted(refreshAll)
                 v-for="c in i.cells"
                 :key="c.rowIndex"
                 class="fix-chip"
-                :class="{ ph: c.kind === 'placeholder' }"
-                :title="c.kind === 'empty' ? '空值，点击去填写' : '疑似占位值，点击去核对'"
+                :class="{ ph: c.kind === 'placeholder', ov: c.kind === 'overlong' }"
+                :title="cellHint(c.kind)"
                 @click="goFixCell(i, c)"
               >第 {{ c.rowIndex + 1 }} 行</button>
               <span v-if="i.cellsTotal > i.cells.length" class="fix-more">共 {{ i.cellsTotal }} 处，仅列前 {{ i.cells.length }}</span>
+            </div>
+          </template>
+          <!-- 重复行：整行内容完全一致，多为误粘贴；只提示不拦截（同名多份是合法需求） -->
+          <template v-if="validateResult.duplicates && validateResult.duplicates.length">
+            <div class="det-row">
+              <span class="issue-label">重复行</span>
+              <span class="det-stats">
+                名单中有 {{ validateResult.duplicates.length }} 组内容完全相同的行（共 {{ validateResult.duplicateTotal }} 行）——若非有意重复请核对：
+              </span>
+              <span class="det-flag st-partial">重复</span>
+            </div>
+            <div v-for="(g, gi) in validateResult.duplicates" :key="'dup-' + gi" class="fix-row">
+              <span class="fix-label">{{ g.preview }}</span>
+              <button
+                v-for="ri in g.rowIdx"
+                :key="ri"
+                class="fix-chip"
+                title="内容完全相同的行，点击去查看"
+                @click="goDupRow(ri)"
+              >第 {{ ri + 1 }} 行</button>
+              <span v-if="g.count > g.rowIdx.length" class="fix-more">共 {{ g.count }} 行，仅列前 {{ g.rowIdx.length }}</span>
             </div>
           </template>
         </div>
@@ -1005,6 +1046,7 @@ onMounted(refreshAll)
   color: var(--cinnabar);
 }
 .fix-chip.ph { border-style: dashed; }
+.fix-chip.ov { border-style: dotted; }
 
 .fix-more {
   font-size: 12px;

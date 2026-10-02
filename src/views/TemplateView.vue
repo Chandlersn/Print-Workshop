@@ -20,9 +20,12 @@ const SNAP_PX = 6    // 吸附阈值（像素，源项目同值）
 // 小成品（如 1 寸照）在整页缩放下只有几十像素，根本没法拖字段。
 // 因此画布的定位参照系天然就是「格子」，拖拽/吸附/对齐逻辑无需改动。
 const ITEM_SIZE_PRESETS = ref([])
-const layoutMode = computed(() => (activeTpl.value?.layout?.mode === 'grid' ? 'grid' : 'single'))
+const layoutMode = computed(() => {
+  const m = activeTpl.value?.layout?.mode
+  return m === 'grid' || m === 'fold' ? m : 'single'
+})
 
-/** 设计参照物尺寸：多联 = 单个成品；单页 = 整张纸 */
+/** 设计参照物尺寸：多联 = 单个成品；对折桌牌 = 半页成品；单页 = 整张纸 */
 const itemSpec = computed(() => {
   const t = activeTpl.value
   if (!t) return { w: 210, h: 297 }
@@ -30,6 +33,9 @@ const itemSpec = computed(() => {
     const w = Number(t.layout?.itemW) || 0
     const h = Number(t.layout?.itemH) || 0
     return { w: w > 0 ? w : 85, h: h > 0 ? h : 54 }
+  }
+  if (layoutMode.value === 'fold') {
+    return { w: t.pageSize.w, h: t.pageSize.h / 2 }
   }
   return { w: t.pageSize.w, h: t.pageSize.h }
 })
@@ -49,12 +55,21 @@ const gridInfo = computed(() => {
 const layoutOptions = [
   { value: 'single', label: '单页' },
   { value: 'grid', label: '多联' },
+  { value: 'fold', label: '对折桌牌' },
 ]
 
 /** 是否多联版式 */
 const isGrid = computed(() => layoutMode.value === 'grid')
+/** 是否对折桌牌版式（一页一条记录 × 上下镜像半页） */
+const isFold = computed(() => layoutMode.value === 'fold')
 /** 是否画裁切线（仅多联有意义） */
 const cutMarks = computed(() => activeTpl.value?.layout?.showCutMarks !== false)
+
+/** 对折桌牌摘要：半页成品尺寸 */
+const foldInfo = computed(() => {
+  if (!isFold.value || !activeTpl.value) return null
+  return { w: itemSpec.value.w, h: itemSpec.value.h }
+})
 
 /**
  * 多联格子阵列（百分比定位，与主进程 resolveLayout 同口径）。
@@ -90,8 +105,11 @@ const gridCells = computed(() => {
 /** 当前拖拽所在的格子（吸附辅助线画在这一格里；所有格子内容相同） */
 const activeCellIdx = ref(0)
 
-/** 定位参照系元素：多联 = 当前格，单页 = 整张画布 */
+/** 定位参照系元素：多联 = 当前格，对折桌牌 = 下半联（编辑联），单页 = 整张画布 */
 function refFrameEl() {
+  if (isFold.value && canvasEl.value) {
+    return canvasEl.value.querySelector('.fold-ref') || canvasEl.value
+  }
   if (!isGrid.value || !canvasEl.value) return canvasEl.value
   const cells = canvasEl.value.querySelectorAll('.canvas-cell')
   return cells[Math.min(activeCellIdx.value, cells.length - 1)] || canvasEl.value
@@ -119,7 +137,7 @@ function ensureLayout() {
 function onLayoutModeChange(mode) {
   if (!activeTpl.value) return
   ensureLayout()
-  activeTpl.value.layout.mode = mode === 'grid' ? 'grid' : 'single'
+  activeTpl.value.layout.mode = mode === 'grid' || mode === 'fold' ? mode : 'single'
 }
 
 function onItemSizeChange(id) {
@@ -223,13 +241,15 @@ const bgUrl = computed(() =>
     ? `pp://media/${activeTpl.value.background}`
     : '')
 
-// 底图比例应与「设计参照物」一致：单页对纸张、多联对单个成品
+// 底图比例应与「设计参照物」一致：单页对纸张、多联对单个成品、对折桌牌对半页成品
 const bgRatioWarn = computed(() => {
   const t = activeTpl.value
   if (!t || !t.bgSize) return ''
   const { w, h } = itemSpec.value
   const diff = Math.abs(t.bgSize.width / t.bgSize.height - w / h) / (w / h)
-  const target = layoutMode.value === 'grid' ? '成品尺寸' : '纸张'
+  const target = layoutMode.value === 'grid'
+    ? '成品尺寸'
+    : (layoutMode.value === 'fold' ? '半页成品' : '纸张')
   return diff > 0.02 ? `底图比例与${target}相差约 ${(diff * 100).toFixed(1)}%，打印时可能变形` : ''
 })
 
@@ -488,10 +508,11 @@ function onFieldPointerDown(e, idx) {
   }
   selectedIdx.value = idx
 
-  // 定位参照系：多联时是「被抓住的那一格」（字段坐标本就相对格子），单页时是整张画布。
-  // 吸附目标也只取同一格内的字段——否则会把别的格子里的同名字段当成对齐基准。
+  // 定位参照系：多联时是「被抓住的那一格」（字段坐标本就相对格子），
+  // 对折桌牌是下半联（编辑联），单页时是整张画布。
+  // 吸附目标也只取同一参照系内的字段——否则会把别的格子里的同名字段当成对齐基准。
   const cellEl = e.currentTarget && e.currentTarget.closest
-    ? e.currentTarget.closest('.canvas-cell')
+    ? e.currentTarget.closest('.canvas-cell, .fold-ref')
     : null
   if (cellEl && canvasEl.value) {
     const all = [...canvasEl.value.querySelectorAll('.canvas-cell')]
@@ -968,6 +989,10 @@ onBeforeUnmount(() => {
             当前纸张放不下 2 个 {{ itemSpec.w }}×{{ itemSpec.h }}mm 的成品——请换更大的纸张，或缩小成品尺寸
           </template>
         </p>
+        <!-- 对折桌牌版式摘要：说明半页语义与对折用法 -->
+        <p v-if="foldInfo" class="warn-line">
+          对折桌牌：<b>{{ foldInfo.w }}×{{ foldInfo.h }}mm 半页成品</b> · 一页一条记录 · 上半联自动倒置——打印后沿折线对折即成双面台签，无需打印机双面功能
+        </p>
         <p v-if="bgRatioWarn" class="warn-line warn-strong">{{ bgRatioWarn }}</p>
 
         <!-- 字段面板：数据页启用「印」的字段平铺于此，点击即加入画布 -->
@@ -994,7 +1019,7 @@ onBeforeUnmount(() => {
               :style="{ height: canvasH + 'px' }"
             >
               <!-- 单页：整页底图 + 字段 -->
-              <template v-if="!isGrid">
+              <template v-if="!isGrid && !isFold">
                 <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
                 <div
                   v-for="(f, idx) in activeTpl.fields"
@@ -1013,8 +1038,47 @@ onBeforeUnmount(() => {
                 </div>
               </template>
 
+              <!-- 对折桌牌：上半联只读镜像预览（不可交互），下半联为编辑参照系；
+                   字段只需在下半联摆位，上半联实时镜像同步 -->
+              <template v-if="isFold">
+                <div class="canvas-fold-half flip">
+                  <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                  <div
+                    v-for="(f, idx) in activeTpl.fields"
+                    :key="'m' + idx"
+                    class="field-box"
+                    :class="{ nodata: fieldEmpty(f) && !fieldMissing(f), stale: fieldMissing(f) }"
+                    :style="fieldStyle(f)"
+                  >
+                    {{ fieldText(f) }}
+                  </div>
+                </div>
+                <div class="canvas-fold-half fold-ref">
+                  <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                  <div
+                    v-for="(f, idx) in activeTpl.fields"
+                    :key="idx"
+                    class="field-box"
+                    :class="{
+                      selected: idx === selectedIdx,
+                      inmulti: multiSel.has(idx) && multiSel.size > 1,
+                      nodata: fieldEmpty(f) && !fieldMissing(f),
+                      stale: fieldMissing(f),
+                    }"
+                    :style="fieldStyle(f)"
+                    @pointerdown.prevent="onFieldPointerDown($event, idx)"
+                  >
+                    {{ fieldText(f) }}
+                  </div>
+                </div>
+                <div class="canvas-fold-line"></div>
+                <p v-if="activeTpl.fields.length === 0" class="canvas-hint">
+                  {{ activeDatasetId ? '点击上方字段面板，把字段加入下半联（上半联自动镜像）' : '选择数据集后添加字段' }}
+                </p>
+              </template>
+
               <!-- 多联：一页 M 列 × N 行格子，每格铺一张成品底图 + 同一套字段 -->
-              <template v-else>
+              <template v-else-if="isGrid">
                 <div
                   v-for="c in gridCells"
                   :key="c.k"
@@ -1048,7 +1112,7 @@ onBeforeUnmount(() => {
               <div v-if="guideV !== null" class="snap-guide guide-v" :style="{ left: guideV + 'px' }"></div>
               <div v-if="guideH !== null" class="snap-guide guide-h" :style="{ top: guideH + 'px' }"></div>
 
-              <p v-if="!isGrid && activeTpl.fields.length === 0" class="canvas-hint">
+              <p v-if="!isGrid && !isFold && activeTpl.fields.length === 0" class="canvas-hint">
                 {{ activeDatasetId ? '点击上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
               </p>
             </div>
@@ -1344,6 +1408,34 @@ onBeforeUnmount(() => {
 .canvas-cell.cut {
   outline: 1px dashed var(--cinnabar);
   outline-offset: -1px;
+}
+
+/* ---- 对折桌牌：上半联只读镜像，下半联（fold-ref）为编辑参照系 ----
+   字段百分比坐标相对半页——与渲染引擎 .fold-half 输出保持同一语义 */
+.canvas-fold-half {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 50%;
+  overflow: hidden;
+}
+
+.canvas-fold-half.flip {
+  top: 0;
+  transform: rotate(180deg);
+  pointer-events: none; /* 镜像联只看不摸，拖拽/吸附数学全部落在下半联 */
+  opacity: 0.92;
+}
+
+.canvas-fold-half.fold-ref { top: 50%; }
+
+.canvas-fold-line {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  border-top: 1px dashed var(--stone);
+  pointer-events: none;
 }
 
 .field-box {
