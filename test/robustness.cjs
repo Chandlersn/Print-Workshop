@@ -198,6 +198,69 @@ console.log('== 6. 前端静态核查：搜索防抖 ==')
   ok(/onBeforeUnmount/.test(pv.split('\n').slice(0, 12).join('\n')), 'onBeforeUnmount 已导入')
 }
 
+console.log('== 7. 多选对齐必须把「盒边缘」换算回「锚点」 ==')
+{
+  // 背景：3b3d462 把画布锚点口径对齐渲染引擎（align=center 时 x 是中心锚点），
+  // left/right 加了 anchorRatio 换算，但 center-h/center-v 的换算被漏掉——
+  // 算出的盒中心像素被直接当锚点写入，居中字段整体偏半个盒宽，
+  // 之后拖动时吸附起点就错位（用户反馈「辅助线不灵敏、拖半天对不齐」）。
+  const tv = tplView()
+  const body = tv.slice(tv.indexOf('function alignSelected'), tv.indexOf('// ---- 一键布局'))
+  ok(body.length > 0, '定位到 alignSelected 函数体')
+
+  // 每个对齐分支的正确口径。注意 x 轴要按 anchorRatio 换算，y 轴锚点恒在盒中心（与 align 无关）
+  const branches = [
+    ['left', /if \(kind === 'left'\) f\.x = clamp\(\(\(minLeft \+ r \* b\.w\) \/ W\) \* 100\)/],
+    ['center-h', /if \(kind === 'center-h'\) f\.x = clamp\(\(\(\(minLeft \+ maxRight\) \/ 2 \+ \(r - 0\.5\) \* b\.w\) \/ W\) \* 100\)/],
+    ['right', /if \(kind === 'right'\) f\.x = clamp\(\(\(maxRight - \(1 - r\) \* b\.w\) \/ W\) \* 100\)/],
+    ['top', /if \(kind === 'top'\) f\.y = clamp\(\(minTop \/ H\) \* 100\)/],
+    ['center-v', /if \(kind === 'center-v'\) f\.y = clamp\(\(\(\(minTop \+ maxBottom\) \/ 2 - b\.h \/ 2\) \/ H\) \* 100\)/],
+    ['bottom', /if \(kind === 'bottom'\) f\.y = clamp\(\(\(maxBottom - b\.h\) \/ H\) \* 100\)/],
+  ]
+  for (const [kind, re] of branches) {
+    ok(re.test(body), `alignSelected 的 ${kind} 分支坐标换算正确`)
+  }
+  // 关键回归点：center 不得把盒中心裸当锚点（那会让居中字段偏半个盒宽）
+  ok(!/center-h'\) f\.x = clamp\(\(\(\(minLeft \+ maxRight\) \/ 2\) \/ W\)/.test(body),
+    'center-h 没有把盒中心裸当锚点写入（这正是偏移的根因）')
+  ok(/const r = anchorRatio\(f\)/.test(body), 'anchorRatio 已导入并使用')
+
+  // 口径自证：center-h 的语义是「盒中心落在包围盒中心」。
+  // 渲染关系：盒左缘 = 锚点px − r×盒宽 ⇒ 盒中心 = 锚点px + (0.5 − r)×盒宽。
+  // 故要盒中心 = target，锚点px 必须 = target − (0.5 − r)×盒宽。
+  // 下面用「代入真实公式 → 按渲染关系回推盒中心」验证，两边独立算，避免自证循环。
+  const { anchorRatio } = require('../src/lib/field-layout.cjs')
+  const W = 1000
+  const boxW = 120
+  const minLeft = 400
+  const maxRight = 760
+  const targetCenter = (minLeft + maxRight) / 2 // 580
+  const centerFromAnchor = (anchorPx, r) => anchorPx - r * boxW + boxW / 2
+  {
+    // 新公式（与 TemplateView.vue 保持一致）
+    for (const align of ['left', 'center', 'right']) {
+      const r = anchorRatio({ align })
+      const xPct = ((targetCenter + (r - 0.5) * boxW) / W) * 100
+      const landed = centerFromAnchor((xPct / 100) * W, r)
+      ok(Math.abs(landed - targetCenter) < 1e-9,
+      `center-h 换算后 align=${align} 的盒中心落在 ${targetCenter}px（实得 ${landed}px）`)
+    }
+  }
+  {
+    // 旧写法：把 targetCenter 直接当锚点（0.5-r 换算被漏掉）
+    for (const align of ['left', 'right']) {
+      const r = anchorRatio({ align })
+      const landed = centerFromAnchor(targetCenter, r)
+      ok(Math.abs(landed - targetCenter) > 1,
+      `反证：旧写法下 align=${align} 的盒中心偏 ${Math.abs(landed - targetCenter).toFixed(0)}px（=${(0.5 - r) * boxW}px），确认是实打实的偏移不是误报`)
+    }
+    // align=center 时 r=0.5 换算恰好为 0，旧写法对居中字段本身等价——
+    // 真正受害的是混选里 align 不一致的字段，这正是「拖半天对不齐」的来源。
+    const r = anchorRatio({ align: 'center' })
+    ok(Math.abs((0.5 - r) * boxW) < 1e-9, 'align=center 时换算量为 0（锚点本就在盒中心）')
+  }
+}
+
 rmDeep(TMP)
 console.log(`\n健壮性回归：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

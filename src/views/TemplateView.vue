@@ -678,14 +678,24 @@ function alignSelected(kind) {
   const H = refRect.height
   for (const b of boxes) {
     const f = activeTpl.value.fields[b.i]
-    // 对齐目标是盒边缘的像素位置，f.x 是锚点：写入时按该字段的对齐方式把边缘换算回锚点
-    // （居中字段锚点在盒中心，故左对齐时 x = 目标左缘 + 半个盒宽）
+    // 对齐目标是一个像素位置，f.x、f.y 是锚点，写入前必须换算。
+    //
+    // 推导（x 轴）：画布 fieldStyle 会按 anchorRatio 加 translateX(-r×盒宽)，
+    //   盒左缘 = 锚点px − r×盒宽，盒中心 = 盒左缘 + 盒宽/2 = 锚点px + (0.5 − r)×盒宽。
+    // center-h 要「盒中心落在 targetCenter」，故：
+    //   锚点px = targetCenter − (0.5 − r)×盒宽
+    // 验证三种对齐方式：r=0.5(center) → 锚点=target（锚点本就在盒中心）；
+    //                   r=0(left)    → 锚点=target−半个盒宽（盒中心才在 target）；
+    //                   r=1(right)   → 锚点=target+半个盒宽。
+    // 漏掉换算（直接写 target）会让非居中字段整体偏 (0.5−r)×盒宽，
+    // 之后拖动时吸附起点随之错位——表现为「辅助线不灵敏、拖半天对不齐」。
     const r = anchorRatio(f)
     if (kind === 'left') f.x = clamp(((minLeft + r * b.w) / W) * 100)
-    if (kind === 'center-h') f.x = clamp((((minLeft + maxRight) / 2) / W) * 100)
+    if (kind === 'center-h') f.x = clamp((((minLeft + maxRight) / 2 + (r - 0.5) * b.w) / W) * 100)
     if (kind === 'right') f.x = clamp(((maxRight - (1 - r) * b.w) / W) * 100)
+    // y 轴锚点恒在盒中心（与 align 无关），故 top/bottom 用盒边缘、center-v 减半个盒高
     if (kind === 'top') f.y = clamp((minTop / H) * 100)
-    if (kind === 'center-v') f.y = clamp(((minTop + maxBottom) / 2 - b.h / 2) / H * 100)
+    if (kind === 'center-v') f.y = clamp((((minTop + maxBottom) / 2 - b.h / 2) / H) * 100)
     if (kind === 'bottom') f.y = clamp(((maxBottom - b.h) / H) * 100)
   }
 }

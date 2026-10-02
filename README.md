@@ -132,7 +132,7 @@ release/                 安装包与免安装目录（构建产物，不进仓�
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：16 套件，601 项断言
+npm test                        # 领域层测试：16 套件，616 项断言
 npm run test:e2e                # 端到端：120 人真实 printToPDF（npx electron 运行）
 node test/e2e-toggle.cjs        # CDP 真机 e2e：印开关 × 徽标 × 置顶联动（需先出包）
 node test/e2e-cell-jump.cjs     # CDP 真机 e2e：空值直达补录全链（自动隔离数据目录）
