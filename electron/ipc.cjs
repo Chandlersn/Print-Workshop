@@ -298,7 +298,30 @@ function registerIpc() {
   ipcMain.handle('print:send', async (_e, p) => {
     const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
     const silent = Boolean(p && p.silent)
-    const r = await printer.sendToPrinter(built.html, { silent })
+    // 直打失败必须留痕：打印是唯一会真正消耗纸张的出口，打印机离线、驱动报错、
+    // 系统卡纸全在这里抛异常。没有 failed 记录的话，用户只看到一句报错，
+    // 历史里查不到「当时出了什么、出了多少」，也无从判断该不该重打。
+    // （与 print:exportPdf 的 catch 分支对称——两个出口不能一个留痕一个不留。）
+    let r
+    try {
+      r = await printer.sendToPrinter(built.html, { silent })
+    } catch (err) {
+      printDomain.createJob({
+        templateId: String(p.templateId),
+        templateName: built.templateName,
+        datasetId: String(p.datasetId),
+        datasetName: built.datasetName,
+        mode: 'print',
+        recordCount: built.recordCount,
+        totalRows: built.scope.total,
+        partial: built.scope.partial,
+        selection: built.selection,
+        snapshotHtml: built.snapshotHtml,
+        status: 'failed',
+        detail: String(err.message || err),
+      })
+      throw err
+    }
     // 真正送达「且为全量出片」才回写（部分出片留痕但不改数据集状态）；取消不标
     if (r.ok && printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'print')
     printDomain.createJob({

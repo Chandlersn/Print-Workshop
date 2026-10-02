@@ -8,6 +8,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { gotoCell } from '../lib/cell-nav.js'
+import { reprintScope, layoutFallbackText } from '../lib/print-scope.cjs'
 
 const datasets = ref([])
 const templates = ref([])
@@ -175,6 +176,12 @@ const frameH = computed(() => previewInfo.value ? Math.round(previewInfo.value.p
 // iframe 高度铺满全部页数 +8px 余量：内部出现任何滚动条都会吃掉宽度造成横向裁边。
 // 注意用 pageCount（纸张页数）而非 recordCount——多联下一页装多条记录，用记录数会把 iframe 撑高
 const frameTotalH = computed(() => frameH.value * (previewInfo.value?.pageCount || 1) + 8)
+
+/**
+ * 多联回退提示文案。仅在 layout.enabled === false 且原mode 是 grid/fold 时给文案：
+ * 单页版式本来就是 enabled:false，不该被当成「出问题了」。
+ */
+const layoutFallback = computed(() => layoutFallbackText(previewInfo.value?.layout))
 
 function say(msg) {
   toast.value = msg
@@ -417,6 +424,9 @@ function reprint(job) {
   selDs.value = (tpl && tpl.datasetId && datasets.value.some((d) => d.id === tpl.datasetId))
     ? tpl.datasetId
     : ''
+  // 恢复当时的出片范围：漏掉这一步，补打 3 个人会打出全部 100 个人。
+  // 留痕里 selection 记的是 0 基行号，直接喂回 setScope 即可。
+  setScope(reprintScope(job))
   runAction(job.mode === 'print' ? 'print' : 'pdf')
 }
 
@@ -520,6 +530,12 @@ onMounted(refreshAll)
         <span class="tb-label">缩放</span>
         <CustomSelect v-model="zoom" :options="zoomOptions" width="90px" />
       </div>
+
+      <!-- 多联回退提示：配了多联却放不下时已自动按单页出片。这不是错误，但结果与
+           预期不符（页数暴涨、版式不对），必须常驻告知，不能只靠一闪而过的 toast。 -->
+      <p v-if="layoutFallback" class="layout-warn">
+        <span class="lw-tag">已按单页出片</span>{{ layoutFallback }}
+      </p>
       <div class="preview-scroll">
         <!-- scale 缩放：iframe 布局尺寸=纸张全宽（内视口完整容纳内容，不裁边），
              transform 只做视觉缩放，外层 holder 定缩放后的占位尺寸 -->
@@ -1076,6 +1092,31 @@ onMounted(refreshAll)
   border-radius: 8px;
   font-size: 11px;
   color: var(--cinnabar);
+  white-space: nowrap;
+}
+
+/* ---- 多联回退提示（配了多联但纸张放不下，已自动按单页出片） ---- */
+.layout-warn {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-radius: 4px;
+}
+
+.lw-tag {
+  flex: none;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--warn);
+  border: 1px solid var(--warn-line);
+  border-radius: 8px;
   white-space: nowrap;
 }
 

@@ -13,6 +13,8 @@
   --ok-soft: #eef3ee;    /* 印章绿软底 */
   --ok-line: #c8d8c8;    /* 印章绿描线 */
   --warn: #a8742c;       /* 琥珀警示 */
+  --warn-soft: #f7eddc;  /* 琥珀软底（提示条底色） */
+  --warn-line: #e0c99c;  /* 琥珀描线 */
   --cinnabar-line: #e3c4bf; /* 朱砂软描线 */
   --shadow: 0 1px 4px rgba(43, 38, 34, 0.08);
   --input-bg: #ffffff;   /* 输入控件底（暗色下切换） */
@@ -35,6 +37,8 @@
   --ok-soft: #22301f;
   --ok-line: #3f5a44;
   --warn: #d9a15e;
+  --warn-soft: #33291a;
+  --warn-line: #5c4526;
   --cinnabar-line: #6b3c35;
   --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
   --input-bg: #1c1813;
