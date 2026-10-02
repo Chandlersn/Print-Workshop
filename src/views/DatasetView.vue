@@ -4,7 +4,7 @@
  * 入口宽松：导入零校验；字段只做填充率/类型透明提示。
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { cellNav } from '../lib/cell-nav.js'
+import { cellNav, ackCell } from '../lib/cell-nav.js'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const datasets = ref([])
@@ -104,6 +104,10 @@ async function refreshList(preferId) {
 
 async function selectDataset(id) {
   activeId.value = id
+  // 页码必须归零：切到行数更少的数据集时，旧的 page 会让 pagedRows 直接算成空，
+  // 而分页器只在 pageCount > 1 时渲染——表格空白、分页器也没了，成死路。
+  // removeRow / appendRow 都会重置，唯独切换数据集这条路径漏了。
+  page.value = 0
   try {
     detail.value = await window.printpress.getDataset(id)
   } catch (err) {
@@ -374,6 +378,11 @@ watch(() => cellNav.req, async (req) => {
     flashTimer = setTimeout(() => { flashCell.value = null }, 2600)
   } catch (err) {
     errorMsg.value = extractError(err)
+  } finally {
+    // 消费确认：处理完（含各条提前 return 的失败分支）立刻清空请求。
+    // 只在还是同一条请求时清——处理期间用户可能又点了一次跳转，
+    // 那条新请求不能被这里的收尾吃掉。
+    if (cellNav.req === req) ackCell()
   }
 }, { immediate: true }) // 打印页点击时本组件尚未挂载，挂载后需立即消费已到达的跳转请求
 

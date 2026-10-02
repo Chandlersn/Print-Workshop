@@ -46,4 +46,23 @@ function layoutFallbackText(layout) {
   return layout.reason || '原版式无法在当前纸张上排布，已按单页出片'
 }
 
-module.exports = { reprintScope, layoutFallbackText }
+/**
+ * 行范围面板的搜索：返回命中的 0 基行号。
+ * 匹配任一列的值（大小写不敏感）。空关键词返回全部行号。
+ *
+ * 纯函数是为了能直接测：这条规则一旦改坏，用户看到的是「搜不到人」，
+ * 而面板本身不会报任何错。
+ */
+function filterRowIndexes(rows, keyword) {
+  const all = Array.isArray(rows) ? rows : []
+  const idxs = all.map((_, i) => i)
+  const kw = String(keyword == null ? '' : keyword).trim().toLowerCase()
+  if (!kw) return idxs
+  return idxs.filter((i) => {
+    const row = all[i]
+    if (!row || typeof row !== 'object') return false
+    return Object.values(row).some((v) => String(v ?? '').toLowerCase().includes(kw))
+  })
+}
+
+module.exports = { reprintScope, layoutFallbackText, filterRowIndexes }

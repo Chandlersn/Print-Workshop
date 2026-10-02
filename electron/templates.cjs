@@ -81,10 +81,47 @@ function getTemplate(id) {
 }
 
 /** 全量快照保存：有 id 更新，无 id 新建。模板必须绑定数据集（打印中心按模板直接带出） */
+/**
+ * 字段布局自检：坐标与对齐是否会让文字跑出纸面。
+ *
+ * 为什么不留到打印时才发现：一个align=center 且 x=0 的字段，
+ * 文字有一半在纸外；出口校验会把它判成「每条都超宽」，
+ * 500 条名单刷出 500 条警报，用户只会以为校验坏了。
+ * 布局是设计问题，就该在保存（画布上）时拦下并说清楚，而不是打印时刷假信号。
+ */
+function validateLayout(template) {
+  const bad = []
+  for (const f of template.fields || []) {
+    if (!(f.column || f.key)) continue
+    const label = f.label || f.column || f.key
+    const x = Number(f.x)
+    const y = Number(f.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      bad.push(`「${label}」坐标不是有效数值`)
+      continue
+    }
+    if (x < 0 || x > 100 || y < 0 || y > 100) {
+      bad.push(`「${label}」坐标越界（x=${x}%、y=${y}%，须在 0–100%内）`)
+      continue
+    }
+    // 贴边会让文字越出纸面：居中字段的中心线不能在 0% 或 100%
+    if (f.align === 'center' && (x === 0 || x === 100)) {
+      bad.push(`「${label}」居中对齐却贴在纸张边缘（x=${x}%），文字会有一半印到纸外`)
+    }
+  }
+  return bad
+}
+
 function saveTemplate(template) {
   if (!template || typeof template !== 'object') throw new Error('模板数据为空')
   if (!template.name || !String(template.name).trim()) throw new Error('模板名称不能为空')
   if (!template.datasetId) throw new Error('模板必须关联数据集（先在工具栏选择数据集）')
+  const layoutBad = validateLayout(template)
+  if (layoutBad.length) {
+    throw new Error(
+      `字段布局有 ${layoutBad.length} 处问题，保存后印出来会出纸：${layoutBad.join('；')}。` +
+      '请在画布上把这些字段拖回纸面内')
+  }
   const ds = dataset.getDataset(String(template.datasetId)) // 不存在则抛错
   // 出口把关：画布上每个字段都必须对上数据集已激活打印的列——
   // 总数对不上（换数据集残留的失效字段 / 数据页事后取消「印」）不允许保存通过

@@ -150,13 +150,21 @@ function onItemSizeChange(id) {
   t.layout.itemH = hit.h
 }
 
+/**
+ * 成品尺寸输入。
+ * 空值/非法值一律不写回：原来是 Number('')→0→钳到 5，用户只是想清空重输，
+ * 结果被静默锁成 5mm——画布按 5mm 算格子，小到看不出东西，字段像凭空消失。
+ * 用户还没输完就被改掉值，比不接受输入更糟。
+ */
 function onItemDim(which, val) {
   const t = activeTpl.value
   if (!t) return
-  const n = Math.min(500, Math.max(5, Math.round(Number(val) || 0)))
+  const n = Number(val)
+  if (!Number.isFinite(n) || n <= 0) return
+  const clamped = Math.min(500, Math.max(5, Math.round(n)))
   ensureLayout()
-  if (which === 'w') t.layout.itemW = n
-  else t.layout.itemH = n
+  if (which === 'w') t.layout.itemW = clamped
+  else t.layout.itemH = clamped
 }
 
 function onCutMarks(on) {
@@ -401,8 +409,13 @@ async function uploadBackground() {
 }
 
 // ---- 撤销 / 重做：字段布局快照栈（上限 50 条） ----
+/**
+ * 撤销栈快照。必须含 layout：成品尺寸、裁切线也是模板的一部分，
+ * 只快照 fields 的话，误改尺寸后按撤销救不回来（字段没变，去重还会把它挡掉）。
+ */
 function snapshotFields() {
-  return JSON.stringify(activeTpl.value ? activeTpl.value.fields : [])
+  const t = activeTpl.value
+  return JSON.stringify(t ? { fields: t.fields, layout: t.layout || null } : { fields: [] })
 }
 
 function pushUndo() {
@@ -417,7 +430,10 @@ function pushUndo() {
 
 function restoreSnapshot(json) {
   if (!activeTpl.value) return
-  activeTpl.value.fields = JSON.parse(json)
+  const snap = JSON.parse(json)
+  // 兼容早期只存fields 数组的快照
+  activeTpl.value.fields = Array.isArray(snap) ? snap : snap.fields
+  if (!Array.isArray(snap) && snap.layout) activeTpl.value.layout = snap.layout
   if (selectedIdx.value >= activeTpl.value.fields.length) {
     selectedIdx.value = activeTpl.value.fields.length - 1
   }
@@ -585,13 +601,31 @@ function onPointerMove(e) {
   const rawX = ((e.clientX - d.rect.left - d.grabX) / d.rect.width) * 100
   const rawY = ((e.clientY - d.rect.top - d.grabY) / d.rect.height) * 100
   const f = activeTpl.value.fields[d.idx]
-  f.x = clamp(rawX)
-  f.y = clamp(rawY)
 
-  // 多选：全体成员跟随同一位移
+  // 顺序很关键：先算出吸附后的最终值，再统一摆位。
+  // 原来是多选成员先按未吸附的 dx 摆好、主字段随后被额外推开——整组会撕裂一帧，
+  // 下一帧才整体跳到位；主字段贴到吸附线时看起来像「只有它自己吸过去了」。
+  // 吸附检测以主拖拽字段为准。三个自身边缘都要换算到「锚点 - 边缘 = 偏移」的口径：
+  // 盒左缘 = 锚点px - ratio×盒宽，故 pxX(f.x) 是锚点线，盒左/中/右需各自减去对应偏移
+  const own = d.starts.find((s) => s.i === d.idx)
+  const pxX = (v) => (v / 100) * d.rect.width
+  const pxY = (v) => (v / 100) * d.rect.height
+  const off = d.ratio * d.boxW
+  const snapV = snap(
+    [[pxX(clamp(rawX)) - off, 'l'], [pxX(clamp(rawX)) - off + d.boxW / 2, 'c'], [pxX(clamp(rawX)) - off + d.boxW, 'r']],
+    d.targetsV,
+  )
+  const snapH = snap(
+    [[pxY(clamp(rawY)), 't'], [pxY(clamp(rawY)) + d.boxH / 2, 'm'], [pxY(clamp(rawY)) + d.boxH, 'b']],
+    d.targetsH,
+  )
+  f.x = snapV ? clamp(rawX + (snapV.adjust / d.rect.width) * 100) : clamp(rawX)
+  f.y = snapH ? clamp(rawY + (snapH.adjust / d.rect.height) * 100) : clamp(rawY)
+
+  // 多选：全体成员跟随同一位移（用的是已吸附的主字段位置，整组不再撕裂）
   if (d.starts.length > 1) {
-    const dx = f.x - d.starts.find((s) => s.i === d.idx).x
-    const dy = f.y - d.starts.find((s) => s.i === d.idx).y
+    const dx = f.x - own.x
+    const dy = f.y - own.y
     for (const s of d.starts) {
       if (s.i === d.idx) continue
       const m = activeTpl.value.fields[s.i]
@@ -600,26 +634,12 @@ function onPointerMove(e) {
     }
   }
 
-  // 吸附检测（以主拖拽字段为准）。三个自身边缘都要换算到「锚点 - 边缘 = 偏移」的口径：
-  // 盒左缘 = 锚点px - ratio×盒宽，故 pxX(f.x) 是锚点线，盒左/中/右需各自减去对应偏移
-  const own = d.starts.find((s) => s.i === d.idx)
-  const pxX = (v) => (v / 100) * d.rect.width
-  const pxY = (v) => (v / 100) * d.rect.height
-  const off = d.ratio * d.boxW
-  const snapV = snap(
-    [[pxX(f.x) - off, 'l'], [pxX(f.x) - off + d.boxW / 2, 'c'], [pxX(f.x) - off + d.boxW, 'r']],
-    d.targetsV,
-  )
-  const snapH = snap(
-    [[pxY(f.y), 't'], [pxY(f.y) + d.boxH / 2, 'm'], [pxY(f.y) + d.boxH, 'b']],
-    d.targetsH,
-  )
   // 辅助线用「画布坐标系」定位：多联时参照格有原点偏移，要加上去，否则线会画错位置
   const cRect = canvasEl.value.getBoundingClientRect()
   const offX = d.rect.left - cRect.left
   const offY = d.rect.top - cRect.top
-  if (snapV) { f.x = clamp(rawX + (snapV.adjust / d.rect.width) * 100); guideV.value = offX + snapV.line } else guideV.value = null
-  if (snapH) { f.y = clamp(rawY + (snapH.adjust / d.rect.height) * 100); guideH.value = offY + snapH.line } else guideH.value = null
+  guideV.value = snapV ? offX + snapV.line : null
+  guideH.value = snapH ? offY + snapH.line : null
 }
 
 function onPointerUp() {
@@ -699,9 +719,30 @@ function applyColumnSnap() {
 }
 
 // ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除、Ctrl+Z/Y 撤销重做 ----
+
+/**
+ * 连续键盘微调只记一次撤销。
+ *
+ * 原来每次 keydown 都pushUndo，而 clamp 保留 1 位小数故每步都是唯一值，
+ * 去重永远不命中——按住方向键 1.3 秒就把 50 级撤销栈冲光，
+ * 之后想退回改动前就只剩「重新做一遍」。
+ * 合并口径：距上次微调超过 800ms 才算新的一段操作。
+ */
+const NUDGE_MERGE_MS = 800
+let lastNudgeAt = 0
+
+function pushUndoForNudge() {
+  const now = Date.now()
+  if (now - lastNudgeAt > NUDGE_MERGE_MS) pushUndo()
+  lastNudgeAt = now
+}
+
 function onKeydown(e) {
   const tag = (e.target && e.target.tagName) || ''
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+  // 模态开着时一律不响应全局快捷键：确认弹窗上按 Delete 会把字段删掉，
+  // 而弹窗问的正是「要不要删」——用户看着问号，字段已经没了。
+  if (pendingConfirm.value) return
   if (!activeTpl.value) return
 
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return }
@@ -722,7 +763,7 @@ function onKeydown(e) {
   else if (e.key === 'ArrowDown') dy = step
   else return
   e.preventDefault()
-  pushUndo()
+  pushUndoForNudge()
   for (const i of targets) {
     const f = activeTpl.value.fields[i]
     if (!f) continue

@@ -4,11 +4,11 @@
  * → 导出 PDF / 直接送打印 → 打印历史留痕与归档件回看。
  * 预览用 iframe srcdoc 直接承载渲染引擎输出的批量 HTML。
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { gotoCell } from '../lib/cell-nav.js'
-import { reprintScope, layoutFallbackText } from '../lib/print-scope.cjs'
+import { reprintScope, layoutFallbackText, filterRowIndexes } from '../lib/print-scope.cjs'
 
 const datasets = ref([])
 const templates = ref([])
@@ -20,6 +20,8 @@ const previewInfo = ref(null)
 const zoom = ref('75')
 const busy = ref(false)
 const toast = ref('')
+/** 预览请求序号：晚到的旧响应据此丢弃（见 rebuildPreview） */
+let previewSeq = 0
 
 // 出口校验弹窗：pendingAction 记录用户最初想执行的动作
 const showValidate = ref(false)
@@ -81,14 +83,21 @@ const dsRowCount = computed(() => dsDetail.value?.rows.length ?? 0)
 const scopeLabel = computed(() =>
   (selRows.value ? `已选 ${selRows.value.length} / ${dsRowCount.value} 行` : `全部 ${dsRowCount.value} 行`))
 
-/** 搜索命中行（匹配任一列的值，大小写不敏感） */
-const scopeFiltered = computed(() => {
-  const all = dsDetail.value?.rows || []
-  const kw = scopeSearch.value.trim().toLowerCase()
-  const idxs = all.map((_, i) => i)
-  if (!kw) return idxs
-  return idxs.filter((i) => Object.values(all[i]).some((v) => String(v ?? '').toLowerCase().includes(kw)))
+/**
+ * 搜索命中行（匹配任一列的值，大小写不敏感）。
+ * 输入防抖 150ms：5000 行的表每次击键都要全表扫，
+ * 一边打字一边出结果会把输入框卡到掉帧。
+ */
+const scopeSearchDebounced = ref('')
+let scopeSearchTimer = null
+watch(scopeSearch, (v) => {
+  clearTimeout(scopeSearchTimer)
+  scopeSearchTimer = setTimeout(() => { scopeSearchDebounced.value = v }, 150)
 })
+onBeforeUnmount(() => clearTimeout(scopeSearchTimer))
+
+const scopeFiltered = computed(() =>
+  filterRowIndexes(dsDetail.value?.rows, scopeSearchDebounced.value))
 const scopeVisible = computed(() => scopeFiltered.value.slice(0, SCOPE_RENDER_CAP))
 
 function rowPreview(row) {
@@ -122,7 +131,9 @@ function guardScope() {
 
 function openScope() {
   if (!dsDetail.value) return
+  clearTimeout(scopeSearchTimer)
   scopeSearch.value = ''
+  scopeSearchDebounced.value = '' // 同步清防抖值，否则面板会带着上次的过滤结果打开
   scopePicked.value = new Set(selRows.value || Array.from({ length: dsRowCount.value }, (_, i) => i))
   scopeOpen.value = true
 }
@@ -189,9 +200,23 @@ function say(msg) {
 }
 
 async function refreshAll() {
-  datasets.value = await window.printpress.listDatasets()
-  templates.value = await window.printpress.listTemplates()
-  jobs.value = await window.printpress.listJobs()
+  // 三个清单各自独立 catch：任何一个失败都不该让整页空白（onMounted 直调，
+  // 一次 reject 就是白屏），也不该把「IPC 没连通」伪装成「还没导入任何数据」
+  try {
+    datasets.value = await window.printpress.listDatasets()
+  } catch (err) {
+    say(`数据集清单读取失败：${err.message || err}`)
+  }
+  try {
+    templates.value = await window.printpress.listTemplates()
+  } catch (err) {
+    say(`模板清单读取失败：${err.message || err}`)
+  }
+  try {
+    jobs.value = await window.printpress.listJobs()
+  } catch (err) {
+    say(`打印历史读取失败：${err.message || err}`)
+  }
   if (!datasets.value.some((d) => d.id === selDs.value)) selDs.value = ''
   if (!templates.value.some((t) => t.id === selTpl.value)) selTpl.value = ''
   guardScope() // 行数漂移则重置范围（打印不改行数，故正常打印后选择保留）
@@ -203,13 +228,19 @@ async function rebuildPreview() {
     previewInfo.value = null
     return
   }
+  // 竞态守卫：快速连切模板/数据集时，先发的请求可能后到，不做序号校验就会
+  // 让旧模板的预览盖掉新选择——用户看到的是A 模板的版式，导出的却是 B。
+  // 同文件 matchDataset 的 mismatchSeq 是同一范式。
+  const seq = ++previewSeq
   try {
     const built = await window.printpress.printGenerate(buildPayload())
+    if (seq !== previewSeq) return
     previewHtml.value = built.html
     previewInfo.value = built
     // 新选择预览成功：旧选择的失败提示已过时，立即清掉不让它挂在界面上
     if (toast.value) toast.value = ''
   } catch (err) {
+    if (seq !== previewSeq) return
     previewHtml.value = ''
     previewInfo.value = null
     say(`预览失败：${err.message || err}`)
@@ -375,9 +406,16 @@ async function execute(action) {
   } catch (err) {
     say(`执行失败：${err.message || err}`)
   }
-  // 成功打印/导出会回写数据集状态（侧栏「已打 N」变色），两处清单都要刷新
-  jobs.value = await window.printpress.listJobs()
-  datasets.value = await window.printpress.listDatasets()
+  // 成功打印/导出会回写数据集状态（侧栏「已打 N」变色），两处清单都要刷新。
+  // 刷新放回 try里：这两行原本在 try 之外，一次刷新失败（IPC 断开/库被锁）
+  // 就会变成未处理的 rejection，顶掉上面刚报给用户的执行结果——
+  // 用户看到「没反应」，而实际纸已经打了或导出已经完成了。
+  try {
+    jobs.value = await window.printpress.listJobs()
+    datasets.value = await window.printpress.listDatasets()
+  } catch (err) {
+    console.warn('[打印中心] 刷新清单失败', err)
+  }
 }
 
 async function openSnapshot(jobId) {
@@ -709,7 +747,7 @@ onMounted(refreshAll)
           <input v-model="scopeSearch" class="scope-input" placeholder="搜索姓名 / 机构等任意列内容…" />
           <button class="btn btn-mini" @click="scopeSelectAll">全选</button>
           <button class="btn btn-mini" @click="scopeSelectNone">取消全选</button>
-          <button v-if="scopeSearch.trim()" class="btn btn-mini" @click="scopeAddFiltered">勾选命中项</button>
+          <button v-if="scopeSearchDebounced.trim()" class="btn btn-mini" @click="scopeAddFiltered">勾选命中项</button>
         </div>
         <div class="scope-list">
           <label v-for="i in scopeVisible" :key="i" class="scope-row" :class="{ on: scopePicked.has(i) }">

@@ -39,12 +39,22 @@ function estimateTextWidthMm(text, fontSizePt) {
   return em * (Number(fontSizePt) || 12) * 25.4 / 72
 }
 
-/** 字段锚点处的可用宽度（mm）：按对齐方式从 x% 推算（居中取两侧较窄一边的两倍） */
+/**
+ * 字段锚点处的可用宽度（mm）：按对齐方式从 x% 推算（居中取两侧较窄一边的两倍）。
+ *
+ * 两道防线：
+ * - Math.max(0, pct) 挡住越界坐标算出的负宽度（负数会让任何非空值都判超宽）
+ * - 5mm 下限挡住 pct=0（贴边字段）。下限只作数值兜底，不是给坏布局放行：
+ *   真正贴边的模板在 saveTemplate 就已被validateLayout 拦下，不会到打印这一步。
+ */
+const MIN_USABLE_MM = 5
+
 function usableWidthMm(f, containerWmm) {
   const x = Number(f.x) || 0
   const align = f.align || 'center'
   const pct = align === 'center' ? Math.min(x, 100 - x) * 2 : (align === 'right' ? x : 100 - x)
-  return containerWmm * pct / 100
+  const mm = containerWmm * Math.max(0, pct) / 100
+  return Math.max(MIN_USABLE_MM, mm)
 }
 
 /** 行摘要（重复行提示用）：前 3 个非空列值拼接 */
