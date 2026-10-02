@@ -89,9 +89,9 @@ function gridToDataset(grid, name, sourceMeta) {
 }
 
 /** 导入主流程：文件 → 网格 → 数据集建档入库（CSV / 单表 Excel 快捷路径） */
-function importFromFile(filePath) {
+function importFromFile(filePath, nameOverride) {
   const grid = importGrid(filePath)
-  return gridToDataset(grid, path.basename(filePath), {
+  return gridToDataset(grid, nameOverride || path.basename(filePath), {
     type: path.extname(filePath).toLowerCase().replace('.', ''),
     fileName: path.basename(filePath),
     importedAt: new Date().toISOString(),
