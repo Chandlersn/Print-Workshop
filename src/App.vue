@@ -137,7 +137,10 @@ async function onCheckUpdate() {
 }
 
 // 系统缓存：大小查询 + 一键释放（显示与按钮二合一）
+// cacheOk 区分「真的是 0」与「查询失败」：两者都让cacheSize=0，
+// 但语义相反——失败时显示「已无可清理缓存」是把故障说成了成功。
 const cacheSize = ref(0)
+const cacheOk = ref(true)
 const clearingCache = ref(false)
 
 function fmtCacheSize(bytes) {
@@ -155,7 +158,11 @@ async function refreshCacheInfo() {
   try {
     const r = await window.printpress.getCacheInfo()
     cacheSize.value = r && r.size ? r.size : 0
-  } catch { cacheSize.value = 0 }
+    cacheOk.value = true
+  } catch {
+    cacheSize.value = 0
+    cacheOk.value = false
+  }
 }
 
 async function onClearCache() {
@@ -245,7 +252,7 @@ onMounted(async () => {
         </div>
         <h3 class="onboard-title">{{ ONBOARD_STEPS[onboardStep].title }}</h3>
         <p class="onboard-desc">{{ ONBOARD_STEPS[onboardStep].desc }}</p>
-        <p class="onboard-note">已为你准备了 4 套示例模板和示例名单，可直接体验</p>
+        <p class="onboard-note">已为你准备了 7 套示例模板和示例名单，可直接体验</p>
         <div class="onboard-actions">
           <button class="onboard-skip" @click="skipOnboarding">跳过</button>
           <button class="onboard-next" @click="nextOnboardStep">
@@ -292,10 +299,11 @@ onMounted(async () => {
           <div class="about-row">
             <span class="ar-label">系统缓存</span>
             <span class="ar-value check-group">
-              <button class="footer-btn" :disabled="clearingCache" @click="onClearCache">
+              <button class="footer-btn" :disabled="clearingCache || (cacheOk && cacheSize === 0)" @click="onClearCache">
                 {{ clearingCache ? '清理中…' : '清理缓存（' + fmtCacheSize(cacheSize) + '）' }}
               </button>
-              <span v-if="!clearingCache && cacheSize === 0" class="cr cr-ok">已无可清理缓存</span>
+              <span v-if="!clearingCache && !cacheOk" class="cr cr-fail">缓存大小读取失败</span>
+              <span v-else-if="!clearingCache && cacheSize === 0" class="cr cr-ok">已无可清理缓存</span>
             </span>
           </div>
           <div class="about-row">

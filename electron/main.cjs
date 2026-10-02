@@ -85,13 +85,19 @@ function createWindow() {
     },
   })
 
-  // 页内外链（target=_blank / window.open）一律交给系统浏览器，不在应用内开新窗口
+  // 页内外链（target=_blank / window.open）一律交给系统浏览器，不在应用内开新窗口。
+  // default 分支必须是 deny：原来返回 allow，渲染层任何一处注入的
+  // file:// / javascript: / smb: 都能在应用窗口里开一个新页面。
+  // 放行的条件比「是 http」更严——只放 https，http 没有正当理由。
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) {
+    if (/^https:\/\//i.test(url)) {
       shell.openExternal(url)
-      return { action: 'deny' }
+    } else if (/^https?:\/\//i.test(url)) {
+      // http 仍不开应用内窗口，只放系统浏览器（并留下痕迹便于排查）
+      console.warn('[main] 拒绝以 http 打开应用内窗口:', url)
+      shell.openExternal(url)
     }
-    return { action: 'allow' }
+    return { action: 'deny' }
   })
 
   if (!app.isPackaged && process.env.VITE_DEV_SERVER_URL) {

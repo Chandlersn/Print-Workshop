@@ -28,6 +28,25 @@ function compareVersions(a, b) {
   return 0
 }
 
+/**
+ * 外部链接协议白名单。
+ *
+ * 为什么要卡：info.url 来自远程 latest.json，是外部可控的字符串。
+ * 只做类型判断的话，file:///…calc.exe、smb://… 会被原样透传到
+ * shell.openExternal —— Windows 上 smb:// 能触发 NTLM 凭据协商（NTLM relay），
+ * file:// 能拉起本地可执行文件。远程一个 JSON 就能做到，不该给它这个权限。
+ * 只放行 https（更新页与反馈页都用 https，http 没有正当理由）。
+ */
+function safeExternalUrl(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  try {
+    const u = new URL(raw.trim())
+    return u.protocol === 'https:' ? u.toString() : null
+  } catch {
+    return null
+  }
+}
+
 /** 宽容解析远程 latest.json：version 缺失/非法 → null（视为检测失败，不猜测） */
 function parseInfo(text) {
   try {
@@ -36,7 +55,8 @@ function parseInfo(text) {
     return {
       version: o.version.trim(),
       notes: typeof o.notes === 'string' ? o.notes : '',
-      url: typeof o.url === 'string' ? o.url : '',
+      // url 走协议白名单：非法协议直接抹成空串，渲染层就不会给出可点的链接
+      url: safeExternalUrl(o.url) || '',
     }
   } catch {
     return null
@@ -74,5 +94,5 @@ async function checkForUpdate({
 
 module.exports = {
   UPDATE_INFO_URL, RELEASES_URL, FEEDBACK_URL, CHECK_TIMEOUT_MS,
-  compareVersions, parseInfo, checkForUpdate,
+  compareVersions, parseInfo, checkForUpdate, safeExternalUrl,
 }

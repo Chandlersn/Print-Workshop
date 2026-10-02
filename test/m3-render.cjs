@@ -35,10 +35,12 @@ const dsRows = [
   { 姓名: '', 奖项: '二等奖', 备注: '' },
   { 姓名: '李四', 奖项: '', 备注: '' },
 ]
+// printOn 必须为 true：出口校验把「已取消『印』」的列当缺失处理（阻断放行），
+// 没有它的话本套件的「空值兜底」断言会全被误判成 not-printable
 const dsColumns = [
-  { key: '姓名', alias: '姓名', type: 'text', filled: 2 },
-  { key: '奖项', alias: '奖项', type: 'text', filled: 2 },
-  { key: '备注', alias: '备注', type: 'text', filled: 1 },
+  { key: '姓名', alias: '姓名', type: 'text', filled: 2, printOn: true },
+  { key: '奖项', alias: '奖项', type: 'text', filled: 2, printOn: true },
+  { key: '备注', alias: '备注', type: 'text', filled: 1, printOn: true },
 ]
 saveJson('datasets', [{
   id: 'ds_test', name: '测试名单.csv', source: { type: 'csv' },

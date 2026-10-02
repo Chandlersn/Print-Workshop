@@ -30,6 +30,9 @@ const pendingAction = ref('')
 /** 字段缺失是结构性错误，放行只会白版——弹窗中不可「仍要继续」 */
 const hasMissingIssue = computed(() =>
   Boolean(validateResult.value?.issues.some((i) => i.missing)))
+/** 其中「已取消『印』」这一类：出路是回数据页激活，不是改模板 */
+const hasUnprintableIssue = computed(() =>
+  Boolean(validateResult.value?.issues.some((i) => i.missing && i.reason === 'not-printable')))
 
 const dsOptions = computed(() =>
   datasets.value.map((d) => ({ value: d.id, label: `${d.name}（${d.rowCount} 行）` })))
@@ -374,6 +377,17 @@ function goFixCell(issue, cell) {
   gotoCell(selDs.value, cell.rowIndex, issue.key)
 }
 
+/** 字段缺失的两种成因要给不同出路：不存在 → 换绑/改模板；取消「印」 → 去数据页激活 */
+function missingText(i) {
+  return i.reason === 'not-printable'
+    ? `已取消「印」，${i.total} 行该列都不会输出`
+    : '字段在数据集中不存在'
+}
+
+function missingFlag(i) {
+  return i.reason === 'not-printable' ? '未激活打印' : '字段缺失'
+}
+
 /** 校验问题格的悬浮说明（空值 / 疑似占位 / 超宽） */
 function cellHint(kind) {
   if (kind === 'placeholder') return '疑似占位值，点击去核对'
@@ -550,7 +564,7 @@ onMounted(refreshAll)
 
     <div v-if="!ready" class="empty-hint">
       <p class="hint-main">选择模板后自动带出关联数据集，开始批量出片</p>
-      <p class="hint-sub">模板需已上传底图、添加字段并关联数据集（在「模板工坊」制作）</p>
+      <p class="hint-sub">模板需已添加字段并关联数据集（在「模板工坊」制作）；底图可选，无底图的版式同样能打</p>
     </div>
 
     <div v-else class="preview-wrap">
@@ -638,14 +652,19 @@ onMounted(refreshAll)
       <div class="modal">
         <h3 class="modal-title">打印前校验发现问题</h3>
         <p v-if="hasMissingIssue" class="modal-sub">
-          存在<b>字段缺失</b>（模板字段在数据集中不存在）——补值无法解决，请回模板工坊调整字段后再打印：
+          <template v-if="hasUnprintableIssue">
+            存在<b>已取消「印」</b>的字段——对应位置会全部留白。请回数据页把该列的「印」重新打开后再打印：
+          </template>
+          <template v-else>
+            存在<b>字段缺失</b>（模板字段在数据集中不存在）——补值无法解决，请回模板工坊调整字段后再打印：
+          </template>
         </p>
         <p v-else class="modal-sub">空值位置将留白打印；疑似占位值（括号包裹、纯符号等形态）按原样打印；超宽文字会被版面裁掉：</p>
         <div class="issue-list">
           <div v-for="i in validateResult.issues" :key="i.key" class="det-row">
             <span class="issue-label">{{ i.label }}</span>
             <span class="det-stats">
-              <template v-if="i.missing">字段不存在</template>
+              <template v-if="i.missing">{{ missingText(i) }}</template>
               <template v-else>
                 <template v-if="i.empty">空 {{ i.empty }}</template>
                 <template v-if="i.empty && (i.placeholder || i.overlong)"> · </template>
@@ -655,7 +674,7 @@ onMounted(refreshAll)
                 / {{ i.total }} 行
               </template>
             </span>
-            <span v-if="i.missing" class="det-flag st-failed">字段缺失</span>
+            <span v-if="i.missing" class="det-flag st-failed">{{ missingFlag(i) }}</span>
             <span v-else-if="i.empty === i.total" class="det-flag st-failed">整列为空</span>
           </div>
           <!-- 去补录直达：点行号 → 数据页对应单元格聚焦编辑 -->

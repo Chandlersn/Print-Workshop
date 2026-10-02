@@ -39,6 +39,8 @@ const importMode = ref('split')
 const sheetBusy = ref(false)
 const pickerError = ref('')
 const IMPORT_EXTS = ['.xlsx', '.xls', '.csv', '.txt']
+/** 扩展名口径的唯一来源：文案与拖放高亮都从这里拼，避免三处各写一份而漂移 */
+const IMPORT_EXTS_TEXT = IMPORT_EXTS.join(' / ')
 
 // 数据集列表检索（一次导入上百个分表后的通用需求）
 const dsSearch = ref('')
@@ -410,7 +412,7 @@ watch(() => cellNav.req, async (req) => {
     <div v-if="datasets.length === 0" class="empty-hint">
       <button class="dropzone" :disabled="importing" @click="startImport">
         <span class="dropzone-main">{{ importing ? '导入中…' : '把文件拖到这里，或点击选择' }}</span>
-        <span class="dropzone-sub">支持 .xlsx / .xls / .csv · 多工作表可选 · 自动识别 UTF-8 / GBK 编码</span>
+        <span class="dropzone-sub">支持 {{ IMPORT_EXTS_TEXT }} · 多工作表可选 · 自动识别 UTF-8 / GBK 编码</span>
       </button>
       <p class="hint-sub">导入后字段从真实数据自动识别，第一行表头位置也会自动检测</p>
     </div>
@@ -552,7 +554,7 @@ watch(() => cellNav.req, async (req) => {
     <div v-if="dragDepth > 0" class="drag-mask">
       <div class="drag-box">
         <span class="drag-main">松开导入</span>
-        <span class="drag-sub">支持 .xlsx / .xls / .csv / .txt</span>
+        <span class="drag-sub">支持 {{ IMPORT_EXTS_TEXT }}</span>
       </div>
     </div>
 

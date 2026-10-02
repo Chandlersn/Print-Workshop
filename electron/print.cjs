@@ -93,9 +93,16 @@ function scopeInfo(selection, total) {
  * 是否回写数据集「已打」状态——**单一权威判定**（不变量「留痕必全，状态只认全量」）。
  * 只有全量出片回写；部分出片（行级勾选 / 分组导出）一律不回写，否则
  * 「打了 3 个人」会显示成「整份已打」，侧栏信号失真、用户判断被带偏。
+ *
+ * selected <= 0 也不回写：空数据集或全被取消勾选时一张都没出，
+ * 标成「已打」是凭空多一个成功信号。0 份的留痕照写（历史要能查到这次操作）。
+ * selected 缺省（非数字）按全量处理——旧调用方传的是 { partial } 形状。
  */
 function shouldMarkPrinted(scope) {
-  return !(scope && scope.partial)
+  if (!scope) return true
+  if (scope.partial) return false
+  const n = Number(scope.selected)
+  return Number.isFinite(n) ? n > 0 : true
 }
 
 /**
@@ -119,14 +126,22 @@ function validateBatch(datasetId, templateId, rows) {
 
   const issues = []
   const dsKeys = new Set((ds.columns || []).map((c) => c.key))
+  // 未激活打印的列：列还在，但用户已在数据页取消过「印」。
+  // 必须当缺失处理——否则模板照常出片，字段位置印出来是空白，
+  // 用户拿到手才发现，而界面上一个提示都没有（matchDataset 会说不匹配，
+  // 但出片这条路上完全静默）。
+  const notPrintable = new Set(
+    (ds.columns || []).filter((c) => c.printOn !== true).map((c) => c.key))
   for (const f of fields) {
     const colName = f.column || f.key
-    // 字段缺失：模板字段在数据集中不存在（换绑/错配兜底），单列报告
-    if (!dsKeys.has(colName)) {
+    // 字段缺失：模板字段在数据集中不存在（换绑/错配兜底），或已取消「印」，单列报告
+    if (!dsKeys.has(colName) || notPrintable.has(colName)) {
       issues.push({
         key: colName,
         label: f.label || colName,
         missing: true,
+        // 区分两种缺失：文案不同，用户该做的事也不同（换绑数据集 vs 去数据页点「印」）
+        reason: !dsKeys.has(colName) ? 'not-found' : 'not-printable',
         empty: list.length,
         placeholder: 0,
         overlong: 0,
@@ -229,10 +244,24 @@ function buildBatchHtml(datasetId, templateId, rows) {
   }
 }
 
-/** PDF/归档文件名清洗：路径非法字符与换行 → 下划线，限长 80 */
+/**
+ * PDF/归档文件名清洗。
+ *
+ * 模板名是用户自由输入，会被直接拼进保存对话框的 defaultPath，
+ * 除了路径非法字符，Windows 还有两类硬限制：
+ * - 保留设备名（CON / PRN / AUX / NUL / COM1…）——用这些名字保存会静默失败或写到别处
+ * - 结尾的点与空格——被系统悄悄截掉，用户以为存成了 A.pdf 其实是 A
+ * 所以这两类也要处理，不然「导出成功」和「文件在哪」对不上。
+ */
+const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+
 function sanitizeFilename(name) {
-  const s = String(name ?? '').replace(/[\\/:*?"<>|\r\n]+/g, '_').trim()
-  return (s || '未命名').slice(0, 80)
+  const s = String(name ?? '')
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')   // 路径非法字符与控制字符
+    .replace(/[. ]+$/, '')// 结尾的点/空格会被系统截断
+    .trim()
+  const base = (s || '未命名').slice(0, 80).replace(/[. ]+$/, '')
+  return WIN_RESERVED.test(base) ? `_${base}` : base
 }
 
 /**

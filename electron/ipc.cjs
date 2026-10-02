@@ -19,6 +19,17 @@ const printDomain = require('./print.cjs')
 const printer = require('./printer.cjs')
 const dataDirModule = require('./data-dir.cjs')
 
+/**
+ * 通用 JSON 存储通道的键名白名单：只放 UI 偏好类。
+ *
+ * 为什么必须显式列举：文件名形状校验（「小写字母+中划线」）挡不住领域库名——
+ * datasets / templates / print-jobs 全都符合那个形状。放行就等于给了一条
+ * 绕过全部领域层校验的通用写入口：一行 loadData('datasets', []) 即可清空
+ * 所有数据，字段匹配、模板引用检查、留痕上限一概不经过。
+ * 领域数据只走各自的 dataset:* / template:* / job:* 通道。
+ */
+const STORE_ALLOWLIST = new Set(['settings', 'display-settings'])
+
 function registerIpc() {
   // ---- 连通性 ----
   ipcMain.handle('app:ping', () => ({
@@ -134,14 +145,18 @@ function registerIpc() {
     return { ok: true }
   })
 
-  // ---- 通用 JSON 存储（M1 起逐步收敛为领域通道） ----
+  // ---- 通用 JSON 存储（仅限 UI 偏好类键） ----
+  // 白名单是显式的，不是语法校验：文件名形状校验挡不住领域库名
+  // （datasets / templates / print-jobs 全都符合），那等于给了绕过领域层的
+  // 通用写入口——一行 loadData('datasets', []) 就能清空全部数据。
+  // 领域数据一律走各自的 dataset:* / template:* / job:* 通道，那里才有不变量。
   ipcMain.handle('store:load', (_e, name) => {
-    assertSafeName(name)
+    assertStorableName(name)
     return loadJson(name)
   })
 
   ipcMain.handle('store:save', (_e, name, value) => {
-    assertSafeName(name)
+    assertStorableName(name)
     if (value === undefined || value === null) {
       throw new Error('store:save 拒绝空值写入')
     }
@@ -248,11 +263,14 @@ function registerIpc() {
   ipcMain.handle('print:exportPdf', async (_e, p) => {
     const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
     const stamp = new Date().toISOString().slice(0, 10)
+    // 文件名必须消毒：模板名是用户自由输入，可以含 / : * ? " | < >，
+    // 直接拼进 defaultPath 会让保存对话框落到意外位置甚至报错
+    const safeName = printDomain.sanitizeFilename(built.templateName)
     // 挂父窗口：无主对话框在 Windows 上可能被主窗口压在后面，用户看起来像「没反应」
     const parent = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0]
     const result = await dialog.showSaveDialog(parent, {
       title: '导出 PDF',
-      defaultPath: `${built.templateName}-${stamp}.pdf`,
+      defaultPath: `${safeName}-${stamp}.pdf`,
       filters: [{ name: 'PDF', extensions: ['pdf'] }],
     })
     if (result.canceled || !result.filePath) return { canceled: true }
@@ -365,10 +383,17 @@ function registerIpc() {
   ipcMain.handle('job:delete', (_e, id) => printDomain.deleteJob(String(id)))
 }
 
-/** 文件名白名单校验：只允许小写字母/数字/中划线，杜绝路径穿越 */
-function assertSafeName(name) {
-  if (typeof name !== 'string' || !/^[a-z][a-z0-9-]*$/.test(name)) {
-    throw new Error(`非法存储名: ${JSON.stringify(name)}`)
+/**
+ * 通用存储通道的键名校验：必须在显式白名单内。
+ *
+ * 为什么不是「长得像文件名就行」：领域库名（datasets/templates/print-jobs）
+ * 同样符合文件名形状，放行就等于给了绕过领域层的通用写入口。
+ */
+function assertStorableName(name) {
+  if (typeof name !== 'string' || !STORE_ALLOWLIST.has(name)) {
+    throw new Error(
+      `store 通道只接受 UI 偏好类键（${[...STORE_ALLOWLIST].join('、')}），收到: ${JSON.stringify(name)}。` +
+      '领域数据请走各自的 dataset:* / template:* / job:* 通道')
   }
 }
 

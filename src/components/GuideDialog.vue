@@ -27,7 +27,7 @@ const SECTIONS = [
   {
     title: '二、三步打出第一批',
     blocks: [
-      { type: 'p', text: '首次启动自带 4 套示例模板和示例名单，可直接体验；用你自己的数据按三步走：' },
+      { type: 'p', text: '首次启动自带 7 套示例模板和示例名单，可直接体验；用你自己的数据按三步走：' },
       { type: 'li', items: [
         '导入名单：「数据」页 → 导入 → 选 Excel（.xlsx/.xls）或 CSV。首行作表头，UTF-8 / GBK 自动识别；Excel 多工作表可拆分成多个数据集或合并成一张。',
         '设计模板：「模板」页 → 上传证书底图（png/jpg）→ 左侧字段面板点选字段，拖到画布摆好 → 保存。',
@@ -204,10 +204,11 @@ const SECTIONS = [
 .gd-note {
   margin: 8px 0;
   padding: 10px 14px;
-  background: #fbf4e4;
-  border: 1px solid #e5d3a8;
+  /* 走主题 token：原来写死 #fbf4e4，暗色模式下是一块刺眼亮斑 */
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
   border-radius: 8px;
-  color: #6b5518;
+  color: var(--ink-2);
   font-size: 13px;
   line-height: 1.8;
 }

@@ -124,8 +124,16 @@ function templateNames() {
   return new Set(templates.listTemplates().map((t) => t.name))
 }
 
-/** 导入示例名单（显式命名，不带扩展名），激活模板用到的列，返回数据集 */
+/**
+ * 导入示例名单（显式命名，不带扩展名），激活模板用到的列，返回数据集。
+ *
+ * 按名字去重（与 saveTemplates 同口径）：种子流程分「导数据集 → 建模板 → 写
+ * demoSeeded 标记」三步，中途崩溃重启会重跑。没有去重的话，
+ * 每次失败重试都多一份同名「示例名单」，侧栏越堆越多且内容完全一样。
+ */
 function importDemoDataset(seedDir, csvName, dsName) {
+  const existing = dataset.listDatasets().find((d) => d.name === dsName)
+  if (existing) return existing
   const csvPath = path.join(seedDir, csvName)
   fs.writeFileSync(csvPath, '\ufeff' + DEMO_ROWS.map((r) => r.join(',')).join('\r\n'), 'utf-8')
   const ds = dataset.importFromFile(csvPath, dsName)
