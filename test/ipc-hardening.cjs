@@ -204,6 +204,49 @@ console.log('== 7. 种子幂等 + 文案口径 ==')
   ok(/var\(--warn-soft\)/.test(src('src/components/GuideDialog.vue')), '改用 --warn-soft（暗色下不再刺眼）')
 }
 
+console.log('== 7b. 种子迁移：临时文件删不掉也必须走完（可重试自愈） ==')
+{
+  // 回归：importDemoDataset 里「建数据集 → 删临时CSV → 激活列」的顺序，
+  // 只要删CSV抛错，激活列就被跳过，数据集以「列全关」的半途状态落库；
+  // 重试时按名字去重提前返回 → 建模板永远校验失败 → 迁移再也走不完。
+  // 触发条件真实存在：杀软锁文件、只读盘、权限、宿主删除守卫。
+  const seed = require('../electron/seed-demo.cjs')
+  const seedDir = path.join(TMP, 'seed-src')
+  fs.mkdirSync(seedDir, { recursive: true })
+  // ver=1（旧版已种子）→ 走迁移分支，不依赖 print-bg 资源
+  fs.writeFileSync(path.join(TMP, 'settings.json'), JSON.stringify({ theme: 'dark', demoSeeded: true, onboarded: true }))
+
+  const tplBefore = templates.listTemplates().length
+
+  const origUnlink = fs.unlinkSync
+  fs.unlinkSync = () => { const e = new Error('EPERM: simulated unlink failure'); e.code = 'EPERM'; throw e }
+  let r1
+  try { r1 = seed.seedIfFirstRun(seedDir) } finally { fs.unlinkSync = origUnlink }
+
+  ok(r1.seeded === true && r1.migrated === true, '删不掉临时文件时迁移仍走完', r1)
+  const ext = dataset.listDatasets().find((d) => d.name === '示例名单·扩展')
+  ok(!!ext, '扩展示例名单已导入')
+  ok(ext && dataset.fieldCatalog(ext.id).filter((c) => c.printOn).length >= 6,
+    '模板用到的列已激活（没有停在半途）')
+  ok(templates.listTemplates().length > tplBefore, '会务证卡模板已补种')
+  ok(JSON.parse(fs.readFileSync(path.join(TMP, 'settings.json'), 'utf-8')).seedVersion === 2,
+    'seedVersion 已写（不会每次启动重试）')
+  ok(seed.seedIfFirstRun(seedDir).reason === 'already', '再次启动直接 already（幂等）')
+  ok(fs.readdirSync(seedDir).filter((f) => f.endsWith('.csv')).length === 0,
+    '临时 CSV 不落在 seed 资源目录（打包后是只读 resources/seed，开发态是被跟踪的 build/seed）')
+
+  // 半途状态自愈：数据集在、列却全关时，去重命中也要补激活
+  const list = JSON.parse(fs.readFileSync(path.join(TMP, 'datasets.json'), 'utf-8'))
+  const target = list.find((d) => d.name === '示例名单·扩展')
+  target.columns.forEach((c) => { delete c.printOn })
+  fs.writeFileSync(path.join(TMP, 'datasets.json'), JSON.stringify(list), 'utf-8')
+  fs.writeFileSync(path.join(TMP, 'settings.json'), JSON.stringify({ theme: 'dark', demoSeeded: true, onboarded: true }))
+  seed.seedIfFirstRun(seedDir)
+  const healed = dataset.listDatasets().find((d) => d.name === '示例名单·扩展')
+  ok(dataset.fieldCatalog(healed.id).filter((c) => c.printOn).length >= 6,
+    '列全关的半途状态能被重试自愈（去重命中时补激活）')
+}
+
 console.log('== 8. 缓存 0 值语义 ==')
 {
   const app = src('src/App.vue')

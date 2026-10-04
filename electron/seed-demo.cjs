@@ -11,6 +11,7 @@
  */
 const path = require('path')
 const fs = require('fs')
+const os = require('os')
 const { loadJson, saveJson } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
@@ -125,24 +126,51 @@ function templateNames() {
 }
 
 /**
+ * 激活 7 套模板用到的列（打印开关）。
+ *
+ * 幂等：已激活的列不再写盘（setColumnPrint 是「全量读 + 全量写」，重复调用会白白重写整份数据集）。
+ * 去重命中的分支也必须调用它 —— 见 importDemoDataset 的说明。
+ */
+function activateSeedColumns(dsId) {
+  const allDefs = [...TPL_DOC_DEFS, ...TPL_GRID_DEFS]
+  const usedKeys = new Set(allDefs.flatMap((d) => d.fields.map((f) => f.column)))
+  for (const c of dataset.fieldCatalog(dsId)) {
+    if (usedKeys.has(c.key) && !c.printOn) dataset.setColumnPrint(dsId, c.key, true)
+  }
+}
+
+/**
  * 导入示例名单（显式命名，不带扩展名），激活模板用到的列，返回数据集。
  *
  * 按名字去重（与 saveTemplates 同口径）：种子流程分「导数据集 → 建模板 → 写
  * demoSeeded 标记」三步，中途崩溃重启会重跑。没有去重的话，
  * 每次失败重试都多一份同名「示例名单」，侧栏越堆越多且内容完全一样。
+ *
+ * 去重命中时**仍要补激活**：数据集建好与列激活之间若被打断（临时文件删不掉、
+ * 进程被杀、磁盘满……），数据集已落库但列还是关的。此时只做去重提前返回，
+ * 会让「建模板」这一步永远校验失败（模板字段对不上未激活的列），迁移再也走不完，
+ * 每次启动都重试、每次都失败。补激活让这种半途状态可以被重试自愈。
+ *
+ * 临时 CSV 的清理失败**不得**中断种子：它只是不留垃圾的善意，删不掉最多留个临时文件，
+ * 但把它当致命错误会让上面那条自愈路径彻底失效。
+ *
+ * 临时 CSV 写到系统临时目录而非 seedDir：seedDir 在打包后是 resources/seed（只读资源），
+ * 开发态则是被 git 跟踪的 build/seed —— 往里写临时文件既不保险也会污染工作区。
+ * 数据集名由 nameOverride 显式给出，与文件名无关。
  */
-function importDemoDataset(seedDir, csvName, dsName) {
+function importDemoDataset(csvName, dsName) {
   const existing = dataset.listDatasets().find((d) => d.name === dsName)
-  if (existing) return existing
-  const csvPath = path.join(seedDir, csvName)
+  if (existing) {
+    activateSeedColumns(existing.id)
+    return existing
+  }
+  const csvPath = path.join(os.tmpdir(), csvName)
   fs.writeFileSync(csvPath, '\ufeff' + DEMO_ROWS.map((r) => r.join(',')).join('\r\n'), 'utf-8')
   const ds = dataset.importFromFile(csvPath, dsName)
-  fs.unlinkSync(csvPath) // 导入完成即删，不留临时文件
-  const allDefs = [...TPL_DOC_DEFS, ...TPL_GRID_DEFS]
-  const usedKeys = new Set(allDefs.flatMap((d) => d.fields.map((f) => f.column)))
-  for (const c of dataset.fieldCatalog(ds.id)) {
-    if (usedKeys.has(c.key)) dataset.setColumnPrint(ds.id, c.key, true)
-  }
+  try {
+    fs.unlinkSync(csvPath) // 导入完成即删，不留临时文件；删不掉也不影响种子结果
+  } catch { /* 锁文件/权限/宿主守卫等：留个临时文件而已，下次写入会覆盖 */ }
+  activateSeedColumns(ds.id)
   return ds
 }
 
@@ -190,7 +218,7 @@ function seedIfFirstRun(seedDir) {
         if (!fs.existsSync(dest)) fs.copyFileSync(path.join(srcBg, f), dest)
       }
       // 2. 示例名单走真实导入链路（列名规范化/类型推断全部生效）
-      const ds = importDemoDataset(seedDir, '示例名单.csv', '示例名单')
+      const ds = importDemoDataset('示例名单.csv', '示例名单')
       // 3. 全部 7 套模板绑定该数据集（预览即有真实数据）
       const created = saveTemplates([...TPL_DOC_DEFS, ...TPL_GRID_DEFS], ds.id)
       saveJson('settings', { ...settings, demoSeeded: true, seedVersion: SEED_VERSION })
@@ -198,7 +226,7 @@ function seedIfFirstRun(seedDir) {
     }
 
     // ver 1 → 2 迁移：老 4 套与老数据原样保留；扩展名单 + 会务证卡模板
-    const ds = importDemoDataset(seedDir, '示例名单-扩展.csv', '示例名单·扩展')
+    const ds = importDemoDataset('示例名单-扩展.csv', '示例名单·扩展')
     const created = saveTemplates(TPL_GRID_DEFS, ds.id)
     saveJson('settings', { ...settings, seedVersion: SEED_VERSION })
     return { seeded: true, migrated: true, datasetId: ds.id, templates: created }
