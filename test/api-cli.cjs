@@ -65,8 +65,8 @@ const LEGACY_CHANNELS = [
   'job:list', 'job:openSnapshot', 'job:delete',
 ]
 
-/** 抽取时新增的通道（路径版，替 agent 去掉「弹窗选文件」这一步） */
-const ADDED_CHANNELS = ['dataset:importFile', 'template:uploadBackground', 'font:upload']
+/** 抽取时新增的通道（路径版，替 agent 去掉「弹窗选文件」这一步）+ 导入会话整批删除 */
+const ADDED_CHANNELS = ['dataset:importFile', 'dataset:deleteBatch', 'template:uploadBackground', 'font:upload']
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }
 
@@ -95,7 +95,7 @@ async function run() {
 
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
-      '新增通道恰好是预期的 3 个路径版', added)
+      '新增通道恰好是预期的 4 个路径版', added)
 
     // ipc.cjs 必须从注册表派生，不能回退成手写
     const ipcSrc = stripComments(src('electron/ipc.cjs'))

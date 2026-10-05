@@ -45,6 +45,48 @@ const IMPORT_EXTS_TEXT = IMPORT_EXTS.join(' / ')
 // 数据集列表检索（一次导入上百个分表后的通用需求）
 const dsSearch = ref('')
 
+// ---- 导入会话（批次）：一次导入 = 一个管理单元，可整批切换与删除 ----
+// 同一次导入（split 出 N 个工作簿）共享 source.batchId；旧数据没有 batchId，
+// 按「文件名+导入时间」回退分组（importSheets 的 sourceMeta 一次生成，同批必同值）。
+const activeBatchKey = ref('')
+
+function batchKeyOf(ds) {
+  const src = ds.source || {}
+  return src.batchId || `${src.fileName || ''}|${src.importedAt || ''}|${ds.id}`
+}
+
+const batches = computed(() => {
+  const map = new Map()
+  for (const d of datasets.value) {
+    const key = batchKeyOf(d)
+    if (!map.has(key)) {
+      const src = d.source || {}
+      map.set(key, {
+        key,
+        fileName: src.fileName || d.name,
+        importedAt: src.importedAt || '',
+        count: 0,
+        ids: [],
+      })
+    }
+    const b = map.get(key)
+    b.count += 1
+    b.ids.push(d.id)
+  }
+  // 新导入的批次排前面：进数据页第一眼是最近的工作
+  return [...map.values()].sort((a, b) => String(b.importedAt).localeCompare(String(a.importedAt)))
+})
+
+// 当前批次三级回退：显式选择 → 当前数据集所在批次 → 最新批次。
+// 保证下拉、侧栏、详情三者任何时刻指向一致，不出现「空批次死路」。
+const activeBatch = computed(() => {
+  const list = batches.value
+  if (!list.length) return null
+  return list.find((b) => b.key === activeBatchKey.value)
+    || list.find((b) => b.ids.includes(activeId.value))
+    || list[0]
+})
+
 // 表格字号（阅读体验用户自调，像手机系统字体档位）：选择持久化，data-size 驱动样式
 const SIZE_OPTIONS = [
   { value: 's', label: '小' },
@@ -77,10 +119,12 @@ const filteredSheets = computed(() => {
 })
 const checkedCount = computed(() => sheetItems.value.filter((s) => s.checked).length)
 const shownDatasets = computed(() => {
+  if (!activeBatch.value) return []
+  const inBatch = new Set(activeBatch.value.ids)
   const kw = dsSearch.value.trim().toLowerCase()
-  const list = kw
-    ? datasets.value.filter((d) => d.name.toLowerCase().includes(kw))
-    : datasets.value
+  const list = datasets.value.filter(
+    (d) => inBatch.has(d.id) && (!kw || d.name.toLowerCase().includes(kw))
+  )
   // 已激活打印字段的数据集置顶，组内按激活数降序（稳定排序）——
   // 点印/取消时激活数变化，位置随之可见地移动；未激活的保持导入顺序
   const ready = list.filter((d) => d.printCols > 0).sort((a, b) => b.printCols - a.printCols)
@@ -228,13 +272,27 @@ function onConfirmConfirmed() {
   if (c) c.action()
 }
 
-async function removeDataset(id) {
-  const ds = datasets.value.find((d) => d.id === id)
+/**
+ * 删除当前导入会话的全部工作簿（整批）。
+ * 单个数据集的批次显示为「删除数据集」，多个时一键删整批——
+ * 删除范围跟随顶部批次下拉，所见即所删。
+ */
+function removeActiveBatch() {
+  const b = activeBatch.value
+  if (!b) return
+  const single = datasets.value.find((d) => d.id === activeId.value)
+  const label = b.count > 1
+    ? `「${b.fileName}」导入的全部 ${b.count} 个工作簿`
+    : `数据集「${single ? single.name : b.fileName}」`
   pendingConfirm.value = {
-    message: `确定删除数据集「${ds ? ds.name : id}」？\n该操作不可恢复。`,
+    message: `确定删除${label}？\n该操作不可恢复。`,
     action: async () => {
-      await window.printpress.deleteDataset(id)
-      await refreshList()
+      try {
+        await window.printpress.deleteBatch(b.ids)
+        await refreshList()
+      } catch (err) {
+        errorMsg.value = extractError(err)
+      }
     },
   }
 }
@@ -419,6 +477,19 @@ watch(() => cellNav.req, async (req) => {
 
     <div v-else class="layout">
       <aside class="ds-list">
+        <label class="batch-row" title="按导入会话切换：一次导入的所有工作簿归为一个批次">
+          <span class="batch-label">导入批次</span>
+          <select
+            class="batch-select"
+            :value="activeBatch ? activeBatch.key : ''"
+            :disabled="!batches.length"
+            @change="activeBatchKey = $event.target.value"
+          >
+            <option v-for="b in batches" :key="b.key" :value="b.key">
+              {{ b.fileName }}（{{ b.count }} 个{{ b.importedAt ? ` · ${b.importedAt.slice(0, 10)}` : '' }}）
+            </option>
+          </select>
+        </label>
         <input
           v-if="datasets.length > 6"
           v-model="dsSearch"
@@ -458,7 +529,9 @@ watch(() => cellNav.req, async (req) => {
               <span v-else>尚未打印</span>
             </div>
           </div>
-          <button class="btn-danger" @click="removeDataset(detail.id)">删除数据集</button>
+          <button class="btn-danger" @click="removeActiveBatch">
+            {{ activeBatch && activeBatch.count > 1 ? `删除整批（${activeBatch.count} 个工作簿）` : '删除数据集' }}
+          </button>
         </div>
 
         <h3 class="section-title">
@@ -952,6 +1025,27 @@ watch(() => cellNav.req, async (req) => {
   background: var(--input-bg);
   color: var(--ink);
   font-size: 12px;
+}
+
+.batch-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.batch-label {
+  font-size: 11px;
+  color: var(--stone);
+}
+
+.batch-select {
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--ink);
+  font-size: 12px;
+  width: 100%;
 }
 
 .ds-none {

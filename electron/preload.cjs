@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('printpress', {
   listDatasets: () => ipcRenderer.invoke('dataset:list'),
   getDataset: (id) => ipcRenderer.invoke('dataset:get', id),
   deleteDataset: (id) => ipcRenderer.invoke('dataset:delete', id),
+  deleteBatch: (ids) => ipcRenderer.invoke('dataset:deleteBatch', { ids }),
   renameColumn: (id, key, alias) => ipcRenderer.invoke('dataset:renameColumn', id, key, alias),
   updateCell: (datasetId, rowIndex, key, value) =>
     ipcRenderer.invoke('dataset:updateCell', { datasetId, rowIndex, key, value }),

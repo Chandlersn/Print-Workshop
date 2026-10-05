@@ -361,6 +361,16 @@ const OPS = {
     run: (p) => dataset.deleteDataset(String(p.id)),
   },
 
+  /**
+   * 按导入会话整批删除：一次导入产生的所有数据集（split 出的 N 个工作簿）
+   * 归为一个会话，这里一次删光。ids 由渲染层按 source.batchId 分组派生。
+   */
+  'dataset:deleteBatch': {
+    write: true,
+    params: { ids: { required: true, desc: '[id] 同一导入会话内全部数据集 id' } },
+    run: (p) => dataset.deleteBatch(p.ids),
+  },
+
   'dataset:renameColumn': {
     write: true,
     params: {

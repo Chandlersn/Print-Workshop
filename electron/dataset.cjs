@@ -88,13 +88,18 @@ function gridToDataset(grid, name, sourceMeta) {
   return summary(ds)
 }
 
-/** 导入主流程：文件 → 网格 → 数据集建档入库（CSV / 单表 Excel 快捷路径） */
+/**
+ * 导入主流程：文件 → 网格 → 数据集建档入库（CSV / 单表 Excel 快捷路径）。
+ * 同一次导入调用共享同一个 batchId（导入会话）：数据页按它分组，
+ * 支持一键删除整批——「一次导入的所有工作簿」是一个管理单元。
+ */
 function importFromFile(filePath, nameOverride) {
   const grid = importGrid(filePath)
   return gridToDataset(grid, nameOverride || path.basename(filePath), {
     type: path.extname(filePath).toLowerCase().replace('.', ''),
     fileName: path.basename(filePath),
     importedAt: new Date().toISOString(),
+    batchId: newId('imp'),
   })
 }
 
@@ -137,6 +142,7 @@ async function importSheets(filePath, { selections, mode, onProgress = () => {} 
     type: path.extname(filePath).toLowerCase().replace('.', ''),
     fileName: path.basename(filePath),
     importedAt: new Date().toISOString(),
+    batchId: newId('imp'), // 本次导入会话标识：split 出的 N 个数据集共享，整批删除按它圈定
   }
 
   // 1. 整簿只读一次（此前每表经 parseSheetGrid 重读一遍，大文件 N 表 = N 次全量解析）
@@ -256,6 +262,22 @@ function deleteDataset(id) {
   findDs(id)
   persistAll(loadAll().filter((d) => d.id !== id))
   return { ok: true }
+}
+
+/**
+ * 按导入会话整批删除：ids 为同批数据集 id 清单（UI 从 source.batchId 分组派生）。
+ * 一次 persistAll 落盘（逐个 deleteDataset 会写 N 次）；实际删除数如实返回，
+ * 已不存在的 id 不报错也不计入——部分已被删时剩余的照删，与「会话清空」语义一致。
+ */
+function deleteBatch(ids) {
+  const want = new Set((Array.isArray(ids) ? ids : []).map(String))
+  if (!want.size) throw new Error('未指定要删除的数据集')
+  const list = loadAll()
+  const remaining = list.filter((d) => !want.has(d.id))
+  const deleted = list.length - remaining.length
+  if (deleted === 0) throw new Error('所选数据集均已不存在（可能已被删除），请刷新后重试')
+  persistAll(remaining)
+  return { ok: true, deleted }
 }
 
 function renameColumn(id, key, alias) {
@@ -391,6 +413,7 @@ module.exports = {
   listDatasets,
   getDataset,
   deleteDataset,
+  deleteBatch,
   renameColumn,
   updateCell,
   addRow,
