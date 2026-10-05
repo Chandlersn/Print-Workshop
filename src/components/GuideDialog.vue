@@ -21,7 +21,7 @@ const SECTIONS = [
     blocks: [
       { type: 'note', text: '安装包未购买代码签名证书，SmartScreen 会对陌生程序出手，属正常现象，应用没有任何联网上传行为。应对：蓝色警告窗口点「更多信息」→「仍要运行」。个别杀软误报，加入信任列表即可。' },
       { type: 'h', text: '数据在哪里？' },
-      { type: 'p', html: '所有数据默认存在本机 <code>%APPDATA%\\批印坊\\data</code>，<strong>不上传任何服务器</strong>。想放 D 盘或网盘同步目录：应用底部「更改…」选择新位置，现有数据自动迁移。备份 = 拷贝整个 data 文件夹。' },
+      { type: 'p', html: '所有数据默认存在本机 <code>%APPDATA%\\printpress\\data</code>，<strong>不上传任何服务器</strong>。想放 D 盘或网盘同步目录：应用底部「更改…」选择新位置，现有数据自动迁移。备份 = 拷贝整个 data 文件夹。' },
     ],
   },
   {
