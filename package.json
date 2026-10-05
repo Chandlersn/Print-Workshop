@@ -8,10 +8,11 @@
     "dev": "vite",
     "build": "vite build",
     "start": "electron .",
+    "pp": "node bin/pp.cjs",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5199 && electron .\"",
     "smoke": "electron . --smoke",
-    "test": "node test/m1-import.cjs && node test/m2-templates.cjs && node test/m3-render.cjs && node test/render-grid.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/placeholder.cjs && node test/print-scope.cjs && node test/dataset-edit.cjs && node test/canvas-layout.cjs && node test/print-jobs.cjs && node test/version-check.cjs && node test/storage-guard.cjs && node test/print-failure.cjs && node test/robustness.cjs && node test/ipc-hardening.cjs",
-    "test:e2e": "electron test/m3-e2e.cjs",
+    "test": "node test/m1-import.cjs && node test/m2-templates.cjs && node test/m3-render.cjs && node test/render-grid.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/placeholder.cjs && node test/print-scope.cjs && node test/dataset-edit.cjs && node test/canvas-layout.cjs && node test/print-jobs.cjs && node test/version-check.cjs && node test/storage-guard.cjs && node test/print-failure.cjs && node test/robustness.cjs && node test/ipc-hardening.cjs && node test/ipc-wiring.cjs && node test/api-cli.cjs && node test/e2e-harness.cjs",
+    "test:e2e": "node test/helpers/electron-runner.cjs test/m3-e2e.cjs",
     "bench:storage": "node test/bench-storage.cjs",
     "dist": "npm run build && electron-builder --win --x64"
   },

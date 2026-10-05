@@ -3,6 +3,7 @@ dist/
 release*/
 release-*/
 data/*.json
+data/*.json.bak
 data/*.tmp
 test/.tmp-*/
 vite.config.js.timestamp-*.mjs
