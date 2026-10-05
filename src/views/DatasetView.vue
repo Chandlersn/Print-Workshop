@@ -52,7 +52,13 @@ const activeBatchKey = ref('')
 
 function batchKeyOf(ds) {
   const src = ds.source || {}
-  return src.batchId || `${src.fileName || ''}|${src.importedAt || ''}|${ds.id}`
+  if (src.batchId) return src.batchId
+  const file = src.fileName || ''
+  const at = src.importedAt || ''
+  // 旧数据无 batchId：按「文件名+导入时间」回退分组（同次导入必同值）；
+  // 两者皆空才退到 id，避免不同孤儿数据集被错误合并
+  if (file || at) return `${file}|${at}`
+  return ds.id
 }
 
 const batches = computed(() => {
