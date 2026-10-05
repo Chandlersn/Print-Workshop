@@ -549,19 +549,6 @@ onMounted(refreshAll)
       <button v-if="selRows" class="btn btn-mini" :disabled="busy" @click="setScope(null)">恢复全量</button>
     </div>
 
-    <!-- 打印统计：从留痕自动聚合，对照工作簿是否遗漏 -->
-    <div v-if="ready && dsPrintStats" class="scope-bar stats-bar">
-      <span class="det-flag" :class="dsPrintStats.times ? 'st-ok' : 'st-failed'">
-        {{ dsPrintStats.times ? '有记录' : '无记录' }}
-      </span>
-      <span class="scope-note">
-        「{{ dsPrintStats.name }}」（共 {{ dsPrintStats.rowCount }} 行）：
-        <template v-if="dsPrintStats.times">已打印/导出 {{ dsPrintStats.times }} 次 · 累计 {{ dsPrintStats.pages }} 份 · 最近 {{ fmtTime(dsPrintStats.last) }}</template>
-        <template v-else>尚无全量打印或导出记录——如果这份名单本来就要出片，这里就是遗漏提醒</template>
-        <template v-if="dsPrintStats.partialTimes">（另有补打 {{ dsPrintStats.partialTimes }} 次 · {{ dsPrintStats.partialRows }} 行，不计入全量）</template>
-      </span>
-    </div>
-
     <div v-if="!ready" class="empty-hint">
       <p class="hint-main">选择模板后自动带出关联数据集，开始批量出片</p>
       <p class="hint-sub">模板需已添加字段并关联数据集（在「模板工坊」制作）；底图可选，无底图的版式同样能打</p>
@@ -605,6 +592,20 @@ onMounted(refreshAll)
           ></iframe>
         </div>
       </div>
+    </div>
+
+    <!-- 打印统计：从留痕自动聚合，对照工作簿是否遗漏。放在历史上方——
+         出完片往下一滚就是「有没有打过」的对照，遗漏提醒与记录清单贴在一起 -->
+    <div v-if="ready && dsPrintStats" class="scope-bar stats-bar">
+      <span class="det-flag" :class="dsPrintStats.times ? 'st-ok' : 'st-failed'">
+        {{ dsPrintStats.times ? '有记录' : '无记录' }}
+      </span>
+      <span class="scope-note">
+        「{{ dsPrintStats.name }}」（共 {{ dsPrintStats.rowCount }} 行）：
+        <template v-if="dsPrintStats.times">已打印/导出 {{ dsPrintStats.times }} 次 · 累计 {{ dsPrintStats.pages }} 份 · 最近 {{ fmtTime(dsPrintStats.last) }}</template>
+        <template v-else>尚无全量打印或导出记录——如果这份名单本来就要出片，这里就是遗漏提醒</template>
+        <template v-if="dsPrintStats.partialTimes">（另有补打 {{ dsPrintStats.partialTimes }} 次 · {{ dsPrintStats.partialRows }} 行，不计入全量）</template>
+      </span>
     </div>
 
     <div class="history-block">
