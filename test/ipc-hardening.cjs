@@ -32,11 +32,15 @@ const src = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf-8')
 
 console.log('== 1. store 通道必须只放行 UI 偏好类 ==')
 {
-  const ipc = src('electron/ipc.cjs')
-  ok(/STORE_ALLOWLIST = new Set\(\['settings', 'display-settings'\]\)/.test(ipc),
+  // 业务实现已从 ipc.cjs 抽到 api.cjs（ipc.cjs 只剩 Electron 装配），
+  // 所以结构断言的落点跟着走——断言的意图不变：白名单必须显式且唯一。
+  const apiSrc = src('electron/api.cjs')
+  ok(/STORE_ALLOWLIST = new Set\(\['settings', 'display-settings'\]\)/.test(apiSrc),
     '白名单显式列举（不是文件名形状校验）')
-  ok(/assertStorableName/.test(ipc), '两个 handler 都走白名单校验')
-  ok(!/assertSafeName/.test(ipc), '旧的文件名形状校验已移除（它挡不住 datasets/templates）')
+  ok(/assertStorableName/.test(apiSrc), '两个 handler 都走白名单校验')
+  ok(!/assertSafeName/.test(apiSrc), '旧的文件名形状校验已移除（它挡不住 datasets/templates）')
+  ok(!/STORE_ALLOWLIST/.test(src('electron/ipc.cjs')),
+    'ipc.cjs 不再自持白名单副本（唯一权威源在 api.cjs）')
 
   // 领域库名必须被显式排除：形状合规但不在白名单
   const allowed = new Set(['settings', 'display-settings'])
@@ -110,10 +114,10 @@ console.log('== 4. 文件名消毒（模板名直接拼 defaultPath） ==')
   ok(printDomain.sanitizeFilename('x'.repeat(200)).length <= 80, '限长 80')
   ok(printDomain.sanitizeFilename('x'.repeat(200)).endsWith('x'), '截断不产生尾点')
 
-  // 接线：ipc 必须真的用上它（原来是死代码，0 处调用）
-  const ipc = src('electron/ipc.cjs')
-  ok(/printDomain\.sanitizeFilename\(built\.templateName\)/.test(ipc), 'exportPdf 的 defaultPath 用了消毒后的名字')
-  ok(!/defaultPath: `\$\{built\.templateName\}/.test(ipc), '不再直接拼未消毒的模板名')
+  // 接线：实现必须真的用上它（原来是死代码，0 处调用）
+  const apiSrc2 = src('electron/api.cjs')
+  ok(/printDomain\.sanitizeFilename\(built\.templateName\)/.test(apiSrc2), 'exportPdf 的 defaultPath 用了消毒后的名字')
+  ok(!/defaultPath: `\$\{built\.templateName\}/.test(apiSrc2), '不再直接拼未消毒的模板名')
 }
 
 console.log('== 5. 取消「印」必须使模板字段失效 ==')

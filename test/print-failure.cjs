@@ -124,7 +124,7 @@ console.log('== 2. 多联回退原因必须传到界面 ==')
 
 console.log('== 3. 直打失败必须留痕 ==')
 {
-  // 复刻 ipc.cjs print:send 的失败分支：sendToPrinter 抛错时写一条 failed 记录。
+  // 复刻 api.cjs print:send 的失败分支：sendToPrinter 抛错时写一条 failed 记录。
   // 这里不真连打印机（会弹系统对话框），而是验证「失败路径确实产出了可查的留痕」：
   // 用真实 printDomain.createJob 落failed，再用 listJobs 读回、resolveSnapshot 回看。
   const ds = makeDataset()
@@ -161,15 +161,18 @@ console.log('== 3. 直打失败必须留痕 ==')
 
 console.log('== 4. 静态核查：print:send 必须有失败留痕分支 ==')
 {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'electron', 'ipc.cjs'), 'utf-8')
-  const start = src.indexOf("ipcMain.handle('print:send'")
-  ok(start > 0, '定位到 print:send 处理函数')
-  const body = src.slice(start, src.indexOf("ipcMain.handle('job:list'", start))
+  // 业务实现已从 ipc.cjs 抽到 api.cjs（ipc.cjs 只剩 Electron 装配），
+  // 断言意图不变：两个出口的失败分支必须对称存在。
+  const src = fs.readFileSync(path.join(__dirname, '..', 'electron', 'api.cjs'), 'utf-8')
+  const start = src.indexOf("'print:send': {")
+  ok(start > 0, '定位到 print:send 操作定义')
+  const body = src.slice(start, src.indexOf("'job:list': {", start))
   ok(/catch\s*\(/.test(body), 'print:send 包了 try/catch（异常不再静默）')
   ok(/status:\s*'failed'/.test(body), 'print:send 失败时写 failed 留痕')
   ok(body.indexOf("status: 'failed'") < body.indexOf('return {'), '失败留痕发生在 return 之前')
   // 对称性：PDF 出口也必须有，两个出口不能一个留痕一个不留
-  const pdfStart = src.indexOf("ipcMain.handle('print:exportPdf'")
+  const pdfStart = src.indexOf("'print:exportPdf': {")
+  ok(pdfStart > 0, '定位到 print:exportPdf 操作定义')
   const pdfBody = src.slice(pdfStart, start)
   ok(/status:\s*'failed'/.test(pdfBody), 'print:exportPdf 同样有 failed 留痕（两出口对称）')
 }
