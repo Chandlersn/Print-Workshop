@@ -430,6 +430,62 @@ console.log('== 8. 缓存 0 值语义 ==')
     '确认 0 时禁用；查询失败时 cacheOk=false 故仍可点（保留重试路径）')
 }
 
+console.log('== 8b. 清理缓存「点了没反应」不许再复发 ==')
+{
+  // 根因链：运行中的 GPUCache / DawnCache 被 Chromium 自己持有 → 删除必然 EPERM，
+  // 而旧代码 `catch {}` 把它静默吞了、返回值里没有失败痕迹、界面也什么都不说。
+  // 于是用户点了「清理缓存」看到的就是「没反应」。下面逐环钉住。
+  const api = src('electron/api.cjs')
+  ok(!/catch \{ \/\* 个别文件锁住/.test(api), '主进程不再静默吞掉删除失败')
+  ok(/require\('\.\/cache\.cjs'\)/.test(api), '缓存实现抽到 cache.cjs（main.cjs 启动早期也要用）')
+  ok(/cache\.cacheInfo\(ctx\.app\.userDataDir\)/.test(api), 'app:cacheInfo 委托 cache.cjs')
+  ok(/cache\.clearCache\(ctx\.app\.userDataDir\)/.test(api), 'app:clearCache 委托 cache.cjs')
+
+  const cacheSrc = src('electron/cache.cjs')
+  ok(/failed\.push\(\{ name, size: s, error:/.test(cacheSrc), '删不掉的记进 failed，带原因和体积')
+  ok(/writePending\(userDataDir, \[\.\.\.readPending\(userDataDir\), \.\.\.failed\.map/.test(cacheSrc),
+    'failed 自动排队到下次启动')
+  ok(!/require\('electron'\)/.test(cacheSrc), 'cache.cjs 是纯 Node 模块（不 require electron，main/api 都能用）')
+
+  // 位置就是正确性本身：必须赶在 GPU 进程打开这两个目录之前，否则一样 EPERM
+  const main = src('electron/main.cjs')
+  const sweepAt = main.indexOf('runPendingCleanup')
+  const readyAt = main.indexOf('app.whenReady()')
+  ok(sweepAt > -1, 'main.cjs 启动时清理上次没清掉的缓存')
+  ok(sweepAt > -1 && readyAt > -1 && sweepAt < readyAt,
+    '**清理必须排在 app.whenReady() 之前**（晚于它 GPU 进程已持有 GPUCache，白清）', { sweepAt, readyAt })
+  ok(/try \{[\s\S]{0,400}?runPendingCleanup[\s\S]{0,400}?\} catch/.test(main),
+    '清理失败不能挡住启动（整段包在 try/catch 里）')
+
+  // 界面：必须把结果说出来，且「排到下次启动」要和「已清掉」区分开
+  const app = src('src/App.vue')
+  ok(/const cacheMsg = ref\(''\)/.test(app), '界面有清理结果的状态位')
+  ok(/已清理 \$\{fmtCacheSize\(r\.freed\)\}/.test(app), '清掉了多少，如实说')
+  ok(/if \(r\.freed >= 1024\)/.test(app),
+    '不足 1KB 不报「已清理 0 KB」（Chromium 的 Cache 目录常年只有几十字节索引，报了是噪音）')
+  ok(/正被系统占用，将在下次启动时清理/.test(app), '**当场清不掉的要交代去向**（不许「没反应」）')
+  ok(/已无可清理缓存/.test(app), '真的没缓存可清时也有话说')
+  ok(/r\.queued/.test(app) && /r\.failed/.test(app), '界面读的是 failed / queued，不是自己猜')
+  ok(/cacheMsgFail\.value = true/.test(app), '异常路径有独立标志（不是只说「已无缓存」）')
+  ok(/'cr-warn'/.test(app), '「排到下次启动」用警示色（需要用户知情）')
+  ok(/\.cr-warn \{/.test(app), 'cr-warn 有对应样式')
+  ok(/openAbout[\s\S]{0,120}?cacheMsg\.value = ''/.test(app), '重开「关于」清掉上次的结果文案')
+}
+
+console.log('== 8c. 「关于」不再挂使用说明入口（顶栏「说明」是唯一入口） ==')
+{
+  const app = src('src/App.vue')
+  ok(!/查看使用说明/.test(app), '「关于」里没有「查看使用说明」按钮了')
+  ok(!/>\s*使用说明\s*<\/button>/.test(app), '没有残留的「使用说明」按钮文案')
+  // 删干净 ≠ 把功能删了：顶栏入口与弹窗必须都还在，否则是误删
+  ok(/showGuide = true/.test(app), '顶栏「说明」入口还在')
+  ok(/<GuideDialog v-if="showGuide"/.test(app), '使用说明弹窗还在挂载')
+  ok(/import GuideDialog from '\.\/components\/GuideDialog\.vue'/.test(app), 'GuideDialog 组件仍被引用')
+  // 说明文档本身不许被顺手删掉
+  ok(fs.existsSync(path.join(__dirname, '..', 'src', 'components', 'GuideDialog.vue')), 'GuideDialog.vue 还在')
+  ok(fs.existsSync(path.join(__dirname, '..', 'docs', '使用说明.md')), 'docs/使用说明.md 还在')
+}
+
 rmDeep(TMP)
 console.log(`\nIPC 收口与结构：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)
