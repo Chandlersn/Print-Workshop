@@ -185,6 +185,12 @@ console.log('== 4c. 底图的上传入口与删除方式（前端静态核查）
   // 删除底图：点选中 + Delete，而不是点一下就删
   ok(/@click="selectBackground"/.test(view), '点底图进入选中态')
   ok(/bgSelected/.test(view), '有独立的底图选中标志')
+  // 纸面上那句浮着的底图提示：选中字段时必须收起。
+  // 用户在改字段，飘一句「点底图选中」既无关又挡视线。
+  const tipTag = view.match(/<p v-if="([^"]+)" class="bg-tip"/)
+  ok(Boolean(tipTag), '存在纸面上的底图提示（.bg-tip）')
+  ok(Boolean(tipTag) && /!selectedField/.test(tipTag[1]),
+    '选中字段时收起底图提示（改字段时不再弹「点底图」）')
   ok(/bgSelected\.value && \(e\.key === 'Delete'/.test(view), 'Delete 有删底图的分支')
   ok(/@click="removeBackground"|removeBackground\(\)/.test(view), '存在移除底图的实现')
   // 顺序很关键：选中底图时 selectedIdx 是 -1，targets 为空，
