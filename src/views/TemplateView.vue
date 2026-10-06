@@ -185,6 +185,11 @@ const errorMsg = ref('')
 const dragState = ref(null)
 const canvasEl = ref(null)
 
+// 底图选中态：点底图选中它，再按 Delete 移除。
+// 走「选中 → Delete」而不是「点一下就删」，是为了跟字段同一套心智——
+// 底图铺满整张纸，单击即删的话，随手点一下空白处就会把图弄没。
+const bgSelected = ref(false)
+
 // ---- M4：多选 / 撤销重做 / 吸附辅助线 ----
 const multiSel = ref(new Set())      // 多选集合（含 selectedIdx）
 const undoStack = ref([])            // 字段快照栈（撤销）
@@ -307,6 +312,7 @@ function newTemplate() {
   }
   selectedIdx.value = -1
   multiSel.value = new Set()
+  bgSelected.value = false
   undoStack.value = []
   redoStack.value = []
   activeDatasetId.value = ''
@@ -322,6 +328,7 @@ async function openTemplate(id) {
     ensureLayout() // 旧模板没有 layout 字段：补默认单页，避免下游读到 undefined
     selectedIdx.value = -1
     multiSel.value = new Set()
+    bgSelected.value = false
     undoStack.value = []
     redoStack.value = []
     // 绑定的数据集已被删除：目录加载必然失败，提前给用户可读的出路提示
@@ -391,8 +398,10 @@ function onPageDim(which, val) {
 function applyBackgroundResult(result) {
   const t = activeTpl.value
   if (!t) return
+  pushUndo() // 换底图也是一次可撤销的编辑
   t.background = result.background
   t.bgSize = { width: result.width, height: result.height }
+  bgSelected.value = false
   if (result.suggest.matched) {
     t.pageSize = { id: result.suggest.page.id, w: result.suggest.page.w, h: result.suggest.page.h }
     flash(`底图已上传，纸张匹配为${result.suggest.page.name}`)
@@ -400,6 +409,32 @@ function applyBackgroundResult(result) {
     t.pageSize = { id: 'custom', w: result.suggest.page.w, h: result.suggest.page.h }
     flash('底图已上传，非标准比例，按像素换算为自定义纸张')
   }
+}
+
+/** 点底图 = 选中它（属性面板切到底图信息，按 Delete 即可移除） */
+function selectBackground() {
+  const t = activeTpl.value
+  if (!t || !t.background) return
+  bgSelected.value = true
+  selectedIdx.value = -1
+  multiSel.value = new Set()
+}
+
+/**
+ * 移除底图：只清模板上的引用。
+ *
+ * 磁盘上的图片文件**不在这里删**——撤销栈里还存着它的路径，
+ * 删了文件就会让「Ctrl+Z 撤销回来」变成一个加载失败的破图。
+ * 换底图同理：旧图会留在数据目录里，与「换图不删旧文件」的既有行为一致。
+ */
+function removeBackground() {
+  const t = activeTpl.value
+  if (!t || !t.background) return
+  pushUndo()
+  t.background = ''
+  t.bgSize = null
+  bgSelected.value = false
+  flash('底图已移除——点画布中央可重新上传，Ctrl+Z 可撤销')
 }
 
 async function uploadBackground() {
@@ -515,12 +550,19 @@ function onPaste(e) {
 
 // ---- 撤销 / 重做：字段布局快照栈（上限 50 条） ----
 /**
- * 撤销栈快照。必须含 layout：成品尺寸、裁切线也是模板的一部分，
- * 只快照 fields 的话，误改尺寸后按撤销救不回来（字段没变，去重还会把它挡掉）。
+ * 撤销栈快照。必须含 layout 与 background：成品尺寸、裁切线、底图都是模板的一部分——
+ * 只快照 fields 的话，误改尺寸 / 误删底图后按撤销救不回来（字段没变，去重还会把它挡掉）。
  */
 function snapshotFields() {
   const t = activeTpl.value
-  return JSON.stringify(t ? { fields: t.fields, layout: t.layout || null } : { fields: [] })
+  return JSON.stringify(t
+    ? {
+      fields: t.fields,
+      layout: t.layout || null,
+      background: t.background || '',
+      bgSize: t.bgSize || null,
+    }
+    : { fields: [] })
 }
 
 function pushUndo() {
@@ -538,7 +580,15 @@ function restoreSnapshot(json) {
   const snap = JSON.parse(json)
   // 兼容早期只存fields 数组的快照
   activeTpl.value.fields = Array.isArray(snap) ? snap : snap.fields
-  if (!Array.isArray(snap) && snap.layout) activeTpl.value.layout = snap.layout
+  if (!Array.isArray(snap)) {
+    if (snap.layout) activeTpl.value.layout = snap.layout
+    // 底图随快照一起回滚（旧快照没有这个键，此时保持现状不动）
+    if ('background' in snap) {
+      activeTpl.value.background = snap.background || ''
+      activeTpl.value.bgSize = snap.bgSize || null
+      bgSelected.value = false
+    }
+  }
   if (selectedIdx.value >= activeTpl.value.fields.length) {
     selectedIdx.value = activeTpl.value.fields.length - 1
   }
@@ -626,6 +676,7 @@ function fieldMissing(f) {
 }
 
 function onFieldPointerDown(e, idx) {
+  bgSelected.value = false // 摸到字段即取消底图选中态（两者互斥）
   // Ctrl/Shift 点击：切换多选成员；普通点击：单选
   if (e.ctrlKey || e.metaKey || e.shiftKey) {
     const next = new Set(multiSel.value)
@@ -834,7 +885,7 @@ function applyColumnSnap() {
   flash(`已按列对齐 ${targets.length} 个字段`)
 }
 
-// ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除、Ctrl+Z/Y 撤销重做 ----
+// ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除选中项（字段 / 底图）、Ctrl+Z/Y 撤销重做 ----
 
 /**
  * 连续键盘微调只记一次撤销。
@@ -864,6 +915,14 @@ function onKeydown(e) {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return }
   if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z')
     || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y')) { e.preventDefault(); redo(); return }
+
+  // 底图选中时 Delete 删底图。这一条必须排在 targets 判空**之前**：
+  // 选中底图时 selectedIdx 是 -1，targets 为空，会被下面的提前 return 吃掉。
+  if (bgSelected.value && (e.key === 'Delete' || e.key === 'Backspace')) {
+    e.preventDefault()
+    removeBackground()
+    return
+  }
 
   const targets = multiSel.value.size > 0 ? [...multiSel.value] : (selectedIdx.value >= 0 ? [selectedIdx.value] : [])
   if (!targets.length) return
@@ -1124,11 +1183,6 @@ onBeforeUnmount(() => {
               裁切线
             </label>
           </template>
-          <button
-            class="btn-ghost"
-            title="也可以把图片文件拖到画布上，或直接 Ctrl+V 粘贴截图"
-            @click="uploadBackground"
-          >上传底图</button>
           <CustomSelect
             v-model="activeDatasetId"
             :options="datasetOptions"
@@ -1205,9 +1259,34 @@ onBeforeUnmount(() => {
               class="canvas"
               :style="{ height: canvasH + 'px' }"
             >
+              <!-- 没有底图时，画布中央就是上传入口（原来在工具栏的「上传底图」按钮已移除）。
+                   放在所有字段之前，字段在上层，不会挡住拖拽；容器本身不吃事件，
+                   只有中间那块按钮可点。有字段时收成底部的小胶囊，避免占住纸面中央。 -->
+              <div
+                v-if="!bgUrl"
+                class="canvas-drop"
+                :class="{ 'drop-compact': activeTpl.fields.length > 0 }"
+              >
+                <button type="button" class="canvas-drop-btn" @click="uploadBackground">
+                  <span class="canvas-drop-title">点击上传底图</span>
+                  <span class="canvas-drop-sub">也可以把图片拖到这里，或 Ctrl+V 粘贴截图</span>
+                </button>
+                <p v-if="activeTpl.fields.length === 0" class="canvas-drop-tip">
+                  {{ activeDatasetId ? '上传后点上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
+                </p>
+              </div>
+
               <!-- 单页：整页底图 + 字段 -->
               <template v-if="!isGrid && !isFold">
-                <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                <img
+                  v-if="bgUrl"
+                  :src="bgUrl"
+                  class="canvas-bg"
+                  :class="{ selected: bgSelected }"
+                  alt=""
+                  draggable="false"
+                  @click="selectBackground"
+                />
                 <div
                   v-for="(f, idx) in activeTpl.fields"
                   :key="idx"
@@ -1229,7 +1308,14 @@ onBeforeUnmount(() => {
                    字段只需在下半联摆位，上半联实时镜像同步 -->
               <template v-if="isFold">
                 <div class="canvas-fold-half flip">
-                  <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                  <img
+                    v-if="bgUrl"
+                    :src="bgUrl"
+                    class="canvas-bg"
+                    :class="{ selected: bgSelected }"
+                    alt=""
+                    draggable="false"
+                  />
                   <div
                     v-for="(f, idx) in activeTpl.fields"
                     :key="'m' + idx"
@@ -1241,7 +1327,15 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div class="canvas-fold-half fold-ref">
-                  <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                  <img
+                    v-if="bgUrl"
+                    :src="bgUrl"
+                    class="canvas-bg"
+                    :class="{ selected: bgSelected }"
+                    alt=""
+                    draggable="false"
+                    @click="selectBackground"
+                  />
                   <div
                     v-for="(f, idx) in activeTpl.fields"
                     :key="idx"
@@ -1259,7 +1353,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div class="canvas-fold-line"></div>
-                <p v-if="activeTpl.fields.length === 0" class="canvas-hint">
+                <p v-if="bgUrl && activeTpl.fields.length === 0" class="canvas-hint">
                   {{ activeDatasetId ? '点击上方字段面板，把字段加入下半联（上半联自动镜像）' : '选择数据集后添加字段' }}
                 </p>
               </template>
@@ -1273,7 +1367,15 @@ onBeforeUnmount(() => {
                   :class="{ cut: cutMarks }"
                   :style="{ left: c.left + '%', top: c.top + '%', width: c.w + '%', height: c.h + '%' }"
                 >
-                  <img v-if="bgUrl" :src="bgUrl" class="canvas-bg" alt="" draggable="false" />
+                  <img
+                    v-if="bgUrl"
+                    :src="bgUrl"
+                    class="canvas-bg"
+                    :class="{ selected: bgSelected }"
+                    alt=""
+                    draggable="false"
+                    @click="selectBackground"
+                  />
                   <div
                     v-for="(f, idx) in activeTpl.fields"
                     :key="idx"
@@ -1299,14 +1401,27 @@ onBeforeUnmount(() => {
               <div v-if="guideV !== null" class="snap-guide guide-v" :style="{ left: guideV + 'px' }"></div>
               <div v-if="guideH !== null" class="snap-guide guide-h" :style="{ top: guideH + 'px' }"></div>
 
-              <p v-if="!isGrid && !isFold && activeTpl.fields.length === 0" class="canvas-hint">
+              <p v-if="bgUrl && !isGrid && !isFold && activeTpl.fields.length === 0" class="canvas-hint">
                 {{ activeDatasetId ? '点击上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
+              </p>
+
+              <!-- 有底图时，鼠标进纸面就给一句「点它 / 按 Delete」——底图选中靠点击，
+                   没有按钮，提示必须出现得及时，否则用户不知道还能删 -->
+              <p v-if="bgUrl" class="bg-tip">
+                {{ bgSelected ? '按 Delete 键移除底图' : '点击底图选中，再按 Delete 移除' }}
               </p>
             </div>
           </div>
 
-          <aside class="props" :class="{ disabled: !selectedField }">
-            <h3 class="side-title">字段属性</h3>
+          <aside class="props" :class="{ disabled: !selectedField && !bgSelected }">
+            <h3 class="side-title">{{ bgSelected ? '底图' : '字段属性' }}</h3>
+            <!-- 底图选中：只报信息与删除方式，不放按钮——删除统一走 Delete 键 -->
+            <template v-if="bgSelected && !selectedField">
+              <div class="fill-badge">
+                底图 {{ activeTpl.bgSize ? `${activeTpl.bgSize.width} × ${activeTpl.bgSize.height} px` : '（尺寸未知）' }}
+              </div>
+              <p class="kbd-hint">按 Delete 键移除底图，Ctrl+Z 可撤销</p>
+            </template>
             <template v-if="selectedField">
               <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">
                 该字段的数据列在当前数据集中不存在——请删除本字段，或从上方字段面板重新添加
@@ -1352,7 +1467,7 @@ onBeforeUnmount(() => {
                 <span class="prop-meta">x {{ selectedField.x }}% · y {{ selectedField.y }}%</span>
               </div>
               <button class="btn-danger prop-remove" @click="removeField">移除字段</button>
-              <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除</p>
+              <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除选中项</p>
             </template>
             <p v-else class="props-empty">点击画布中的字段查看属性，拖拽调整位置</p>
           </aside>
@@ -1589,7 +1704,90 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: fill;
   user-select: none;
+  cursor: pointer;
 }
+
+/* 底图铺满整张纸，没有边框就完全看不出「选中了它」 */
+.canvas-bg.selected {
+  outline: 2px solid var(--cinnabar);
+  outline-offset: -2px;
+}
+
+/* ---- 无底图时的上传入口（工具栏的「上传底图」按钮已移除） ---- */
+/* 容器铺满画布但 pointer-events: none，只有中间那块按钮可点——
+   否则已经有字段时，这块会把纸面中央的字段一起挡住、拖都拖不动 */
+.canvas-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.canvas-drop-btn {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 20px 30px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--stone);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.canvas-drop-btn:hover {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+}
+
+.canvas-drop-title { font-size: 14px; font-weight: 600; }
+.canvas-drop-sub { font-size: 12px; }
+.canvas-drop-tip { margin: 0; font-size: 12px; color: var(--stone); }
+
+/* 已经有字段了：收成底部的小胶囊，别占住纸面中央 */
+.canvas-drop.drop-compact { justify-content: flex-end; padding-bottom: 12px; }
+
+.canvas-drop.drop-compact .canvas-drop-btn {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+}
+
+.canvas-drop.drop-compact .canvas-drop-title { font-size: 12px; }
+.canvas-drop.drop-compact .canvas-drop-sub { font-size: 11px; }
+
+/* 有底图时鼠标进纸面的提示。底图没有按钮，删除靠「点选中 + Delete」，
+   提示得及时出现，否则用户根本不知道它还能删 */
+.bg-tip {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  z-index: 6;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.canvas:hover .bg-tip { opacity: 1; }
 
 /* ---- 多联格子：页面上的一个成品位 ---- */
 /* 必须是 absolute 且形成包含块，字段的百分比坐标才是「相对格子」——
@@ -1682,6 +1880,8 @@ onBeforeUnmount(() => {
   justify-content: center;
   color: var(--stone);
   font-size: 13px;
+  /* 纯文字提示，别吃事件——它铺满整张纸，否则点它选不中底图 */
+  pointer-events: none;
 }
 
 .props {
