@@ -31,6 +31,19 @@ const dataDir = resolved.dataDir
 process.env.PRINTPRESS_DATA_DIR = dataDir
 process.env.PRINTPRESS_DATA_DIR_CUSTOM = resolved.custom ? '1' : ''
 
+// 补上次没清掉的系统缓存。**位置很关键**：必须赶在 GPU 进程打开 GPUCache / DawnCache
+// 之前——应用运行期间删这两个目录会 EPERM（Chromium 自己持有），
+// 那正是「清理缓存」点了像没反应的根因。这里清完 Chromium 会按需重建，属正常。
+try {
+  const cache = require('./cache.cjs')
+  const swept = cache.runPendingCleanup(app.getPath('userData'))
+  if (swept.removed.length) console.log(`[cache] 启动清理完成: ${swept.removed.join(', ')}`)
+  if (swept.still.length) console.log(`[cache] 仍占用，留待下次: ${swept.still.join(', ')}`)
+} catch (err) {
+  // 清不掉不影响启动，别让它挡住主流程
+  console.warn('[cache] 启动清理跳过:', err && err.message)
+}
+
 // pp:// 协议：渲染进程访问数据目录媒体（底图/上传字体）的唯一通道。
 // 必须在 app.ready 之前注册特权 scheme。
 protocol.registerSchemesAsPrivileged([

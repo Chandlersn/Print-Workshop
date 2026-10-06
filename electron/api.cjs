@@ -35,6 +35,7 @@ const templates = require('./templates.cjs')
 const fonts = require('./fonts.cjs')
 const printDomain = require('./print.cjs')
 const dataDirModule = require('./data-dir.cjs')
+const cache = require('./cache.cjs')
 
 // ─────────────────────────── 错误 ───────────────────────────
 
@@ -85,30 +86,8 @@ function assertStorableName(name) {
 
 // ─────────────────────────── 缓存 ───────────────────────────
 
-/**
- * 系统缓存（Chromium 运行时在 userData 下自动生成的目录，可安全清理、
- * 必要时自动重建）：cacheInfo 汇总大小；clearCache 释放并返回释放字节。
- * 刻意排除 data（用户数据）/ Local Storage / Session Storage / config，
- * 避免误删应用状态与用户数据。
- */
-const SYSTEM_CACHE_DIRS = [
-  'Cache', 'GPUCache', 'Code Cache', 'DawnCache', 'DawnGraphiteCache',
-  'blob_storage', 'ShaderCache', 'GrShaderCache', 'Media Cache',
-]
-
-function dirSize(dir) {
-  let total = 0
-  try {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, entry.name)
-      try {
-        if (entry.isDirectory()) total += dirSize(p)
-        else total += fs.statSync(p).size
-      } catch { /* 个别文件无权读取，跳过 */ }
-    }
-  } catch { /* 目录不存在/无权限，视为 0 */ }
-  return total
-}
+// 系统缓存的大小汇总 / 释放 / 「运行时删不掉的留到下次启动清」，实现见 cache.cjs
+// （纯 Node 模块，main.cjs 启动早期也要用它）。
 
 // ─────────────────────────── 操作表 ───────────────────────────
 
@@ -146,42 +125,15 @@ const OPS = {
 
   'app:cacheInfo': {
     params: {},
-    run: (_p, ctx) => {
-      const base = ctx.app.userDataDir
-      let size = 0
-      const entries = []
-      for (const name of SYSTEM_CACHE_DIRS) {
-        const d = path.join(base, name)
-        if (fs.existsSync(d)) {
-          const s = dirSize(d)
-          size += s
-          entries.push({ name, size: s })
-        }
-      }
-      return { size, entries, base }
-    },
+    run: (_p, ctx) => cache.cacheInfo(ctx.app.userDataDir),
   },
 
   'app:clearCache': {
     write: true,
     params: {},
-    run: (_p, ctx) => {
-      const base = ctx.app.userDataDir
-      let freed = 0
-      const removed = []
-      for (const name of SYSTEM_CACHE_DIRS) {
-        const d = path.join(base, name)
-        if (fs.existsSync(d)) {
-          const s = dirSize(d)
-          try {
-            fs.rmSync(d, { recursive: true, force: true })
-            freed += s
-            removed.push(name)
-          } catch { /* 个别文件锁住，跳过，不阻断其余 */ }
-        }
-      }
-      return { freed, removed }
-    },
+    // 运行中的 GPU / Dawn 缓存删不掉（EPERM），会排队到下次启动清；
+    // 返回值带 failed / queued，界面据此如实反馈，不再「点了没反应」
+    run: (_p, ctx) => cache.clearCache(ctx.app.userDataDir),
   },
 
   // 选择新目录 → 可写校验 + 嵌套守卫 → 整目录迁移现有数据 → 写引导配置 → 重启生效

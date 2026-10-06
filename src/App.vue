@@ -142,6 +142,8 @@ async function onCheckUpdate() {
 const cacheSize = ref(0)
 const cacheOk = ref(true)
 const clearingCache = ref(false)
+const cacheMsg = ref('')      // 点击后的结果文案（含「下次启动清」的如实交代）
+const cacheMsgFail = ref(false)
 
 function fmtCacheSize(bytes) {
   if (!bytes || bytes < 1024) return '0 KB'
@@ -151,6 +153,7 @@ function fmtCacheSize(bytes) {
 
 function openAbout() {
   showAbout.value = true
+  cacheMsg.value = ''
   refreshCacheInfo()
 }
 
@@ -165,14 +168,38 @@ async function refreshCacheInfo() {
   }
 }
 
+/**
+ * 清理缓存。
+ *
+ * 运行中的 GPUCache / DawnCache 删不掉（Chromium 自己持有，EPERM），
+ * 主进程会把它们排队到下次启动清。所以这里必须**把结果说出来**：
+ * 以前主进程 `catch {}` 静默吞掉、界面又没有任何反馈，用户点了就是「没反应」。
+ */
 async function onClearCache() {
   if (clearingCache.value) return
   clearingCache.value = true
+  cacheMsg.value = ''
+  cacheMsgFail.value = false
   try {
-    await window.printpress.clearCache()
+    const r = (await window.printpress.clearCache()) || {}
+    const parts = []
+    // 不足 1KB 不单独报——Chromium 的 Cache 目录里常年只有几十字节的索引文件，
+    // 报一句「已清理 0 KB」纯属噪音，真正要说的在下一句。
+    if (r.freed >= 1024) parts.push(`已清理 ${fmtCacheSize(r.freed)}`)
+    const queued = Array.isArray(r.queued) ? r.queued : []
+    if (queued.length) {
+      const left = (r.failed || []).reduce((n, f) => n + (f.size || 0), 0)
+      parts.push(`${fmtCacheSize(left)} 正被系统占用，将在下次启动时清理`)
+    }
+    if (!parts.length) parts.push('已无可清理缓存')
+    cacheMsg.value = parts.join('；')
     await refreshCacheInfo()
-  } catch { /* 清理失败不阻塞，重试即可 */ }
-  finally { clearingCache.value = false }
+  } catch (err) {
+    cacheMsgFail.value = true
+    cacheMsg.value = '清理失败：' + (err && err.message ? err.message : err)
+  } finally {
+    clearingCache.value = false
+  }
 }
 
 onMounted(async () => {
@@ -303,12 +330,9 @@ onMounted(async () => {
                 {{ clearingCache ? '清理中…' : '清理缓存（' + fmtCacheSize(cacheSize) + '）' }}
               </button>
               <span v-if="!clearingCache && !cacheOk" class="cr cr-fail">缓存大小读取失败</span>
+              <span v-else-if="!clearingCache && cacheMsg" class="cr" :class="cacheMsgFail ? 'cr-fail' : 'cr-warn'">{{ cacheMsg }}</span>
               <span v-else-if="!clearingCache && cacheSize === 0" class="cr cr-ok">已无可清理缓存</span>
             </span>
-          </div>
-          <div class="about-row">
-            <span class="ar-label">使用说明</span>
-            <button class="footer-btn" @click="showGuide = true">查看使用说明</button>
           </div>
           <div class="about-row">
             <span class="ar-label">下载 / 更新</span>
@@ -455,6 +479,8 @@ onMounted(async () => {
 .cr-ok { color: var(--ink-2); }
 .cr-new { color: var(--cinnabar); font-weight: 600; }
 .cr-fail { color: var(--stone); }
+/* 「当场清不掉、排到下次启动」这类需要用户知情的中间态 */
+.cr-warn { color: var(--warn); }
 
 .onboard-actions .onboard-note { margin: 0; }
 
