@@ -120,6 +120,55 @@ console.log('== 4. 文件名消毒（模板名直接拼 defaultPath） ==')
   ok(!/defaultPath: `\$\{built\.templateName\}/.test(apiSrc2), '不再直接拼未消毒的模板名')
 }
 
+console.log('== 4b. 拖拽 / 粘贴上传底图：格式按内容判定，前端给的文件名不可信 ==')
+{
+  // 1x1 PNG 的有效字节（拖拽 / 粘贴的真实产物形态：只有内存字节，没有文件路径）
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64')
+
+  const good = templates.uploadBackgroundBytes(PNG, '证书底图.png')
+  ok(good.background.startsWith('print-bg/') && good.background.endsWith('.png'),
+    'PNG 正常写入并归到 print-bg/', good.background)
+  ok(good.width === 1 && good.height === 1, '尺寸按内容解析（1x1）', good)
+
+  // 落盘位置必须真的在数据目录内
+  const abs = path.join(TMP, 'print-bg', path.basename(good.background))
+  ok(fs.existsSync(abs), '底图确实落在数据目录内', abs)
+
+  // 路径穿越：只取文件名，不能按原路径拼
+  const evil = templates.uploadBackgroundBytes(PNG, '../../../../Windows/System32/calc.png')
+  ok(!evil.background.includes('..') && !evil.background.includes('System32'),
+    '路径穿越被挡住（只取文件名）', evil.background)
+
+  // Windows 非法字符
+  const illegal = templates.uploadBackgroundBytes(PNG, 'a:b*c?d<e>f|g.png')
+  ok(!/[:*?"<>|]/.test(illegal.background), 'Windows 非法字符被替换', illegal.background)
+
+  // 后缀撒谎：内容是 PNG 却叫 .jpg —— 扩展名必须按内容判定
+  const lying = templates.uploadBackgroundBytes(PNG, 'evil.jpg')
+  ok(lying.background.endsWith('.png'), '扩展名按内容判定（叫 .jpg 的 PNG 仍存成 .png）', lying.background)
+
+  // 内容不是图片：即使名字是 .png 也必须拒绝（这是这条通道最关键的一条）
+  const notImage = Buffer.from('<?php system($_GET[0]); ?>')
+  let rejected = ''
+  try { templates.uploadBackgroundBytes(notImage, 'shell.png') } catch (e) { rejected = e.message }
+  ok(rejected.length > 0, '非图片内容被拒绝（改名成 .png 也没用）', rejected)
+
+  let emptyMsg = ''
+  try { templates.uploadBackgroundBytes(Buffer.alloc(0), 'x.png') } catch (e) { emptyMsg = e.message }
+  ok(emptyMsg.length > 0, '空内容被拒绝', emptyMsg)
+
+  // 前端侧：必须读成 base64 且去掉 data: 前缀，否则主进程解出来是乱码
+  const view = src('src/views/TemplateView.vue')
+  ok(/uploadBackgroundBytes/.test(view), '前端调用了字节版上传通道')
+  ok(/readAsDataURL/.test(view), '前端用 FileReader 把 File 读成 base64')
+  ok(/slice\(comma \+ 1\)/.test(view), 'base64 去掉了 data: 前缀')
+  ok(/onDrop|@drop/.test(view) && /onPaste|addEventListener\('paste'/.test(view),
+    '拖拽与粘贴两条入口都接上了')
+  ok(/preventDefault/.test(view), '拖拽时阻止默认行为（否则浏览器会直接打开这个文件）')
+}
+
 console.log('== 5. 取消「印」必须使模板字段失效 ==')
 {
   const fp = path.join(TMP, '印列.csv')

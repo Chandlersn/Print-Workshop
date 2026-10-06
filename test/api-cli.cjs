@@ -65,8 +65,20 @@ const LEGACY_CHANNELS = [
   'job:list', 'job:openSnapshot', 'job:delete',
 ]
 
-/** 抽取时新增的通道（路径版，替 agent 去掉「弹窗选文件」这一步）+ 导入会话整批删除 */
-const ADDED_CHANNELS = ['dataset:importFile', 'dataset:deleteBatch', 'template:uploadBackground', 'font:upload']
+/**
+ * 抽取时新增的通道：
+ * - 路径版（dataset:importFile / template:uploadBackground / font:upload）：
+ *   替 agent 去掉「弹窗选文件」这一步
+ * - dataset:deleteBatch：导入会话整批删除
+ * - template:uploadBackgroundBytes：拖拽 / 剪贴板粘贴上传底图（图片只有字节、没有路径）
+ */
+const ADDED_CHANNELS = [
+  'dataset:importFile',
+  'dataset:deleteBatch',
+  'template:uploadBackground',
+  'template:uploadBackgroundBytes',
+  'font:upload',
+]
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }
 
@@ -93,9 +105,16 @@ async function run() {
     const missing = LEGACY_CHANNELS.filter((n) => !names.includes(n))
     ok(missing.length === 0, '既有通道全部保留', missing)
 
+    // 文档里写死的「N 个操作」极易漂移（这次就发现 README 一直写着 42，实际 44），
+    // 用断言钉住：以后加操作忘了改文档，这里会红。
+    const readme = src('README.md')
+    const counts = [...readme.matchAll(/(\d+)\s*个操作/g)].map((m) => Number(m[1]))
+    ok(counts.length > 0 && counts.every((n) => n === names.length),
+      `README 里的操作计数全部等于实际值 ${names.length}`, [...new Set(counts)])
+
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
-      '新增通道恰好是预期的 4 个路径版', added)
+      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径版 + 整批删除 + 字节版）`, added)
 
     // ipc.cjs 必须从注册表派生，不能回退成手写
     const ipcSrc = stripComments(src('electron/ipc.cjs'))
