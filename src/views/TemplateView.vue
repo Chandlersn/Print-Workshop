@@ -10,7 +10,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { evenRow, columnSnap, anchorRatio } from '../lib/field-layout.cjs'
+import { evenRow, anchorRatio } from '../lib/field-layout.cjs'
 
 const CANVAS_W = 760 // 画布显示宽度 px
 const SNAP_PX = 6    // 吸附阈值（像素，源项目同值）
@@ -875,7 +875,7 @@ function alignSelected(kind) {
   }
 }
 
-// ---- 一键布局：均分横排 / 列对齐（锚点百分比语义，与渲染引擎一致）----
+// ---- 一键布局：均分横排（锚点百分比语义，与渲染引擎一致）----
 // 目标：多选 ≥2 时作用于选中字段，否则作用于画布全部字段（新模板起步一键铺开）
 function layoutTargets() {
   const t = activeTpl.value
@@ -892,15 +892,6 @@ function applyEvenRow() {
   const plan = evenRow(targets)
   targets.forEach((f, j) => { f.x = plan[j].x; f.y = plan[j].y })
   flash(`已均分横排 ${targets.length} 个字段`)
-}
-
-function applyColumnSnap() {
-  const targets = layoutTargets()
-  if (targets.length < 2) return
-  pushUndo()
-  const plan = columnSnap(targets)
-  targets.forEach((f, j) => { f.x = plan[j].x })
-  flash(`已按列对齐 ${targets.length} 个字段`)
 }
 
 // ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除选中项（字段 / 底图）、Ctrl+Z/Y 撤销重做 ----
@@ -1210,7 +1201,6 @@ onBeforeUnmount(() => {
           <button class="btn-ghost btn-icon" :disabled="!canUndo" title="撤销（Ctrl+Z）" @click="undo">撤销</button>
           <button class="btn-ghost btn-icon" :disabled="!canRedo" title="重做（Ctrl+Y）" @click="redo">重做</button>
           <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）按 x 顺序等距排成一行，y 取中位数" @click="applyEvenRow">均分横排</button>
-          <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）中 x 相近的对齐成一列" @click="applyColumnSnap">列对齐</button>
           <button class="btn-primary" @click="saveTemplate">保存</button>
           <button class="btn-danger" @click="removeTemplate">删除</button>
         </div>
@@ -1575,9 +1565,33 @@ onBeforeUnmount(() => {
   border-left: 3px solid var(--line-strong);
 }
 
-.tpl-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 20px; }
+/* 模板列表：**8 条封顶，超出就在列表内部滚动**，不把下面的字体管理一直往下顶。
+   max-height 与条目高度共用同一个变量——改一处两边同步，不会各算各的。
+   （此前是无限增高：模板一多，字体管理要滚很久才看得到。） */
+.tpl-list {
+  --tpl-item-h: 56px;  /* 条目固定高度：封顶算式依赖它 */
+  --tpl-gap: 6px;
+  --tpl-visible: 8;    /* 最多露出几条 */
+  display: flex;
+  flex-direction: column;
+  gap: var(--tpl-gap);
+  margin-bottom: 20px;
+  max-height: calc(var(--tpl-visible) * var(--tpl-item-h) + (var(--tpl-visible) - 1) * var(--tpl-gap));
+  overflow-y: auto;
+  padding-right: 2px;  /* 滚动条不压卡片圆角 */
+}
+
+/* 细滚动条：系统默认那根在 230px 侧栏里太喧宾夺主 */
+.tpl-list::-webkit-scrollbar { width: 8px; }
+.tpl-list::-webkit-scrollbar-track { background: transparent; }
+.tpl-list::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+.tpl-list::-webkit-scrollbar-thumb:hover { background: var(--stone); }
 
 .tpl-item {
+  height: var(--tpl-item-h);
+  flex-shrink: 0;  /* 必须：列表溢出时 flex 会把条目压到 min-content 高（53.6px），
+                      封顶算式就白算了——实测过，不加这行 12 条时条目会缩水 */
+  justify-content: center;  /* 固定高度后把两行居中，别都挤在顶部 */
   display: flex;
   flex-direction: column;
   align-items: flex-start;

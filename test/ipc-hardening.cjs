@@ -257,6 +257,38 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   ok(!fs.existsSync(abs(c.background)), '删模板连带清掉它的底图')
 }
 
+console.log('== 4e. 模板列表封顶 + 「列对齐」下线（前端静态核查） ==')
+{
+  const view = src('src/views/TemplateView.vue')
+
+  // 「列对齐」按钮删了：它的纯函数也不该留成死代码
+  ok(!/applyColumnSnap/.test(view), '工具栏不再有「列对齐」按钮（handler 也没了）')
+  ok(!/>\s*列对齐\s*<\/button>/.test(view), '没有残留的「列对齐」按钮文案')
+  ok(/均分横排/.test(view), '「均分横排」保留（删的是列对齐，不是整条工具栏）')
+  const layout = src('src/lib/field-layout.cjs')
+  ok(!/columnSnap/.test(layout), 'field-layout.cjs 里的 columnSnap 已删（零引用的死代码）')
+  ok(/module\.exports\s*=\s*\{\s*evenRow,\s*anchorRatio\s*\}/.test(layout),
+    '导出只剩 evenRow / anchorRatio')
+
+  // 模板列表：8 条封顶 + 自动滚动条
+  const listRule = view.match(/\.tpl-list\s*\{([\s\S]*?)\}/)
+  ok(Boolean(listRule), '存在 .tpl-list 规则')
+  const body = listRule ? listRule[1] : ''
+  ok(/--tpl-visible:\s*8\s*;/.test(body), '可见条数上限是 8')
+  ok(/max-height:\s*calc\(/.test(body) && /var\(--tpl-visible\)/.test(body),
+    'max-height 由「可见条数」变量算出（不是拍脑袋的像素值）')
+  ok(/overflow-y:\s*auto/.test(body), '用 overflow-y:auto —— 超过才出滚动条')
+
+  // 关键：max-height 与条目高度必须共用同一个变量，否则两边各改各的就会错位
+  const itemRule = view.match(/\.tpl-item\s*\{([\s\S]*?)\}/)
+  const itemBody = itemRule ? itemRule[1] : ''
+  ok(/height:\s*var\(--tpl-item-h\)/.test(itemBody),
+    '.tpl-item 高度取自同一个变量（改一处两边同步）')
+  // 溢出时 flex 默认会把条目压到 min-content 高（实测 56 → 53.6），封顶算式就废了
+  ok(/flex-shrink:\s*0/.test(itemBody), '.tpl-item 不许被 flex 压缩（否则高度会缩水）')
+  ok(/--tpl-item-h:\s*\d+px/.test(body), '.tpl-list 上定义了这个变量')
+}
+
 console.log('== 5. 取消「印」必须使模板字段失效 ==')
 {
   const fp = path.join(TMP, '印列.csv')

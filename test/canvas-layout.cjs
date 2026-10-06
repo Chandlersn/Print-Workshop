@@ -1,9 +1,9 @@
 /**
- * 画布一键布局纯函数验收：evenRow（均分横排）/ columnSnap（列对齐）/ anchorRatio（锚点比例）。
+ * 画布一键布局纯函数验收：evenRow（均分横排）/ anchorRatio（锚点比例）。
  * 运行：node test/canvas-layout.cjs
  */
 const assert = require('assert')
-const { evenRow, columnSnap, anchorRatio } = require('../src/lib/field-layout.cjs')
+const { evenRow, anchorRatio } = require('../src/lib/field-layout.cjs')
 
 let pass = 0
 function ok(cond, label, extra) {
@@ -43,26 +43,7 @@ console.log('== 1. 均分横排 ==')
   ok(evenRow([]).length === 0, '空数组安全')
 }
 
-console.log('== 2. 列对齐 ==')
-{
-  // 20/21/45 → 20/21 聚簇取中位 20，45 独簇 45；y 不动
-  const fields = [{ x: 21, y: 10 }, { x: 45, y: 20 }, { x: 20, y: 30 }]
-  const plan = columnSnap(fields)
-  ok(plan[0].x === 20 && plan[2].x === 20, '20/21 聚簇对齐到 20', plan)
-  ok(plan[1].x === 45, '45 独立成列不动', plan)
-  ok(fields[0].y === 10 && fields[1].y === 20 && fields[2].y === 30, 'y 保持不变')
-}
-{
-  // 乱序输入也按簇收敛
-  const plan = columnSnap([{ x: 80.8, y: 0 }, { x: 50, y: 0 }, { x: 80, y: 0 }])
-  ok(plan[0].x === 80 && plan[2].x === 80 && plan[1].x === 50, '80.8/80 收敛到 80', plan)
-}
-{
-  const one = columnSnap([{ x: 12, y: 3 }])
-  ok(one[0].x === 12, '单字段原样')
-}
-
-console.log('== 3. 与画布语义的一致性 ==')
+console.log('== 2. 与画布语义的一致性 ==')
 {
   // evenRow 的 x 计划应用于字段后仍在画布百分比内
   const fields = Array.from({ length: 6 }, (_, i) => ({ x: i * 15, y: 40 }))
@@ -71,7 +52,7 @@ console.log('== 3. 与画布语义的一致性 ==')
   ok(near(plan[5].x - plan[4].x, plan[1].x - plan[0].x, 0.01), '等距（末对间距=首对间距）')
 }
 
-console.log('== 4. 锚点比例与渲染引擎口径一致 ==')
+console.log('== 3. 锚点比例与渲染引擎口径一致 ==')
 {
   // x 是锚点：center 时锚点在盒中心（渲染 translateX(-50%)），right 在右缘，left 在左缘。
   // 画布 fieldStyle 用同一比例做位移——两者不一致即「画布看着居中、出片偏左半个身位」。
