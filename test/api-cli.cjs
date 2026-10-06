@@ -124,6 +124,15 @@ async function run() {
     ok(readme.includes(`v${pkgVersion}（`),
       `版本史里有 v${pkgVersion} 的条目（发版时别忘了写）`)
 
+    // 同一类漂移：README 写的「N 套件」也老是忘了跟着 package.json 的 test 脚本走
+    // （2026-10 查出它一直写着「19 套件」，实际已经 21）。
+    // 断言条数没法在这里算（要跑完全部套件），所以只钉套件数——那个是能精确对上的。
+    const testScript = require(path.join(ROOT, 'package.json')).scripts.test
+    const suiteCount = testScript.split('&&').filter((s) => /node\s+test\//.test(s)).length
+    const suiteCounts = [...readme.matchAll(/(\d+)\s*套件/g)].map((m) => Number(m[1]))
+    ok(suiteCounts.length > 0 && suiteCounts.every((n) => n === suiteCount),
+      `README 里的套件计数全部等于 npm test 实际挂载的 ${suiteCount} 个`, [...new Set(suiteCounts)])
+
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
       `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径版 + 整批删除 + 字节版）`, added)

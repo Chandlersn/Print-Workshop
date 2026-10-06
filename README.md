@@ -176,7 +176,7 @@ src/                     渲染进程（Vue 3 + Vite，宣纸墨韵主题，全 
   lib/                   纯函数层（field-layout 布局、cell-nav 跨页导航）
 test/                    领域层测试 + CDP 真机 e2e（含隔离数据目录与共享 helper）
   helpers/electron-runner.cjs  Electron 启动器：摘除破坏性环境变量后再拉起 Electron
-scripts/                 示例底图 / 应用图标生成
+scripts/                 示例底图 / 应用图标生成、发版上传（release-upload.cjs）
 docs/                    使用说明（面向使用者）、开发方案（权威定义源）、开发计划
 release/                 安装包与免安装目录（构建产物，不进仓库）
 ```
@@ -197,9 +197,11 @@ release/                 安装包与免安装目录（构建产物，不进仓�
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：19 套件，733 项断言
+npm test                        # 领域层测试：21 套件，878 项断言
 npm run test:e2e                # 端到端：120 人真实 printToPDF（经启动器摘除破坏性环境变量）
 npm run dist                    # 打 NSIS 安装包（未配证书时自动跳过签名，图标与版本信息正常写入 EXE）
+npm run release:check           # 发版体检：版本号三处一致 + tag 在位 + Release 与资产是否齐（只读）
+GH_TOKEN=<PAT> npm run release:upload   # 建 GitHub Release 并上传安装包（需 Contents 写权限）
 ```
 
 CDP 真机 e2e（需先出包）：
@@ -212,10 +214,11 @@ node test/e2e-grid.cjs          # 多联版式全链
 node test/e2e-drag-snap.cjs     # 拖拽跟手性 + 居中吸附全链
 ```
 
-领域层里有七个套件专门守数据安全、出片正确性与分层结构，值得单独跑：
+领域层里有八个套件专门守数据安全、出片正确性与分层结构，值得单独跑：
 
 ```bash
 node test/storage-guard.cjs     # 存储层：路径越界、文件损坏兜底、属性消毒
+node test/cache.cjs             # 系统缓存：白名单目录、锁定目录排队到下次启动、不碰用户数据
 node test/print-failure.cjs     # 出片：补打范围、版式回退提示、失败留痕
 node test/robustness.cjs        # 健壮性：越界布局拒存、前端竞态与守卫
 node test/ipc-hardening.cjs     # IPC：存储白名单、外链白名单、文件名消毒
