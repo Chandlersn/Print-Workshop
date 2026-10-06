@@ -169,6 +169,37 @@ console.log('== 4b. 拖拽 / 粘贴上传底图：格式按内容判定，前端
   ok(/preventDefault/.test(view), '拖拽时阻止默认行为（否则浏览器会直接打开这个文件）')
 }
 
+console.log('== 4c. 底图的上传入口与删除方式（前端静态核查） ==')
+{
+  const view = src('src/views/TemplateView.vue')
+
+  // 上传入口从工具栏挪进了画布中央
+  ok(/canvas-drop/.test(view) && /点击上传底图/.test(view), '画布中央有上传入口')
+  ok(/canvas-drop-btn[\s\S]{0,200}uploadBackground/.test(view),
+    '中央那块按钮触发上传')
+  ok(!/>\s*上传底图\s*<\/button>/.test(view), '工具栏的独立「上传底图」按钮已移除')
+  // 有字段时要收成底部小胶囊，否则会占住纸面中央、字段拖不动
+  ok(/drop-compact/.test(view) && /pointer-events:\s*none/.test(view),
+    '有字段时收成小胶囊，且容器不吃事件（不挡字段拖拽）')
+
+  // 删除底图：点选中 + Delete，而不是点一下就删
+  ok(/@click="selectBackground"/.test(view), '点底图进入选中态')
+  ok(/bgSelected/.test(view), '有独立的底图选中标志')
+  ok(/bgSelected\.value && \(e\.key === 'Delete'/.test(view), 'Delete 有删底图的分支')
+  ok(/@click="removeBackground"|removeBackground\(\)/.test(view), '存在移除底图的实现')
+  // 顺序很关键：选中底图时 selectedIdx 是 -1，targets 为空，
+  // 若这一分支排在 targets 判空之后，就永远走不到
+  const bgDelAt = view.indexOf("bgSelected.value && (e.key === 'Delete'")
+  const targetsAt = view.indexOf('const targets = multiSel.value.size > 0')
+  ok(bgDelAt > 0 && targetsAt > 0 && bgDelAt < targetsAt,
+    '删底图的分支排在 targets 判空之前（否则按 Delete 永远没反应）')
+
+  // 底图要能撤销回来
+  ok(/background: t\.background/.test(view), '撤销快照含底图')
+  ok(/snap\.background/.test(view), 'restoreSnapshot 恢复底图')
+  ok(/pushUndo\(\)\s*\n\s*t\.background = ''/.test(view), '移除底图前先压一次撤销点')
+}
+
 console.log('== 5. 取消「印」必须使模板字段失效 ==')
 {
   const fp = path.join(TMP, '印列.csv')
