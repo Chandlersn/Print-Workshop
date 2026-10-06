@@ -71,12 +71,14 @@ const LEGACY_CHANNELS = [
  *   替 agent 去掉「弹窗选文件」这一步
  * - dataset:deleteBatch：导入会话整批删除
  * - template:uploadBackgroundBytes：拖拽 / 剪贴板粘贴上传底图（图片只有字节、没有路径）
+ * - template:discardBackground：换图 / 移除底图时当场删掉旧图文件
  */
 const ADDED_CHANNELS = [
   'dataset:importFile',
   'dataset:deleteBatch',
   'template:uploadBackground',
   'template:uploadBackgroundBytes',
+  'template:discardBackground',
   'font:upload',
 ]
 

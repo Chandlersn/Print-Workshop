@@ -54,7 +54,7 @@
 
 ### 模板工坊
 
-- **底图三种方式上传**：**点画布中央的上传区**选文件、**把图片文件直接拖到画布上**、或 **Ctrl+V 粘贴剪贴板里的截图**（截图场景最省事，不用先另存成文件）。上传后自动按比例建议纸张（A3/A4/A5/B5/A6 横竖版，也可自定义毫米），比例差太多会预警。不想要了就**点一下底图选中、按 Delete 移除**（Ctrl+Z 可撤销）——没有多余的按钮。
+- **底图三种方式上传**：**点画布中央的上传区**选文件、**把图片文件直接拖到画布上**、或 **Ctrl+V 粘贴剪贴板里的截图**（截图场景最省事，不用先另存成文件）。上传后自动按比例建议纸张（A3/A4/A5/B5/A6 横竖版，也可自定义毫米），比例差太多会预警。不想要了就**点一下底图选中、按 Delete 移除**——没有多余的按钮。**换图和删图是同一套逻辑：旧底图文件当场从磁盘删掉**，不会在数据目录里越攒越多（误删重传一次即可）。
 - **字段拖拽排版**：字段点选落画布，拖拽带吸附对齐，多选后「均分横排」「列对齐」一键铺开，Ctrl+Z 撤销重做、方向键微调齐全。
 - **多联拼版**：打证件照、胸卡这类小成品时切「多联」，填成品尺寸（内置 1 寸 / 2 寸 / 5 寸等规格，也可填毫米），自动算每页几列几行并居中，画布切换成「单个成品」来设计，可开裁切线。工具栏里「纸张」与「成品」是两个独立维度，自由组合。
 - **对折桌牌**：一页一份、上下联自动镜像，对折即成双面台签，**不依赖打印机双面**。
@@ -87,7 +87,7 @@
 
 ```bash
 node bin/pp.cjs env                                  # 看当前数据目录与环境
-node bin/pp.cjs ops                                  # 列出全部 44 个操作及其参数
+node bin/pp.cjs ops                                  # 列出全部 45 个操作及其参数
 node bin/pp.cjs dataset list                         # 列数据集
 node bin/pp.cjs --allow-write dataset import 名单.csv --name 秋季班
 node bin/pp.cjs dataset fields <数据集id>              # 字段目录（类型 / 填充率 / 长度提示）
@@ -147,7 +147,7 @@ npm run electron:dev  # vite + electron 热更新开发
 
 四条不变量：
 
-- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（44 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
+- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（45 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
 - **领域层零 electron 依赖**：`api.cjs` 及其下游模块都不 require electron，只有 `ipc.cjs` / `printer.cjs` / `main.cjs` / `preload.cjs` 依赖它。需要 GUI 的能力（弹窗、打印）经 `ctx` 注入，纯 Node 下拿不到就报 `GUI_REQUIRED`，而不是崩在 import 上。
 - **出片产物自包含**：底图与上传字体以 base64 内联进渲染 HTML——导出 PDF、直打窗口、归档快照在任何上下文（包括系统浏览器打开归档件）都完整显示，不依赖应用内协议。
 - **写路径唯一**：元数据写入口只有 `store.cjs` 的 `saveJson` 一条路，避免多套实现并存导致「改一处、另一处不生效」。
@@ -157,7 +157,7 @@ npm run electron:dev  # vite + electron 热更新开发
 ```
 electron/                主进程（纯 Node，无 Python），按领域分模块
   main.cjs               入口：窗口 / 协议 / 通道装配
-  api.cjs                领域能力注册表：44 个操作的唯一权威源（零 electron 依赖）
+  api.cjs                领域能力注册表：45 个操作的唯一权威源（零 electron 依赖）
   ipc.cjs                IPC 薄壳：把注册表挂到 ipcMain，注入 GUI 能力
   data-dir.cjs           数据目录决策唯一权威源（默认 / 自定义 / 测试注入）
   importer/              CSV 多编码 + Excel 解析
@@ -219,7 +219,7 @@ node test/storage-guard.cjs     # 存储层：路径越界、文件损坏兜底�
 node test/print-failure.cjs     # 出片：补打范围、版式回退提示、失败留痕
 node test/robustness.cjs        # 健壮性：越界布局拒存、前端竞态与守卫
 node test/ipc-hardening.cjs     # IPC：存储白名单、外链白名单、文件名消毒
-node test/ipc-wiring.cjs        # 装配：44 个操作全部挂上、参数归一化逐通道正确
+node test/ipc-wiring.cjs        # 装配：45 个操作全部挂上、参数归一化逐通道正确
 node test/api-cli.cjs           # 分层：api.cjs 零 electron 依赖、写权限闸门、CLI 端到端
 node test/e2e-harness.cjs       # e2e 夹具：启动器必须摘掉破坏性环境变量
 ```

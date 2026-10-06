@@ -194,10 +194,61 @@ console.log('== 4c. 底图的上传入口与删除方式（前端静态核查）
   ok(bgDelAt > 0 && targetsAt > 0 && bgDelAt < targetsAt,
     '删底图的分支排在 targets 判空之前（否则按 Delete 永远没反应）')
 
-  // 底图要能撤销回来
-  ok(/background: t\.background/.test(view), '撤销快照含底图')
-  ok(/snap\.background/.test(view), 'restoreSnapshot 恢复底图')
-  ok(/pushUndo\(\)\s*\n\s*t\.background = ''/.test(view), '移除底图前先压一次撤销点')
+  // 底图**不进**撤销栈：换图 / 删图会真删文件，撤销回来只会是张破图
+  ok(!/background: t\.background/.test(view), '底图不进撤销快照（撤销回来只会是破图）')
+  ok(/discardBackground/.test(view), '换图 / 删图都会丢弃旧图文件')
+  ok(/@error="onBgError"/.test(view) && /function onBgError/.test(view),
+    '底图加载失败时自动清引用（换了图没保存就走了的兜底）')
+}
+
+console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删文件 ==')
+{
+  const ICON = path.join(__dirname, '..', 'build', 'icon.png')
+  const abs = (rel) => path.join(TMP, ...rel.split('/'))
+
+  const fp = path.join(TMP, '底图名单.csv')
+  fs.writeFileSync(fp, '姓名\n张三\n李四\n', 'utf-8')
+  const ds = dataset.importFromFile(fp, '底图名单')
+  dataset.setColumnPrint(ds.id, '姓名', true)
+
+  const a = templates.uploadBackground(ICON)
+  const b = templates.uploadBackground(ICON)
+  ok(fs.existsSync(abs(a.background)), '上传后图片落盘')
+  ok(a.background !== b.background, '两次上传文件名不同（时间戳前缀，不会互相覆盖）')
+
+  templates.saveTemplate({
+    name: '底图解耦测试', datasetId: ds.id, pageSize: { w: 210, h: 297 },
+    background: a.background, bgSize: { width: a.width, height: a.height },
+    fields: [{ column: '姓名', label: '姓名', x: 50, y: 40, fontSize: 12, align: 'center' }],
+  })
+  ok(fs.existsSync(abs(a.background)), '保存模板不碰底图文件（两件事）')
+
+  // 换图：前端带着旧路径来丢弃，当场删
+  templates.discardBackground(a.background)
+  ok(!fs.existsSync(abs(a.background)), '换图后旧图文件当场被删')
+  ok(fs.existsSync(abs(b.background)), '新图不受影响')
+
+  // 移除底图走的是同一条：不等保存
+  templates.discardBackground(b.background)
+  ok(!fs.existsSync(abs(b.background)), '移除底图后文件当场被删（不等保存）')
+
+  // 路径守卫：底图路径来自可手工编辑的 JSON，越界不能删到数据目录外
+  const outside = path.join(TMP, '..', 'pp-victim.txt')
+  fs.writeFileSync(outside, 'x')
+  const guard = templates.discardBackground('../pp-victim.txt')
+  ok(guard.removed === false, '越界路径被守卫挡下（removed:false）', guard)
+  ok(fs.existsSync(outside), '数据目录外的文件没被删掉')
+  fs.unlinkSync(outside)
+
+  // 删模板仍连带清底图（唯一性由时间戳前缀保证）
+  const c = templates.uploadBackground(ICON)
+  const tpl = templates.saveTemplate({
+    name: '待删模板', datasetId: ds.id, pageSize: { w: 210, h: 297 },
+    background: c.background, bgSize: { width: c.width, height: c.height },
+    fields: [{ column: '姓名', label: '姓名', x: 50, y: 40, fontSize: 12, align: 'center' }],
+  })
+  templates.deleteTemplate(tpl.id)
+  ok(!fs.existsSync(abs(c.background)), '删模板连带清掉它的底图')
 }
 
 console.log('== 5. 取消「印」必须使模板字段失效 ==')
