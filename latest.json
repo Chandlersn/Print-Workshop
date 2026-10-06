@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
-  "notes": "首个公开版本：名单导入、模板设计、批量出片、打印留痕、打印状态对照。",
-  "url": "https://github.com/Chandlersn/Print-Workshop/releases"
+  "version": "0.2.10",
+  "notes": "修复「清理缓存」点了没反应：当场删不掉的缓存会自动排到下次启动时清理，界面如实告知结果。",
+  "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }
