@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld('printpress', {
   deleteTemplate: (id) => ipcRenderer.invoke('template:delete', id),
   uploadBackgroundDialog: () => ipcRenderer.invoke('template:uploadBackgroundDialog'),
   uploadBackgroundBytes: (payload) => ipcRenderer.invoke('template:uploadBackgroundBytes', payload),
+  discardBackground: (payload) => ipcRenderer.invoke('template:discardBackground', payload),
 
   // 字体
   listFonts: () => ipcRenderer.invoke('font:list'),

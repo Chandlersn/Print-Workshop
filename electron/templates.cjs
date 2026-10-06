@@ -112,6 +112,26 @@ function validateLayout(template) {
   return bad
 }
 
+/**
+ * 删除一张底图文件（带路径守卫）。
+ *
+ * 底图上传即落盘、文件名带时间戳前缀，一个文件只归一条模板用；
+ * 不清理的话 print-bg 会随「换底图 / 移除底图 / 删模板」持续膨胀。
+ *
+ * 路径必须过守卫：background 来自可被手工编辑的 JSON，`../` 会删到数据目录外。
+ */
+function removeBgFile(bgPath) {
+  if (!bgPath) return false
+  try {
+    fs.unlinkSync(resolveInsideDataDir(bgPath))
+    return true
+  } catch (err) {
+    // 越界 / 文件已不在：留痕但不让调用方失败
+    console.warn(`[templates] 底图清理跳过（${err.message}）`)
+    return false
+  }
+}
+
 function saveTemplate(template) {
   if (!template || typeof template !== 'object') throw new Error('模板数据为空')
   if (!template.name || !String(template.name).trim()) throw new Error('模板名称不能为空')
@@ -146,27 +166,31 @@ function saveTemplate(template) {
     list.push(template)
   }
   persistAll(list)
+  // 这里**不**顺手清底图：底图文件与模板记录是两回事，
+  // 文件的生死由「用户还要不要它」决定（换掉 / 移除的那一刻就删，见 discardBackground），
+  // 不该等保存、也不该由保存来兜底。
   return template
+}
+
+/**
+ * 丢弃一张底图文件：用户换掉了它 / 移除了它，当场删。
+ *
+ * 不去问「还有没有已保存的模板引用它」——底图与模板记录本来就是两回事：
+ * 上传时文件名带时间戳前缀，一个文件只归一条模板用，不存在共用。
+ * 引用该底图的那条模板记录会在下一次保存时跟着改掉；
+ * 万一用户换完图没保存就走了，记录里会留下一条指向已删文件的引用，
+ * 前端加载失败时会自动清掉（见 TemplateView 的 onBgError）。
+ */
+function discardBackground(bgPath) {
+  return { removed: removeBgFile(String(bgPath || '')) }
 }
 
 function deleteTemplate(id) {
   const t = getTemplate(id)
   const rest = loadAll().filter((x) => x.id !== id)
   persistAll(rest)
-  // 连带清理底图文件：上传时文件名唯一（时间戳前缀），一个底图只被一条模板记录引用；
-  // 不清理会让 print-bg 目录随删模板持续膨胀（孤儿文件无任何应用内释放入口）
-  // 路径必须过守卫：background 来自可被手工编辑的 JSON，`../` 会删到数据目录外
-  if (t.background) {
-    const stillUsed = rest.some((x) => x.background === t.background)
-    if (!stillUsed) {
-      try {
-        fs.unlinkSync(resolveInsideDataDir(t.background))
-      } catch (err) {
-        // 路径越界说明存储被改过：留痕但不让删除模板整体失败（模板记录已删干净）
-        console.warn(`[templates] 底图清理跳过（${err.message}）`)
-      }
-    }
-  }
+  // 连带清理底图文件；唯一性由时间戳前缀保证，这里再挡一道手工改 JSON 造成的共用
+  if (!rest.some((x) => x.background === t.background)) removeBgFile(t.background)
   return { ok: true }
 }
 
@@ -325,6 +349,7 @@ module.exports = {
   deleteTemplate,
   uploadBackground,
   uploadBackgroundBytes,
+  discardBackground,
   suggestPageSize,
   ratioDiff,
   fontUsedBy,

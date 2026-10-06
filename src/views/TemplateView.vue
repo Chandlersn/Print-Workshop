@@ -394,14 +394,30 @@ function onPageDim(which, val) {
   }
 }
 
+/**
+ * 丢弃一张底图文件。规则由主进程统一执行：只要还有**已保存**的模板引用它就不动，
+ * 否则直接删掉。换图 / 删图共用这一条，print-bg 才不会越攒越多。
+ */
+async function discardBackgroundFile(bgPath) {
+  if (!bgPath) return
+  try {
+    await window.printpress.discardBackground({ path: bgPath })
+  } catch (err) {
+    // 清理失败不该挡住正在做的事（元数据已经改好了），留个痕即可
+    console.warn('[bg] 旧底图清理失败', err)
+  }
+}
+
 /** 三条入口（对话框 / 拖拽 / 粘贴）共用：把上传结果落到当前模板上 */
-function applyBackgroundResult(result) {
+async function applyBackgroundResult(result) {
   const t = activeTpl.value
   if (!t) return
-  pushUndo() // 换底图也是一次可撤销的编辑
+  const prev = t.background
   t.background = result.background
   t.bgSize = { width: result.width, height: result.height }
   bgSelected.value = false
+  // 换底图 = 先把旧图按「不再被引用就删」的规则处理掉
+  if (prev && prev !== result.background) await discardBackgroundFile(prev)
   if (result.suggest.matched) {
     t.pageSize = { id: result.suggest.page.id, w: result.suggest.page.w, h: result.suggest.page.h }
     flash(`底图已上传，纸张匹配为${result.suggest.page.name}`)
@@ -421,20 +437,34 @@ function selectBackground() {
 }
 
 /**
- * 移除底图：只清模板上的引用。
- *
- * 磁盘上的图片文件**不在这里删**——撤销栈里还存着它的路径，
- * 删了文件就会让「Ctrl+Z 撤销回来」变成一个加载失败的破图。
- * 换底图同理：旧图会留在数据目录里，与「换图不删旧文件」的既有行为一致。
+ * 移除底图：清掉引用 + 把文件删掉，与「换底图」是同一条逻辑，只是没有新图顶上来。
+ * 因此底图不进撤销栈——撤销回来也只会是一张指向已删文件的破图，重传一次更省事。
  */
-function removeBackground() {
+async function removeBackground() {
   const t = activeTpl.value
   if (!t || !t.background) return
-  pushUndo()
+  const prev = t.background
   t.background = ''
   t.bgSize = null
   bgSelected.value = false
-  flash('底图已移除——点画布中央可重新上传，Ctrl+Z 可撤销')
+  await discardBackgroundFile(prev)
+  flash('底图已移除——点画布中央可重新上传')
+}
+
+/**
+ * 底图加载失败的兜底。
+ *
+ * 两种情况会走到这里：文件被外部删掉；或者「换了图 / 删了图但没保存就切走」，
+ * 磁盘上那条模板记录还留着指向已删文件的引用。
+ * 不管哪种，把引用清掉并说明原因，别把一张破图留在画布上。
+ */
+function onBgError() {
+  const t = activeTpl.value
+  if (!t || !t.background) return
+  t.background = ''
+  t.bgSize = null
+  bgSelected.value = false
+  errorMsg.value = '底图文件已不存在，已清除引用——请重新上传'
 }
 
 async function uploadBackground() {
@@ -443,7 +473,7 @@ async function uploadBackground() {
   try {
     const result = await window.printpress.uploadBackgroundDialog()
     if (result.canceled) return
-    applyBackgroundResult(result)
+    await applyBackgroundResult(result)
   } catch (err) {
     errorMsg.value = extractError(err)
   }
@@ -496,7 +526,7 @@ async function acceptImageFile(file) {
       dataBase64,
       fileName: file.name || '',
     })
-    applyBackgroundResult(result)
+    await applyBackgroundResult(result)
   } catch (err) {
     errorMsg.value = extractError(err)
   }
@@ -550,19 +580,15 @@ function onPaste(e) {
 
 // ---- 撤销 / 重做：字段布局快照栈（上限 50 条） ----
 /**
- * 撤销栈快照。必须含 layout 与 background：成品尺寸、裁切线、底图都是模板的一部分——
- * 只快照 fields 的话，误改尺寸 / 误删底图后按撤销救不回来（字段没变，去重还会把它挡掉）。
+ * 撤销栈快照。必须含 layout：成品尺寸、裁切线也是模板的一部分，
+ * 只快照 fields 的话，误改尺寸后按撤销救不回来（字段没变，去重还会把它挡掉）。
+ *
+ * 底图**故意不进快照**：换图 / 删图都会把旧图文件真正删掉（见 removeBackground），
+ * 撤销回来只会得到一张加载失败的破图。误删重传一次就行，比留一堆孤儿图划算。
  */
 function snapshotFields() {
   const t = activeTpl.value
-  return JSON.stringify(t
-    ? {
-      fields: t.fields,
-      layout: t.layout || null,
-      background: t.background || '',
-      bgSize: t.bgSize || null,
-    }
-    : { fields: [] })
+  return JSON.stringify(t ? { fields: t.fields, layout: t.layout || null } : { fields: [] })
 }
 
 function pushUndo() {
@@ -580,15 +606,7 @@ function restoreSnapshot(json) {
   const snap = JSON.parse(json)
   // 兼容早期只存fields 数组的快照
   activeTpl.value.fields = Array.isArray(snap) ? snap : snap.fields
-  if (!Array.isArray(snap)) {
-    if (snap.layout) activeTpl.value.layout = snap.layout
-    // 底图随快照一起回滚（旧快照没有这个键，此时保持现状不动）
-    if ('background' in snap) {
-      activeTpl.value.background = snap.background || ''
-      activeTpl.value.bgSize = snap.bgSize || null
-      bgSelected.value = false
-    }
-  }
+  if (!Array.isArray(snap) && snap.layout) activeTpl.value.layout = snap.layout
   if (selectedIdx.value >= activeTpl.value.fields.length) {
     selectedIdx.value = activeTpl.value.fields.length - 1
   }
@@ -1286,6 +1304,7 @@ onBeforeUnmount(() => {
                   alt=""
                   draggable="false"
                   @click="selectBackground"
+                  @error="onBgError"
                 />
                 <div
                   v-for="(f, idx) in activeTpl.fields"
@@ -1315,6 +1334,7 @@ onBeforeUnmount(() => {
                     :class="{ selected: bgSelected }"
                     alt=""
                     draggable="false"
+                    @error="onBgError"
                   />
                   <div
                     v-for="(f, idx) in activeTpl.fields"
@@ -1335,6 +1355,7 @@ onBeforeUnmount(() => {
                     alt=""
                     draggable="false"
                     @click="selectBackground"
+                    @error="onBgError"
                   />
                   <div
                     v-for="(f, idx) in activeTpl.fields"
@@ -1375,6 +1396,7 @@ onBeforeUnmount(() => {
                     alt=""
                     draggable="false"
                     @click="selectBackground"
+                    @error="onBgError"
                   />
                   <div
                     v-for="(f, idx) in activeTpl.fields"
@@ -1420,7 +1442,7 @@ onBeforeUnmount(() => {
               <div class="fill-badge">
                 底图 {{ activeTpl.bgSize ? `${activeTpl.bgSize.width} × ${activeTpl.bgSize.height} px` : '（尺寸未知）' }}
               </div>
-              <p class="kbd-hint">按 Delete 键移除底图，Ctrl+Z 可撤销</p>
+              <p class="kbd-hint">按 Delete 键移除底图，图片文件会一并删掉</p>
             </template>
             <template v-if="selectedField">
               <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">

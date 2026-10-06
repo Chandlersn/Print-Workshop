@@ -510,6 +510,20 @@ const OPS = {
       p.fileName ? String(p.fileName) : ''),
   },
 
+  /**
+   * 丢弃一张底图文件：换底图 / 移除底图时当场删掉。
+   *
+   * 底图文件与模板记录是两回事——文件的生死由「用户还要不要它」决定，
+   * 不等保存。上传时文件名带时间戳前缀，一个文件只归一条模板用，不存在共用。
+   */
+  'template:discardBackground': {
+    write: true,
+    params: {
+      path: { required: true, desc: '要丢弃的底图存储路径（如 print-bg/xxx.png）' },
+    },
+    run: (p) => templates.discardBackground(String(p.path)),
+  },
+
   // ==================== 字体 ====================
 
   'font:list': {
