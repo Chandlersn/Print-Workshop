@@ -31,7 +31,7 @@
 
 > 详细图文步骤见 [docs/使用说明.md](./docs/使用说明.md)。
 
-**从 [GitHub Releases](https://github.com/Chandlersn/Print-Workshop/releases/latest) 下载最新安装包**（如 `批印坊 Setup 0.2.5.exe`），双击安装即可。想自己构建：`npm install && npm run dist`，产物在 `release/`。
+**从 [GitHub Releases](https://github.com/Chandlersn/Print-Workshop/releases/latest) 下载最新安装包**（如 `PrintPress-0.2.10-Setup.exe`），双击安装即可。想自己构建：`npm install && npm run dist`，产物在 `release/`（本地文件名是 `批印坊 Setup <版本>.exe`，上传到 Releases 时会改成 ASCII 名）。
 
 > **首次安装弹出「Windows 已保护你的电脑」？** 这是未购买代码签名证书的正常提示（不代表有安全问题），点「更多信息」→「仍要运行」即可继续。
 

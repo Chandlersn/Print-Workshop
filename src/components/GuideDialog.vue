@@ -12,7 +12,7 @@ const SECTIONS = [
     blocks: [
       { type: 'p', text: '系统要求：Windows 10 / 11（64 位）。两种形态任选：' },
       { type: 'li', items: [
-        '安装版：双击「批印坊 Setup x.x.x.exe」按提示安装，自动创建桌面和开始菜单快捷方式；',
+        '安装版：双击安装包（如「PrintPress-x.x.x-Setup.exe」）按提示安装，自动创建桌面和开始菜单快捷方式；',
         '免安装版：解压后直接双击「批印坊.exe」，不写注册表，删掉文件夹即卸载。'
       ] },
     ],
