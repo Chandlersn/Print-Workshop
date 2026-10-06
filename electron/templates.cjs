@@ -9,7 +9,7 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
-const { imageSize } = require('./images.cjs')
+const { imageSize, imageSizeFromBuffer, sniffImageExt } = require('./images.cjs')
 const dataset = require('./dataset.cjs')
 
 const STORE_NAME = 'templates'
@@ -205,27 +205,61 @@ function suggestPageSize(imgW, imgH) {
   }
 }
 
-/** 底图上传：复制进数据目录 + 读真实尺寸 + 纸张建议 */
-function uploadBackground(srcPath) {
-  const base = path.basename(srcPath)
-  if (!BG_EXTS.has(path.extname(base).toLowerCase())) {
-    throw new Error('仅支持 png / jpg / webp 图片')
+/**
+ * 文件名消毒：只取主名，去掉路径分隔符与非法字符。
+ * 拖拽传来的名字是任意字符串（可能含 `../` 或 Windows 保留字符），
+ * 直接拼进目标路径会有越界 / 写坏文件的风险。
+ */
+// 用字符集合而非带 g 标志的正则：g 标志的 lastIndex 在多次 test() 之间会残留，
+// 逐字符判断时极易漏判（每隔一个字符才命中一次）。
+const ILLEGAL_CHARS = '\\/:*?"<>|'
+function safeBaseName(rawName, fallback) {
+  const main = path.basename(String(rawName || '')).replace(/\.[^.]*$/, '')
+  let out = ''
+  for (const ch of main) {
+    if (ch.charCodeAt(0) < 32) continue // 控制字符直接丢弃（含 NUL）
+    out += ILLEGAL_CHARS.indexOf(ch) >= 0 ? '_' : ch
   }
-  const size = imageSize(srcPath, fs)
+  const cleaned = out.replace(/^\.+/, '').trim()
+  return cleaned.slice(0, 60) || fallback
+}
+
+/** 底图落盘公共逻辑：写进数据目录 + 读真实尺寸 + 纸张建议 */
+function storeBackground(buf, baseName, ext) {
+  const size = imageSizeFromBuffer(buf)
   if (!size) throw new Error('无法识别图片尺寸（支持 PNG / JPEG）')
 
   fs.mkdirSync(BG_DIR, { recursive: true })
-  const fileName = `${Date.now().toString(36)}-${base}`
-  const dest = path.join(BG_DIR, fileName)
-  fs.copyFileSync(srcPath, dest)
+  const fileName = `${Date.now().toString(36)}-${baseName}${ext}`
+  fs.writeFileSync(path.join(BG_DIR, fileName), buf)
 
-  const suggest = suggestPageSize(size.width, size.height)
   return {
     background: `print-bg/${fileName}`,
     width: size.width,
     height: size.height,
-    suggest,
+    suggest: suggestPageSize(size.width, size.height),
   }
+}
+
+/** 底图上传（对话框选文件 / CLI 指定路径） */
+function uploadBackground(srcPath) {
+  const base = path.basename(srcPath)
+  const ext = path.extname(base).toLowerCase()
+  if (!BG_EXTS.has(ext)) throw new Error('仅支持 png / jpg / webp 图片')
+  return storeBackground(fs.readFileSync(srcPath), safeBaseName(base, 'bg'), ext)
+}
+
+/**
+ * 底图上传（拖拽 / 剪贴板粘贴）：从内存字节写入，不需要源文件路径——
+ * 截图粘贴进来的图片本来就只存在于剪贴板里，根本没有路径。
+ *
+ * 扩展名一律由内容嗅探决定，不采用前端给的文件名后缀。
+ */
+function uploadBackgroundBytes(buf, rawName) {
+  if (!Buffer.isBuffer(buf) || buf.length === 0) throw new Error('图片内容为空')
+  const ext = sniffImageExt(buf)
+  if (!ext) throw new Error('仅支持 PNG / JPEG 图片')
+  return storeBackground(buf, safeBaseName(rawName, 'pasted'), ext)
 }
 
 /** 字体引用校验：返回引用该 family 的模板名清单 */
@@ -290,6 +324,7 @@ module.exports = {
   saveTemplate,
   deleteTemplate,
   uploadBackground,
+  uploadBackgroundBytes,
   suggestPageSize,
   ratioDiff,
   fontUsedBy,

@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('printpress', {
   rebindDataset: (templateId, datasetId) => ipcRenderer.invoke('template:rebindDataset', templateId, datasetId),
   deleteTemplate: (id) => ipcRenderer.invoke('template:delete', id),
   uploadBackgroundDialog: () => ipcRenderer.invoke('template:uploadBackgroundDialog'),
+  uploadBackgroundBytes: (payload) => ipcRenderer.invoke('template:uploadBackgroundBytes', payload),
 
   // 字体
   listFonts: () => ipcRenderer.invoke('font:list'),

@@ -387,24 +387,129 @@ function onPageDim(which, val) {
   }
 }
 
+/** 三条入口（对话框 / 拖拽 / 粘贴）共用：把上传结果落到当前模板上 */
+function applyBackgroundResult(result) {
+  const t = activeTpl.value
+  if (!t) return
+  t.background = result.background
+  t.bgSize = { width: result.width, height: result.height }
+  if (result.suggest.matched) {
+    t.pageSize = { id: result.suggest.page.id, w: result.suggest.page.w, h: result.suggest.page.h }
+    flash(`底图已上传，纸张匹配为${result.suggest.page.name}`)
+  } else {
+    t.pageSize = { id: 'custom', w: result.suggest.page.w, h: result.suggest.page.h }
+    flash('底图已上传，非标准比例，按像素换算为自定义纸张')
+  }
+}
+
 async function uploadBackground() {
   if (!activeTpl.value) return
   errorMsg.value = ''
   try {
     const result = await window.printpress.uploadBackgroundDialog()
     if (result.canceled) return
-    const t = activeTpl.value
-    t.background = result.background
-    t.bgSize = { width: result.width, height: result.height }
-    if (result.suggest.matched) {
-      t.pageSize = { id: result.suggest.page.id, w: result.suggest.page.w, h: result.suggest.page.h }
-      flash(`底图已上传，纸张匹配为${result.suggest.page.name}`)
-    } else {
-      t.pageSize = { id: 'custom', w: result.suggest.page.w, h: result.suggest.page.h }
-      flash('底图已上传，非标准比例，按像素换算为自定义纸张')
-    }
+    applyBackgroundResult(result)
   } catch (err) {
     errorMsg.value = extractError(err)
+  }
+}
+
+// ---- 拖拽 / 粘贴上传底图 ----
+/**
+ * 拖拽与剪贴板里的图片只有内存字节、没有文件路径（截图尤其如此），
+ * 所以统一读成 base64 走 template:uploadBackgroundBytes。
+ * 真实格式由主进程按内容嗅探决定——前端给的文件名后缀不可信，只当归档命名用。
+ */
+const MAX_BG_BYTES = 20 * 1024 * 1024
+const IMAGE_LIKE = /\.(png|jpe?g|webp)$/i
+
+const dragging = ref(false)
+// dragenter / dragleave 会在子元素间冒泡，用进出计数避免高亮闪烁
+let dragDepth = 0
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const out = String(reader.result || '')
+      const comma = out.indexOf(',')
+      resolve(comma >= 0 ? out.slice(comma + 1) : out) // 去掉 data:image/png;base64, 前缀
+    }
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function acceptImageFile(file) {
+  if (!activeTpl.value || !file) return
+  // 部分拖拽源不带 type，此时退回按文件名判断；最终仍由主进程按内容定夺
+  const looksImage = file.type
+    ? file.type.startsWith('image/')
+    : !file.name || IMAGE_LIKE.test(file.name)
+  if (!looksImage) {
+    errorMsg.value = '只能上传图片（png / jpg / webp）'
+    return
+  }
+  if (file.size > MAX_BG_BYTES) {
+    errorMsg.value = `图片超过 ${MAX_BG_BYTES / 1024 / 1024}MB，请先压缩后再上传`
+    return
+  }
+  errorMsg.value = ''
+  try {
+    const dataBase64 = await fileToBase64(file)
+    const result = await window.printpress.uploadBackgroundBytes({
+      dataBase64,
+      fileName: file.name || '',
+    })
+    applyBackgroundResult(result)
+  } catch (err) {
+    errorMsg.value = extractError(err)
+  }
+}
+
+function onDragEnter() {
+  if (!activeTpl.value) return
+  dragDepth += 1
+  dragging.value = true
+}
+
+function onDragOver(e) {
+  if (!activeTpl.value) return
+  e.preventDefault() // 不阻止默认行为的话，浏览器会直接把这个文件打开
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragging.value = false
+}
+
+function onDrop(e) {
+  if (!activeTpl.value) return
+  e.preventDefault()
+  dragDepth = 0
+  dragging.value = false
+  const dt = e.dataTransfer
+  const file = dt && dt.files && dt.files.length ? dt.files[0] : null
+  if (file) {
+    acceptImageFile(file)
+    return
+  }
+  // 从网页里拖图只有 URL、没有文件内容，暂不支持（也避免去下载外链资源）
+  errorMsg.value = '请把图片文件直接拖进来（暂不支持拖入网页图片链接）'
+}
+
+function onPaste(e) {
+  if (!activeTpl.value) return
+  const items = e.clipboardData && e.clipboardData.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (!file) continue
+    e.preventDefault()
+    acceptImageFile(file)
+    return
   }
 }
 
@@ -873,11 +978,13 @@ onMounted(async () => {
     ITEM_SIZE_PRESETS.value = []
   }
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('paste', onPaste)
   await refreshLists()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('paste', onPaste)
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
 })
@@ -1017,7 +1124,11 @@ onBeforeUnmount(() => {
               裁切线
             </label>
           </template>
-          <button class="btn-ghost" @click="uploadBackground">上传底图</button>
+          <button
+            class="btn-ghost"
+            title="也可以把图片文件拖到画布上，或直接 Ctrl+V 粘贴截图"
+            @click="uploadBackground"
+          >上传底图</button>
           <CustomSelect
             v-model="activeDatasetId"
             :options="datasetOptions"
@@ -1081,7 +1192,14 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="workbench">
-          <div class="canvas-wrap">
+          <div
+            class="canvas-wrap"
+            :class="{ 'drop-active': dragging }"
+            @dragenter.prevent="onDragEnter"
+            @dragover.prevent="onDragOver"
+            @dragleave="onDragLeave"
+            @drop.prevent="onDrop"
+          >
             <div
               ref="canvasEl"
               class="canvas"
@@ -1447,6 +1565,13 @@ onBeforeUnmount(() => {
 .workbench { display: flex; gap: 16px; align-items: flex-start; }
 
 .canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
+
+/* 拖图片进来时给明确高亮：让用户清楚「此时松手就会被当成底图」。
+   用主题变量，深色模式下自动跟着变。 */
+.canvas-wrap.drop-active .canvas {
+  outline: 2px dashed var(--cinnabar);
+  outline-offset: -3px;
+}
 
 .canvas {
   position: relative;

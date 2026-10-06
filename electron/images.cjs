@@ -26,9 +26,26 @@ function jpegSize(buf) {
   return null
 }
 
-function imageSize(filePath, fs) {
-  const buf = fs.readFileSync(filePath)
+/**
+ * 按内容嗅探图片类型——**不信任调用方给的文件名 / 扩展名**。
+ *
+ * 拖拽与剪贴板粘贴场景下，前端传来的文件名完全不可信（可以随手把别的东西改名成 .png）。
+ * 所以真实格式一律以字节判定；同时只认 PNG / JPEG 两种「确实能读出尺寸」的，
+ * webp 虽然在允许扩展名里但尺寸解析不支持，存进去也画不出来，故一律拒绝。
+ */
+function sniffImageExt(buf) {
+  if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47) return '.png'
+  if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg'
+  return null
+}
+
+/** 从内存字节读图片尺寸：拖拽 / 剪贴板粘贴时用，不需要先落盘 */
+function imageSizeFromBuffer(buf) {
   return pngSize(buf) || jpegSize(buf)
 }
 
-module.exports = { pngSize, jpegSize, imageSize }
+function imageSize(filePath, fs) {
+  return imageSizeFromBuffer(fs.readFileSync(filePath))
+}
+
+module.exports = { pngSize, jpegSize, sniffImageExt, imageSizeFromBuffer, imageSize }

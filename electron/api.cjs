@@ -495,6 +495,21 @@ const OPS = {
     },
   },
 
+  /**
+   * 底图上传（拖拽 / 剪贴板粘贴）：图片只有内存字节、没有文件路径时用这条。
+   * 扩展名由主进程按内容嗅探决定，不采用 fileName 的后缀——前端给的名字不可信。
+   */
+  'template:uploadBackgroundBytes': {
+    write: true,
+    params: {
+      dataBase64: { required: true, desc: '图片内容的 base64（不含 data: 前缀）' },
+      fileName: { required: false, desc: '原始文件名，仅用于归档命名；真实格式按内容判定' },
+    },
+    run: (p) => templates.uploadBackgroundBytes(
+      Buffer.from(String(p.dataBase64), 'base64'),
+      p.fileName ? String(p.fileName) : ''),
+  },
+
   // ==================== 字体 ====================
 
   'font:list': {
