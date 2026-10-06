@@ -114,6 +114,16 @@ async function run() {
     ok(counts.length > 0 && counts.every((n) => n === names.length),
       `README 里的操作计数全部等于实际值 ${names.length}`, [...new Set(counts)])
 
+    // 版本号同理：README 头部的「当前版本」老是忘了跟着 package.json 走
+    // （v0.2.6、v0.2.7 两次发版都只补了版本史，头部一直停在 v0.2.5）。
+    const pkgVersion = require(path.join(ROOT, 'package.json')).version
+    const readmeVer = readme.match(/\|\s*当前版本\s*\|\s*v?([\d.]+)\s*\|/)
+    ok(Boolean(readmeVer) && readmeVer[1] === pkgVersion,
+      `README 头部「当前版本」与 package.json 一致（${pkgVersion}）`,
+      readmeVer ? readmeVer[1] : '(没找到那一行)')
+    ok(readme.includes(`v${pkgVersion}（`),
+      `版本史里有 v${pkgVersion} 的条目（发版时别忘了写）`)
+
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
       `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径版 + 整批删除 + 字节版）`, added)
