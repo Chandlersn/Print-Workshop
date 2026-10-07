@@ -1,5 +1,5 @@
 {
-  "version": "0.2.10",
-  "notes": "修复「清理缓存」点了没反应：当场删不掉的缓存会自动排到下次启动时清理，界面如实告知结果。",
+  "version": "0.2.11",
+  "notes": "数据页的列可以按需藏起来了：列头 hover 出「▾」，可隐藏单列或只看此列；藏了之后工具栏的「已隐藏 N 列」胶囊点开即可恢复。隐藏只管显示，不影响打印字段与出片。",
   "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }

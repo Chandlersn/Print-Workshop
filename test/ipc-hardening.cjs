@@ -486,6 +486,120 @@ console.log('== 8c. 「关于」不再挂使用说明入口（顶栏「说明」
   ok(fs.existsSync(path.join(__dirname, '..', 'docs', '使用说明.md')), 'docs/使用说明.md 还在')
 }
 
+console.log('== 9. 列显隐：不许变成「静默改打印」，也不许「藏了找不回」 ==')
+{
+  const dv = src('src/views/DatasetView.vue')
+
+  // 9a. 先修隐患：display-settings 原本是 { tableSize: v } 单字段覆写。
+  // 往里加 hiddenColumns 之后，用户点一次字号就会把隐藏状态整个清掉，而且不报错。
+  ok(!/saveData\('display-settings', \{ tableSize: v \}\)/.test(dv),
+    '不再用 { tableSize: v } 单字段覆写（那会顺手清掉 hiddenColumns）')
+  ok(/hiddenColumns: hiddenColumns\.value/.test(dv), '写下去的是内存镜像整体（含 hiddenColumns）')
+  const dsWrites = (dv.match(/saveData\('display-settings'/g) || []).length
+  ok(dsWrites === 1, '只此一处写 display-settings（多个写点就是多个覆写风险）', dsWrites)
+  ok(/let prefsLoaded = false/.test(dv) && /if \(!prefsLoaded\) return/.test(dv),
+    '读到落盘值之前不许写（否则拿空镜像盖掉用户存着的隐藏状态）')
+  ok(/prefsLoaded = true/.test(dv), '读成功才开闸')
+
+  // 9b. 状态住在已有的 display-settings 里——store 是白名单制（第 1 节钉着「只能两个键」）
+  ok(/sanitizeHidden\(saved && saved\.hiddenColumns\)/.test(dv),
+    '读回时做形状校验（落盘 JSON 用户可手工编辑）')
+  ok(/from '\.\.\/lib\/column-visibility\.cjs'/.test(dv),
+    '纯逻辑抽到 column-visibility.cjs（可直接单测，见 test/column-visibility.cjs）')
+  ok(fs.existsSync(path.join(__dirname, '..', 'test', 'column-visibility.cjs')),
+    '那个套件确实存在')
+
+  // 9c. 渲染必须走「可见列」，否则隐藏了还在画
+  const visibleLoops = (dv.match(/v-for="col in visibleColumns"/g) || []).length
+  ok(visibleLoops === 2, '表头与表体两处都按可见列渲染', visibleLoops)
+  ok((dv.match(/v-for="col in columns"/g) || []).length === 1
+    && /<label v-for="col in columns"/.test(dv),
+    '还在直接迭代全量列的只剩显隐菜单里的复选框清单')
+  ok(/hiddenKeysOf\(hiddenColumns\.value, activeId\.value, columns\.value\)/.test(dv),
+    '隐藏集只收当前数据集真实存在的 key（换过文件的旧 key 不算数）')
+
+  // 9d. 序号列与操作列天然不可隐藏：它们根本不在 v-for 里
+  ok(/<th class="rownum-col">#<\/th>/.test(dv) && /<th class="op-col">操作<\/th>/.test(dv),
+    '「#」与「操作」是固定表头，不在可隐藏的列集合里')
+
+  // 9e. 至少留一列 + 必须有一条显眼的回头路
+  ok(/canHideMore\(columns\.value, hiddenSet\.value\)/.test(dv), '有「至少留一列」的判定')
+  ok(/function hideColumn[\s\S]{0,120}?!canHideMoreCols\.value\) return/.test(dv),
+    'hideColumn 里挡了一次')
+  ok(/function toggleColumnVisible[\s\S]{0,200}?!canHideMoreCols\.value\) return/.test(dv),
+    '复选框路径也挡了一次（界面上禁用只是第一道）')
+  ok(/已隐藏 \{\{ hiddenCount \}\} 列/.test(dv), '工具栏给出「已隐藏 N 列」的回头入口')
+  ok(/v-if="hiddenCount"/.test(dv), '只在真有隐藏时出现（没藏东西就不占工具栏）')
+  ok(/恢复全部隐藏的列（\{\{ hiddenCount \}\}）/.test(dv), '列头菜单里也有一条恢复')
+
+  // 9f. 硬规则：隐藏 ≠ 取消「印」。隐藏只动显示，一次都不碰 printOn / 数据集
+  const printCalls = (dv.match(/setColumnPrint/g) || []).length
+  ok(printCalls === 1, '整个数据页只有「印」开关一处调 setColumnPrint —— 隐藏路径碰不到它', printCalls)
+  ok(!/function applyHidden[\s\S]{0,300}?updateCell/.test(dv), '隐藏路径不写单元格')
+  ok(!/function applyHidden[\s\S]{0,300}?renameColumn/.test(dv), '隐藏路径不改列名')
+  ok(/仅隐藏显示，不影响「印」与打印/.test(dv), '菜单里把这条规则写给用户看')
+
+  // 9g. 补录跳转撞上隐藏列：必须自动展开，否则从打印中心跳过来只看到一片空白
+  const expandAt = dv.indexOf('if (hiddenSet.value.has(req.key))')
+  const queryAt = dv.indexOf('[data-ri="${req.rowIndex}"][data-ck=')
+  ok(expandAt > -1, '补录跳转有「目标列被隐藏」的分支')
+  ok(expandAt > -1 && queryAt > -1 && expandAt < queryAt,
+    '**先展开、再定位**（反过来滚动到的是一个还不存在的格子）', { expandAt, queryAt })
+
+  // 9h. 浮层菜单：th 上有 overflow:hidden，留在表头里会被裁掉
+  ok(/<Teleport to="body">/.test(dv), '菜单 Teleport 到 body（否则被 th 的 overflow 裁掉）')
+  ok(/\.col-menu \{[\s\S]{0,120}?position: fixed/.test(dv), '菜单用 fixed 定位')
+  const triggers = (dv.match(/^[ \t]*data-menu-trigger[ \t]*$/gm) || []).length
+  ok(triggers === 2, '两个触发器（列头 ▾ 与胶囊）都打了标记', triggers)
+  ok(/closest\('\[data-menu-trigger\]'\)/.test(dv),
+    '点触发器不算「点外面」（否则 mousedown 先关、click 再开，看起来像点它关不掉）')
+  ok(/e\.key === 'Escape'/.test(dv), 'Esc 能收起菜单')
+  ok(/t instanceof Node/.test(dv),
+    '滚动 / resize 收起菜单，但菜单内部滚动不算（resize 的 target 是 window 不是 Node，直接 contains 会抛错）')
+  ok(/removeEventListener\('mousedown', onDocMouseDown, true\)/.test(dv),
+    '卸载时摘掉监听（页面来回切不会越挂越多）')
+  ok(/selectDataset[\s\S]{0,200}?closeMenus\(\)/.test(dv),
+    '切换数据集时收起菜单（菜单里记的是上一个数据集的列）')
+  ok(/pruneStaleHidden/.test(dv), '清掉已删数据集留下的隐藏记录（这个 map 只增不减）')
+
+  // 9i. 列头「▾」默认隐身，但不能把已有的「印」挤出去
+  ok(/\.col-menu-btn \{[\s\S]{0,400}?opacity: 0/.test(dv), '「▾」默认隐身（列头已有两个热区）')
+  ok(/\.col-head:hover \.col-menu-btn/.test(dv), 'hover 才现')
+  ok(/\.th-alias \{[\s\S]{0,200}?text-overflow: ellipsis/.test(dv),
+    '列名出省略号（否则长列名会把「印」和「▾」一起挤出 th 可视区，两个开关都点不到）')
+
+  // 9j. 跨 IPC 传参必须是纯对象。
+  // ref 里装的是 Vue 响应式 Proxy，而 IPC 传参走结构化克隆，Proxy 克隆不了
+  // （"An object could not be cloned."）。这个错是**同步**抛的，又会被 Vue 的事件处理
+  // 吞掉 —— 表现成「状态改了、盘上没写」，从界面完全看不出来（隐藏列之后菜单关不上，
+  // 就是同一次操作里后面的语句被这个异常截断了）。TemplateView 存模板也踩过同一个坑，
+  // 所以这里扫全量前端代码钉住，不只盯本次改的这一处。
+  const reactiveArg = /(?:saveData|saveTemplate|printValidate|printGenerate|printSend|printExportPdf)\(\s*[^,()]+,\s*[A-Za-z_$][\w$]*\.value\s*[,)]/
+  const leaky = []
+  for (const f of walk(path.join(__dirname, '..', 'src'))) {
+    if (reactiveArg.test(fs.readFileSync(f, 'utf-8'))) {
+      leaky.push(path.relative(path.join(__dirname, '..'), f))
+    }
+  }
+  ok(leaky.length === 0, '没有把响应式容器整个丢给 IPC 的调用点（结构化克隆会抛）', leaky)
+  ok(/JSON\.parse\(JSON\.stringify\(\{[\s\S]{0,200}?hiddenColumns: hiddenColumns\.value/.test(dv),
+    '写盘前先转纯对象（和 TemplateView 存模板同一手法）')
+  ok(/function persistDisplay\(\) \{[\s\S]{0,900}?\} catch \{/.test(dv),
+    '写盘调用整体兜住（saveData 是同步抛的，Vue 会吞掉事件处理里的异常）')
+
+  // 9k. 读盘时机：补录跳转的 immediate 回调在 **setup 阶段**就跑，要读隐藏状态判断
+  // 「目标列是不是被藏了」。挂在 onMounted 里读就晚了——跳转回来时读到的还是空 map，
+  // 自动展开失效（真机 e2e 抓到过这个竞态；顺带它还会把刚写下去的隐藏状态用旧值盖回来）。
+  ok(/const prefsReady = loadDisplayPrefs\(\)/.test(dv),
+    '落盘偏好在 setup 阶段就发起读取（不等 onMounted）')
+  const awaitPrefsAt = dv.indexOf('await prefsReady')
+  const hiddenCheckAt = dv.indexOf('if (hiddenSet.value.has(req.key))')
+  ok(awaitPrefsAt > -1 && hiddenCheckAt > -1 && awaitPrefsAt < hiddenCheckAt,
+    '补录跳转在判断「目标列被藏」之前先等读盘落地', { awaitPrefsAt, hiddenCheckAt })
+  ok(!/onMounted\(\(\) => \{[\s\S]{0,200}?loadDisplayPrefs\(\)/.test(dv),
+    'onMounted 不再重复读一次（晚读会把刚写下去的隐藏状态用旧值盖回来）')
+}
+
 rmDeep(TMP)
 console.log(`\nIPC 收口与结构：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

@@ -5,6 +5,9 @@
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { cellNav, ackCell } from '../lib/cell-nav.js'
+import {
+  sanitizeHidden, hiddenKeysOf, withHidden, visibleColumnsOf, canHideMore, pruneHidden,
+} from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const datasets = ref([])
@@ -102,22 +105,76 @@ const SIZE_OPTIONS = [
 ]
 const tableSize = ref('m')
 
+// 列显隐：{ [数据集 id]: [列 key, ...] }，与字号同住在 display-settings 里
+// （不新开存储键：store 通道是白名单制，且断言钉着「前端只用到两个键」）
+const hiddenColumns = ref({})
+
+// 读到落盘值之前不许写：镜像此刻还是空的，一写就把用户存着的隐藏状态整个盖掉
+let prefsLoaded = false
+
+/**
+ * 偏好存盘：把**内存镜像整体**写下去，不做「读-改-写」。
+ * 读-改-写在两次快速操作下会交错（先点字号、再隐藏列，后写的把前一次丢掉）；
+ * 镜像里只有本组件拥有的两个字段，整写不会误伤别的键。
+ *
+ * 两处必须小心：
+ *  1. 传下去的得是**纯对象**——ref 里装的是 Vue 响应式 Proxy，而 IPC 传参走结构化克隆，
+ *     Proxy 克隆不了（"An object could not be cloned."）。同一个坑 TemplateView
+ *     存模板时踩过，那边也是 JSON.parse(JSON.stringify(...)) 过的。
+ *  2. 整个调用要兜住：saveData 是**同步**抛这个错的，而 Vue 会吞掉事件处理里的异常——
+ *     于是表现成「状态改了、盘上没写」，还连带让同一次操作后面的语句跑不到
+ *     （隐藏列之后菜单关不上就是这个原因）。宁可静默丢一次偏好，也不能破坏交互。
+ */
+function persistDisplay() {
+  if (!prefsLoaded) return Promise.resolve()
+  try {
+    const payload = JSON.parse(JSON.stringify({
+      tableSize: tableSize.value,
+      hiddenColumns: hiddenColumns.value,
+    }))
+    return window.printpress.saveData('display-settings', payload).catch(() => { /* 偏好存不下不阻塞交互 */ })
+  } catch {
+    return Promise.resolve()
+  }
+}
+
 async function loadDisplayPrefs() {
   try {
     const saved = await window.printpress.loadData('display-settings')
     if (saved && SIZE_OPTIONS.some((o) => o.value === saved.tableSize)) {
       tableSize.value = saved.tableSize
     }
+    hiddenColumns.value = sanitizeHidden(saved && saved.hiddenColumns)
+    prefsLoaded = true // 只有读成功才开闸；读失败宁可不存，也不拿空镜像覆盖用户数据
   } catch { /* 读取失败用默认档，不打扰 */ }
 }
 
+/**
+ * 读取在 setup 阶段就发起，不等 onMounted。
+ *
+ * 为什么：补录跳转靠 `watch(cellNav.req, { immediate: true })`，它在 setup 阶段就跑，
+ * 要读隐藏状态来判断「目标列是不是被藏了」。等 onMounted 再读就晚了——跳转回来时
+ * 读到的还是空 map，于是「自动展开隐藏列」失效，用户从打印中心跳过来只看到一片空白。
+ * 这个竞态是真机 e2e 抓到的（程序化断言看不出来）。
+ * 顺带也挡住了反向覆盖：读盘晚于写盘时，会把刚写下去的隐藏状态用旧值盖回来。
+ */
+const prefsReady = loadDisplayPrefs()
+
 function setSize(v) {
   tableSize.value = v
-  window.printpress.saveData('display-settings', { tableSize: v }).catch(() => {})
+  persistDisplay()
 }
 
 const activeSummary = computed(() => datasets.value.find((d) => d.id === activeId.value) || null)
 const columns = computed(() => (detail.value ? detail.value.columns : []))
+
+// 列显隐的派生状态：三者都由「当前列 + 隐藏集」算出，所以挨着 columns 放
+// hiddenSet 只收当前数据集**真实存在**的 key——换过文件后盘上的旧 key 不算数，
+// 否则会出现「已隐藏 1 列」却看不见藏了谁
+const hiddenSet = computed(() => hiddenKeysOf(hiddenColumns.value, activeId.value, columns.value))
+const visibleColumns = computed(() => visibleColumnsOf(columns.value, hiddenSet.value))
+const hiddenCount = computed(() => hiddenSet.value.size)
+const canHideMoreCols = computed(() => canHideMore(columns.value, hiddenSet.value))
 const filteredSheets = computed(() => {
   const kw = sheetSearch.value.trim().toLowerCase()
   if (!kw) return sheetItems.value
@@ -145,6 +202,7 @@ function extractError(err) {
 
 async function refreshList(preferId) {
   datasets.value = await window.printpress.listDatasets()
+  pruneStaleHidden()
   const target = preferId || activeId.value
   if (target && datasets.value.some((d) => d.id === target)) {
     await selectDataset(target)
@@ -154,8 +212,19 @@ async function refreshList(preferId) {
   }
 }
 
+/** 清掉已删数据集留下的隐藏记录：长期用下来这个 map 只增不减（列表为空时不动手） */
+function pruneStaleHidden() {
+  const next = pruneHidden(hiddenColumns.value, datasets.value.map((d) => d.id))
+  const before = Object.keys(hiddenColumns.value)
+  const after = Object.keys(next)
+  if (before.length === after.length && before.every((k) => after.includes(k))) return
+  hiddenColumns.value = next
+  persistDisplay()
+}
+
 async function selectDataset(id) {
   activeId.value = id
+  closeMenus() // 菜单里记的是上一个数据集的列，留着会误操作
   // 页码必须归零：切到行数更少的数据集时，旧的 page 会让 pagedRows 直接算成空，
   // 而分页器只在 pageCount > 1 时渲染——表格空白、分页器也没了，成死路。
   // removeRow / appendRow 都会重置，唯独切换数据集这条路径漏了。
@@ -407,16 +476,121 @@ async function commitRename() {
   }
 }
 
+// ---- 列显隐：入口是列头 hover 才现的「▾」，回头路是工具栏的「已隐藏 N 列」胶囊 ----
+// 列头已有两个热区（点名字改名、「印」开关），显隐只能再开一个极小的热区且默认隐身，
+// 否则列头会挤成三个按钮。菜单 Teleport 到 body：th 上有 overflow:hidden
+// （列名过长要出省略号），留在表头里的浮层会被裁掉。
+const colMenu = ref(null) // { key, x, y }
+const listMenu = ref(null) // { x, y }
+const colMenuEl = ref(null)
+const listMenuEl = ref(null)
+
+const menuCol = computed(
+  () => columns.value.find((c) => colMenu.value && c.key === colMenu.value.key) || null)
+
+function closeMenus() {
+  colMenu.value = null
+  listMenu.value = null
+}
+
+/** 贴着触发器下沿弹，左右按窗口收边（表格可横向滚动，右端的列会顶到屏幕外） */
+function menuPos(rect, width) {
+  return {
+    x: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+    y: Math.min(rect.bottom + 4, window.innerHeight - 40),
+  }
+}
+
+function openColMenu(col, ev) {
+  if (colMenu.value && colMenu.value.key === col.key) return closeMenus()
+  listMenu.value = null
+  colMenu.value = { key: col.key, ...menuPos(ev.currentTarget.getBoundingClientRect(), 200) }
+}
+
+function openListMenu(ev) {
+  if (listMenu.value) return closeMenus()
+  colMenu.value = null
+  listMenu.value = menuPos(ev.currentTarget.getBoundingClientRect(), 220)
+}
+
+/**
+ * 整体替换当前数据集的隐藏集。
+ * 以 hiddenSet（只含真实存在的 key）为基准，顺带把盘上的旧 key 清掉。
+ */
+function applyHidden(keys) {
+  const id = activeId.value
+  if (!id) return
+  hiddenColumns.value = withHidden(hiddenColumns.value, id, keys)
+  persistDisplay()
+}
+
+function hideColumn(col) {
+  if (!col || !canHideMoreCols.value) return
+  applyHidden([...hiddenSet.value, col.key])
+  closeMenus()
+}
+
+function showOnlyColumn(col) {
+  if (!col) return
+  applyHidden(columns.value.filter((c) => c.key !== col.key).map((c) => c.key))
+  closeMenus()
+}
+
+function restoreColumns() {
+  applyHidden([])
+  closeMenus()
+}
+
+function toggleColumnVisible(col) {
+  // 兜底：界面上「最后一个可见列」的复选框是禁用的，这里再挡一次
+  if (!hiddenSet.value.has(col.key) && !canHideMoreCols.value) return
+  const cur = hiddenSet.value
+  applyHidden(cur.has(col.key) ? [...cur].filter((k) => k !== col.key) : [...cur, col.key])
+}
+
+function onDocMouseDown(e) {
+  if (!colMenu.value && !listMenu.value) return
+  // 触发器自己要排除：否则 mousedown 先关、click 再开，看起来像「点它关不掉」
+  if (e.target && e.target.closest && e.target.closest('[data-menu-trigger]')) return
+  for (const el of [colMenuEl.value, listMenuEl.value]) {
+    if (el && el.contains(e.target)) return
+  }
+  closeMenus()
+}
+
+function onDocKey(e) {
+  if (e.key === 'Escape') closeMenus()
+}
+
+/** 滚动 / 改窗口大小后 fixed 定位的菜单会跟触发器脱开，直接收起（菜单自己滚动不算） */
+function onViewportChange(e) {
+  const t = e && e.target
+  if (t instanceof Node) {
+    for (const el of [colMenuEl.value, listMenuEl.value]) {
+      if (el && el.contains(t)) return
+    }
+  }
+  closeMenus()
+}
+
 onMounted(() => {
   refreshList()
-  loadDisplayPrefs()
+  // 落盘偏好的读取已在 setup 阶段发起（见 prefsReady），这里不再重复读
   unbindImportProgress = window.printpress.onImportProgress((p) => {
     importProgress.value = p
   })
+  document.addEventListener('mousedown', onDocMouseDown, true)
+  document.addEventListener('keydown', onDocKey)
+  window.addEventListener('scroll', onViewportChange, true)
+  window.addEventListener('resize', onViewportChange)
 })
 
 onBeforeUnmount(() => {
   if (unbindImportProgress) unbindImportProgress()
+  document.removeEventListener('mousedown', onDocMouseDown, true)
+  document.removeEventListener('keydown', onDocKey)
+  window.removeEventListener('scroll', onViewportChange, true)
+  window.removeEventListener('resize', onViewportChange)
 })
 
 // ---- 去补录直达：打印中心校验弹窗点「第 N 行」→ 跳页、滚动到该格、直接进入编辑 ----
@@ -426,6 +600,9 @@ let flashTimer = null
 watch(() => cellNav.req, async (req) => {
   if (!req) return
   try {
+    // 隐藏状态来自落盘，必须先读到再判断「目标列是不是被藏了」——
+    // 读盘是 setup 阶段发起的，这里等它落地（详见 prefsReady）
+    await prefsReady
     if (activeId.value !== req.datasetId || !detail.value) {
       await selectDataset(req.datasetId)
     }
@@ -433,6 +610,11 @@ watch(() => cellNav.req, async (req) => {
     if (!detail.value.columns.some((c) => c.key === req.key) || !detail.value.rows[req.rowIndex]) {
       errorMsg.value = '该单元格不存在（数据可能已变动），请重新校验'
       return
+    }
+    // 目标列被隐藏时必须先展开：否则跳过来只看到一片空白，
+    // 用户会以为「跳错了」，而不是「这列被我藏起来了」
+    if (hiddenSet.value.has(req.key)) {
+      applyHidden([...hiddenSet.value].filter((k) => k !== req.key))
     }
     page.value = Math.floor(req.rowIndex / PAGE_SIZE)
     await nextTick()
@@ -542,11 +724,19 @@ watch(() => cellNav.req, async (req) => {
 
         <h3 class="section-title">
           数据表格（点击单元格即可修改）
-          <span class="grid-meta">{{ detail.rows.length }} 行 · 列头点名字改名，「印」按钮控制字段是否进入模板设计页</span>
+          <span class="grid-meta">{{ detail.rows.length }} 行 · 列头点名字改名，「印」控制字段是否进入模板设计页，「▾」控制这一列显示不显示</span>
         </h3>
         <div class="grid-toolbar">
           <span class="tb-hint">空值打印时留空，补齐后再打印即可通过校验</span>
           <span class="tb-spacer"></span>
+          <button
+            v-if="hiddenCount"
+            class="hidden-pill"
+            data-menu-trigger
+            :class="{ on: listMenu }"
+            title="点开可勾选要显示哪些列"
+            @click="openListMenu($event)"
+          >已隐藏 {{ hiddenCount }} 列 ▾</button>
           <div class="size-group" role="group" aria-label="表格字号">
             <span class="size-label">字号</span>
             <button
@@ -564,7 +754,7 @@ watch(() => cellNav.req, async (req) => {
             <thead>
               <tr>
                 <th class="rownum-col">#</th>
-                <th v-for="col in columns" :key="col.key" class="col-head">
+                <th v-for="col in visibleColumns" :key="col.key" class="col-head">
                   <template v-if="editingKey === col.key">
                     <input
                       v-model="editingAlias"
@@ -582,6 +772,13 @@ watch(() => cellNav.req, async (req) => {
                     :title="isPrintOn(col) ? '已启用打印：点击取消启用' : '未启用：点击启用打印（字段将出现在模板设计页）'"
                     @click.stop="togglePrint(col)"
                   >印</button>
+                  <button
+                    class="col-menu-btn"
+                    data-menu-trigger
+                    :class="{ on: colMenu && colMenu.key === col.key }"
+                    title="显示 / 隐藏这一列"
+                    @click.stop="openColMenu(col, $event)"
+                  >▾</button>
                 </th>
                 <th class="op-col">操作</th>
               </tr>
@@ -590,7 +787,7 @@ watch(() => cellNav.req, async (req) => {
               <tr v-for="(row, idx) in pagedRows" :key="pageStart + idx">
                 <td class="rownum-col">{{ pageStart + idx + 1 }}</td>
                 <td
-                  v-for="col in columns"
+                  v-for="col in visibleColumns"
                   :key="col.key"
                   class="cell"
                   :class="{
@@ -708,6 +905,52 @@ watch(() => cellNav.req, async (req) => {
       @confirm="onConfirmConfirmed"
       @cancel="pendingConfirm = null"
     />
+
+    <!-- 列显隐菜单：Teleport 到 body —— th 上有 overflow:hidden，留在表头里会被裁掉 -->
+    <Teleport to="body">
+      <div
+        v-if="colMenu && menuCol"
+        ref="colMenuEl"
+        class="col-menu"
+        :style="{ left: colMenu.x + 'px', top: colMenu.y + 'px' }"
+      >
+        <button
+          class="cm-item"
+          :disabled="!canHideMoreCols"
+          :title="canHideMoreCols ? '' : '至少要保留一列'"
+          @click="hideColumn(menuCol)"
+        >隐藏此列</button>
+        <button
+          class="cm-item"
+          :disabled="columns.length < 2"
+          @click="showOnlyColumn(menuCol)"
+        >只看此列</button>
+        <button v-if="hiddenCount" class="cm-item" @click="restoreColumns">
+          恢复全部隐藏的列（{{ hiddenCount }}）
+        </button>
+        <div class="cm-hint">仅隐藏显示，不影响「印」与打印</div>
+      </div>
+
+      <div
+        v-if="listMenu"
+        ref="listMenuEl"
+        class="col-menu list-menu"
+        :style="{ left: listMenu.x + 'px', top: listMenu.y + 'px' }"
+      >
+        <div class="cm-title">显示哪些列（取消勾选即隐藏）</div>
+        <label v-for="col in columns" :key="col.key" class="cm-check">
+          <input
+            type="checkbox"
+            :checked="!hiddenSet.has(col.key)"
+            :disabled="!hiddenSet.has(col.key) && !canHideMoreCols"
+            @change="toggleColumnVisible(col)"
+          />
+          <span class="cm-check-label" :title="col.alias">{{ col.alias }}</span>
+          <span v-if="isPrintOn(col)" class="cm-print-flag" title="该列已激活打印字段">印</span>
+        </label>
+        <button class="cm-item cm-restore" :disabled="!hiddenCount" @click="restoreColumns">全部显示</button>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -1272,9 +1515,18 @@ watch(() => cellNav.req, async (req) => {
   font-size: 11px;
 }
 
-/* ---- 列级打印开关 ---- */
+/* ---- 列级打印开关 + 列显隐 ---- */
 .col-head { white-space: nowrap; }
-.th-alias { margin-right: 6px; }
+/* 列名必须出省略号：th 有 max-width + overflow:hidden，名字一长就会把后面的
+   「印」和「▾」挤出可视区，两个开关都点不到 */
+.th-alias {
+  display: inline-block;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  margin-right: 6px;
+}
 
 .print-toggle {
   padding: 1px 7px;
@@ -1296,6 +1548,99 @@ watch(() => cellNav.req, async (req) => {
   opacity: 1;
   font-weight: 600;
 }
+
+/* 列头「▾」：默认隐身，hover 才现——列头已有「改名 / 印」两个热区，
+   第三个只该在需要时出现。opacity 而非 display，避免 hover 时列宽抖动 */
+.col-menu-btn {
+  margin-left: 2px;
+  padding: 0 3px;
+  border: none;
+  background: transparent;
+  color: var(--stone);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+.col-head:hover .col-menu-btn,
+.col-menu-btn.on,
+.col-menu-btn:focus-visible { opacity: 0.75; }
+.col-menu-btn:hover { color: var(--cinnabar); opacity: 1; }
+
+/* 工具栏的回头路：只在真有隐藏列时出现，是用户唯一的「找回列」入口 */
+.hidden-pill {
+  padding: 4px 10px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 12px;
+  background: var(--cinnabar-soft);
+  color: var(--cinnabar);
+  font-size: 12px;
+}
+.hidden-pill:hover { background: var(--cinnabar); color: #fff; }
+
+/* 浮层菜单（Teleport 到 body）：th 的 overflow:hidden 会裁掉留在表头里的浮层 */
+.col-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--paper-card);
+  box-shadow: var(--shadow);
+}
+.cm-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+}
+.cm-item:hover:not(:disabled) { background: var(--cinnabar-soft); color: var(--cinnabar); }
+.cm-item:disabled { color: var(--stone); cursor: default; }
+.cm-hint {
+  margin-top: 4px;
+  padding: 6px 10px 4px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--stone);
+}
+.list-menu { max-height: 320px; overflow-y: auto; }
+.cm-title { padding: 6px 10px 4px; font-size: 11px; color: var(--stone); }
+.cm-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.cm-check:hover { background: var(--cinnabar-soft); }
+.cm-check-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 在菜单里就标出哪些列已激活「印」：免得用户为了看一眼又得关掉菜单 */
+.cm-print-flag {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--cinnabar);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.cm-restore { margin-top: 4px; }
 
 .row-del {
   padding: 1px 7px;
