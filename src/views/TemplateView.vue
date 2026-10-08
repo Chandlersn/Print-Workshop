@@ -11,34 +11,26 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { evenRow, anchorRatio } from '../lib/field-layout.cjs'
+import {
+  resolveLayoutMode, resolveItemSpec, computeGridInfo, buildGridCells,
+  computeBgRatioWarn, clampPageDim, clampItemDim, ptToPx as ptToPxOf,
+} from '../lib/template-layout.cjs'
+import {
+  clampPct, snapTo, snapshotOf, parseSnapshot, pushCapped,
+  shouldStartNewNudge, alignedX, alignedY,
+} from '../lib/field-edit.cjs'
 
 const CANVAS_W = 760 // 画布显示宽度 px
-const SNAP_PX = 6    // 吸附阈值（像素，源项目同值）
 
 // ---- 多联版式 ----
 // 语义：多联模式下底图代表「单个成品图」，画布切换为**单个成品**尺寸——
 // 小成品（如 1 寸照）在整页缩放下只有几十像素，根本没法拖字段。
 // 因此画布的定位参照系天然就是「格子」，拖拽/吸附/对齐逻辑无需改动。
 const ITEM_SIZE_PRESETS = ref([])
-const layoutMode = computed(() => {
-  const m = activeTpl.value?.layout?.mode
-  return m === 'grid' || m === 'fold' ? m : 'single'
-})
+const layoutMode = computed(() => resolveLayoutMode(activeTpl.value))
 
 /** 设计参照物尺寸：多联 = 单个成品；对折桌牌 = 半页成品；单页 = 整张纸 */
-const itemSpec = computed(() => {
-  const t = activeTpl.value
-  if (!t) return { w: 210, h: 297 }
-  if (layoutMode.value === 'grid') {
-    const w = Number(t.layout?.itemW) || 0
-    const h = Number(t.layout?.itemH) || 0
-    return { w: w > 0 ? w : 85, h: h > 0 ? h : 54 }
-  }
-  if (layoutMode.value === 'fold') {
-    return { w: t.pageSize.w, h: t.pageSize.h / 2 }
-  }
-  return { w: t.pageSize.w, h: t.pageSize.h }
-})
+const itemSpec = computed(() => resolveItemSpec(activeTpl.value))
 
 /**
  * 版式摘要（仅用于界面提示；行列的权威计算在主进程 resolveLayout）。
@@ -47,9 +39,7 @@ const itemSpec = computed(() => {
 const gridInfo = computed(() => {
   const t = activeTpl.value
   if (!t || layoutMode.value !== 'grid') return null
-  const cols = Math.floor(t.pageSize.w / itemSpec.value.w)
-  const rows = Math.floor(t.pageSize.h / itemSpec.value.h)
-  return { cols, rows, perPage: cols * rows, ok: cols >= 1 && rows >= 1 && cols * rows >= 2 }
+  return computeGridInfo(t.pageSize, itemSpec.value)
 })
 
 const layoutOptions = [
@@ -78,28 +68,7 @@ const foldInfo = computed(() => {
 const gridCells = computed(() => {
   const t = activeTpl.value
   if (!t || !isGrid.value) return []
-  const iw = itemSpec.value.w
-  const ih = itemSpec.value.h
-  const cols = Math.max(1, Math.floor(t.pageSize.w / iw))
-  const rows = Math.max(1, Math.floor(t.pageSize.h / ih))
-  if (cols * rows < 2) return []
-  const offX = (t.pageSize.w - cols * iw) / 2
-  const offY = (t.pageSize.h - rows * ih) / 2
-  const w = (iw / t.pageSize.w) * 100
-  const h = (ih / t.pageSize.h) * 100
-  const out = []
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      out.push({
-        k: r * cols + c,
-        left: ((offX + c * iw) / t.pageSize.w) * 100,
-        top: ((offY + r * ih) / t.pageSize.h) * 100,
-        w,
-        h,
-      })
-    }
-  }
-  return out
+  return buildGridCells(t.pageSize, itemSpec.value)
 })
 
 /** 当前拖拽所在的格子（吸附辅助线画在这一格里；所有格子内容相同） */
@@ -159,9 +128,8 @@ function onItemSizeChange(id) {
 function onItemDim(which, val) {
   const t = activeTpl.value
   if (!t) return
-  const n = Number(val)
-  if (!Number.isFinite(n) || n <= 0) return
-  const clamped = Math.min(500, Math.max(5, Math.round(n)))
+  const clamped = clampItemDim(val)
+  if (clamped === null) return
   ensureLayout()
   if (which === 'w') t.layout.itemW = clamped
   else t.layout.itemH = clamped
@@ -258,12 +226,7 @@ const bgUrl = computed(() =>
 const bgRatioWarn = computed(() => {
   const t = activeTpl.value
   if (!t || !t.bgSize) return ''
-  const { w, h } = itemSpec.value
-  const diff = Math.abs(t.bgSize.width / t.bgSize.height - w / h) / (w / h)
-  const target = layoutMode.value === 'grid'
-    ? '成品尺寸'
-    : (layoutMode.value === 'fold' ? '半页成品' : '纸张')
-  return diff > 0.02 ? `底图比例与${target}相差约 ${(diff * 100).toFixed(1)}%，打印时可能变形` : ''
+  return computeBgRatioWarn(t.bgSize, itemSpec.value, layoutMode.value)
 })
 
 // 画布始终按**整张纸**缩放：多联时页面上要画出 M 列 × N 行格子，
@@ -277,8 +240,7 @@ const canvasH = computed(() => {
 function ptToPx(pt) {
   const t = activeTpl.value
   if (!t) return pt
-  const pxPerMm = CANVAS_W / t.pageSize.w
-  return (pt * 25.4) / 72 * pxPerMm
+  return ptToPxOf(pt, t.pageSize.w, CANVAS_W)
 }
 
 async function refreshLists() {
@@ -386,7 +348,7 @@ function onPageSizeChange(id) {
 function onPageDim(which, val) {
   const t = activeTpl.value
   if (!t) return
-  const n = Math.min(2000, Math.max(10, Math.round(Number(val) || 0)))
+  const n = clampPageDim(val)
   t.pageSize = {
     id: 'custom',
     w: which === 'w' ? n : Number(t.pageSize?.w) || 210,
@@ -578,35 +540,22 @@ function onPaste(e) {
   }
 }
 
-// ---- 撤销 / 重做：字段布局快照栈（上限 50 条） ----
-/**
- * 撤销栈快照。必须含 layout：成品尺寸、裁切线也是模板的一部分，
- * 只快照 fields 的话，误改尺寸后按撤销救不回来（字段没变，去重还会把它挡掉）。
- *
- * 底图**故意不进快照**：换图 / 删图都会把旧图文件真正删掉（见 removeBackground），
- * 撤销回来只会得到一张加载失败的破图。误删重传一次就行，比留一堆孤儿图划算。
- */
-function snapshotFields() {
-  const t = activeTpl.value
-  return JSON.stringify(t ? { fields: t.fields, layout: t.layout || null } : { fields: [] })
-}
-
+// ---- 撤销 / 重做：字段布局快照栈（纯逻辑在 src/lib/field-edit.cjs） ----
+// 快照必须含 layout（成品尺寸、裁切线也是模板的一部分）；底图**故意不进快照**——
+// 换图 / 删图都会把旧图文件真正删掉，撤销回来只会是张破图。理由详见 field-edit.cjs。
 function pushUndo() {
   if (!activeTpl.value) return
-  const snap = snapshotFields()
-  // 去重：连续触发（focus/pointerdown 叠加）且状态未变时不重复入栈
-  if (undoStack.value.length && undoStack.value[undoStack.value.length - 1] === snap) return
-  undoStack.value.push(snap)
-  if (undoStack.value.length > 50) undoStack.value.shift()
+  const snap = snapshotOf(activeTpl.value)
+  // 去重与封顶：连续触发（focus/pointerdown 叠加）且状态未变时不重复入栈
+  if (!pushCapped(undoStack.value, snap)) return
   redoStack.value = []
 }
 
 function restoreSnapshot(json) {
   if (!activeTpl.value) return
-  const snap = JSON.parse(json)
-  // 兼容早期只存fields 数组的快照
-  activeTpl.value.fields = Array.isArray(snap) ? snap : snap.fields
-  if (!Array.isArray(snap) && snap.layout) activeTpl.value.layout = snap.layout
+  const { fields, layout } = parseSnapshot(json)
+  activeTpl.value.fields = fields
+  if (layout) activeTpl.value.layout = layout
   if (selectedIdx.value >= activeTpl.value.fields.length) {
     selectedIdx.value = activeTpl.value.fields.length - 1
   }
@@ -617,13 +566,13 @@ function restoreSnapshot(json) {
 
 function undo() {
   if (!undoStack.value.length) return
-  redoStack.value.push(snapshotFields())
+  redoStack.value.push(snapshotOf(activeTpl.value))
   restoreSnapshot(undoStack.value.pop())
 }
 
 function redo() {
   if (!redoStack.value.length) return
-  undoStack.value.push(snapshotFields())
+  undoStack.value.push(snapshotOf(activeTpl.value))
   restoreSnapshot(redoStack.value.pop())
 }
 
@@ -756,20 +705,6 @@ function onFieldPointerDown(e, idx) {
   window.addEventListener('pointerup', onPointerUp)
 }
 
-/** 吸附：自身盒子左/中/右（上/中/下）靠近目标线 6px 内则吸附，返回 [值, 线位置] */
-function snap(valueEdges, targets) {
-  let best = null
-  for (const [offset, label] of valueEdges) {
-    for (const t of targets) {
-      const diff = Math.abs(offset - t)
-      if (diff <= SNAP_PX && (!best || diff < best.diff)) {
-        best = { diff, adjust: t - offset, line: t }
-      }
-    }
-  }
-  return best
-}
-
 function onPointerMove(e) {
   if (!dragState.value || !canvasEl.value) return
   const d = dragState.value
@@ -786,16 +721,16 @@ function onPointerMove(e) {
   const pxX = (v) => (v / 100) * d.rect.width
   const pxY = (v) => (v / 100) * d.rect.height
   const off = d.ratio * d.boxW
-  const snapV = snap(
-    [[pxX(clamp(rawX)) - off, 'l'], [pxX(clamp(rawX)) - off + d.boxW / 2, 'c'], [pxX(clamp(rawX)) - off + d.boxW, 'r']],
+  const snapV = snapTo(
+    [[pxX(clampPct(rawX)) - off, 'l'], [pxX(clampPct(rawX)) - off + d.boxW / 2, 'c'], [pxX(clampPct(rawX)) - off + d.boxW, 'r']],
     d.targetsV,
   )
-  const snapH = snap(
-    [[pxY(clamp(rawY)), 't'], [pxY(clamp(rawY)) + d.boxH / 2, 'm'], [pxY(clamp(rawY)) + d.boxH, 'b']],
+  const snapH = snapTo(
+    [[pxY(clampPct(rawY)), 't'], [pxY(clampPct(rawY)) + d.boxH / 2, 'm'], [pxY(clampPct(rawY)) + d.boxH, 'b']],
     d.targetsH,
   )
-  f.x = snapV ? clamp(rawX + (snapV.adjust / d.rect.width) * 100) : clamp(rawX)
-  f.y = snapH ? clamp(rawY + (snapH.adjust / d.rect.height) * 100) : clamp(rawY)
+  f.x = snapV ? clampPct(rawX + (snapV.adjust / d.rect.width) * 100) : clampPct(rawX)
+  f.y = snapH ? clampPct(rawY + (snapH.adjust / d.rect.height) * 100) : clampPct(rawY)
 
   // 多选：全体成员跟随同一位移（用的是已吸附的主字段位置，整组不再撕裂）
   if (d.starts.length > 1) {
@@ -804,8 +739,8 @@ function onPointerMove(e) {
     for (const s of d.starts) {
       if (s.i === d.idx) continue
       const m = activeTpl.value.fields[s.i]
-      m.x = clamp(s.x + dx)
-      m.y = clamp(s.y + dy)
+      m.x = clampPct(s.x + dx)
+      m.y = clampPct(s.y + dy)
     }
   }
 
@@ -843,35 +778,26 @@ function alignSelected(kind) {
   pushUndo()
   const boxes = measureSelected()
   if (!boxes.length) return
-  const minLeft = Math.min(...boxes.map((b) => b.left))
-  const maxRight = Math.max(...boxes.map((b) => b.left + b.w))
-  const minTop = Math.min(...boxes.map((b) => b.top))
-  const maxBottom = Math.max(...boxes.map((b) => b.top + b.h))
+  const bounds = {
+    minLeft: Math.min(...boxes.map((b) => b.left)),
+    maxRight: Math.max(...boxes.map((b) => b.left + b.w)),
+    minTop: Math.min(...boxes.map((b) => b.top)),
+    maxBottom: Math.max(...boxes.map((b) => b.top + b.h)),
+  }
   // 换算基准同样用参照格，保证多联下对齐结果是「格内坐标」
   const refRect = refFrameEl().getBoundingClientRect()
   const W = refRect.width
   const H = refRect.height
   for (const b of boxes) {
     const f = activeTpl.value.fields[b.i]
-    // 对齐目标是一个像素位置，f.x、f.y 是锚点，写入前必须换算。
-    //
-    // 推导（x 轴）：画布 fieldStyle 会按 anchorRatio 加 translateX(-r×盒宽)，
-    //   盒左缘 = 锚点px − r×盒宽，盒中心 = 盒左缘 + 盒宽/2 = 锚点px + (0.5 − r)×盒宽。
-    // center-h 要「盒中心落在 targetCenter」，故：
-    //   锚点px = targetCenter − (0.5 − r)×盒宽
-    // 验证三种对齐方式：r=0.5(center) → 锚点=target（锚点本就在盒中心）；
-    //                   r=0(left)    → 锚点=target−半个盒宽（盒中心才在 target）；
-    //                   r=1(right)   → 锚点=target+半个盒宽。
-    // 漏掉换算（直接写 target）会让非居中字段整体偏 (0.5−r)×盒宽，
-    // 之后拖动时吸附起点随之错位——表现为「辅助线不灵敏、拖半天对不齐」。
+    // 对齐目标是一个像素位置，f.x、f.y 是锚点，写入前必须换算——
+    // 漏掉换算会让非居中字段整体偏 (0.5−r)×盒宽，之后吸附起点随之错位
+    // （表现为「辅助线不灵敏、拖半天对不齐」）。推导见 lib/field-edit.cjs 的 alignedX/alignedY。
     const r = anchorRatio(f)
-    if (kind === 'left') f.x = clamp(((minLeft + r * b.w) / W) * 100)
-    if (kind === 'center-h') f.x = clamp((((minLeft + maxRight) / 2 + (r - 0.5) * b.w) / W) * 100)
-    if (kind === 'right') f.x = clamp(((maxRight - (1 - r) * b.w) / W) * 100)
-    // y 轴锚点恒在盒中心（与 align 无关），故 top/bottom 用盒边缘、center-v 减半个盒高
-    if (kind === 'top') f.y = clamp((minTop / H) * 100)
-    if (kind === 'center-v') f.y = clamp((((minTop + maxBottom) / 2 - b.h / 2) / H) * 100)
-    if (kind === 'bottom') f.y = clamp(((maxBottom - b.h) / H) * 100)
+    const nx = alignedX(kind, b, bounds, W, r)
+    if (nx !== null) f.x = nx
+    const ny = alignedY(kind, b, bounds, H)
+    if (ny !== null) f.y = ny
   }
 }
 
@@ -899,17 +825,16 @@ function applyEvenRow() {
 /**
  * 连续键盘微调只记一次撤销。
  *
- * 原来每次 keydown 都pushUndo，而 clamp 保留 1 位小数故每步都是唯一值，
+ * 原来每次 keydown 都 pushUndo，而 clamp 保留 1 位小数故每步都是唯一值，
  * 去重永远不命中——按住方向键 1.3 秒就把 50 级撤销栈冲光，
  * 之后想退回改动前就只剩「重新做一遍」。
- * 合并口径：距上次微调超过 800ms 才算新的一段操作。
+ * 合并口径见 lib/field-edit.cjs 的 shouldStartNewNudge（距上次超过 800ms 才算新一段操作）。
  */
-const NUDGE_MERGE_MS = 800
 let lastNudgeAt = 0
 
 function pushUndoForNudge() {
   const now = Date.now()
-  if (now - lastNudgeAt > NUDGE_MERGE_MS) pushUndo()
+  if (shouldStartNewNudge(now, lastNudgeAt)) pushUndo()
   lastNudgeAt = now
 }
 
@@ -951,13 +876,9 @@ function onKeydown(e) {
   for (const i of targets) {
     const f = activeTpl.value.fields[i]
     if (!f) continue
-    f.x = clamp(f.x + dx)
-    f.y = clamp(f.y + dy)
+    f.x = clampPct(f.x + dx)
+    f.y = clampPct(f.y + dy)
   }
-}
-
-function clamp(v) {
-  return Math.min(100, Math.max(0, Math.round(v * 10) / 10))
 }
 
 async function saveTemplate() {

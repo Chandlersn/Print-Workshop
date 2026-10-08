@@ -33,6 +33,9 @@ const src = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf-8')
 const printView = () => src('src/views/PrintCenterView.vue')
 const tplView = () => src('src/views/TemplateView.vue')
 const dsView = () => src('src/views/DatasetView.vue')
+// 从 TemplateView 抽出的纯逻辑落点（画布几何 / 字段编辑数学）
+const tplLayoutLib = () => src('src/lib/template-layout.cjs')
+const fieldEditLib = () => src('src/lib/field-edit.cjs')
 
 function makeDataset(rows) {
   const fp = path.join(TMP, `名册${Math.random().toString(36).slice(2, 7)}.csv`)
@@ -141,29 +144,32 @@ console.log('== 4. 前端静态核查：模板画布与数据页 ==')
   const tv = tplView()
   // P1-9 吸附顺序：吸附检测必须在多选成员摆位之前
   const pm = tv.slice(tv.indexOf('function onPointerMove'), tv.indexOf('function onPointerUp'))
-  const snapIdx = pm.indexOf('const snapV = snap(')
+  const snapIdx = pm.indexOf('const snapV = snapTo(')
   const followIdx = pm.indexOf('d.starts.length > 1')
   ok(snapIdx > 0 && followIdx > 0, 'onPointerMove 含吸附与多选跟随')
   ok(snapIdx < followIdx, '吸附检测在多选跟随之前（否则整组撕裂一帧）')
   const assignIdx = pm.indexOf('f.x = snapV ?')
   ok(assignIdx > 0 && assignIdx < followIdx, '主字段先落到吸附后的最终值，再统一算位移')
 
-  // P1-10 清空尺寸不被静默锁死
+  // P1-10 清空尺寸不被静默锁死（钳位与「不写回」都在 lib/template-layout.cjs）
   const dim = tv.slice(tv.indexOf('function onItemDim'), tv.indexOf('function onCutMarks'))
-  ok(/!Number\.isFinite\(n\)|n <= 0/.test(dim), '空值/非法值不写回（不被钳成 5mm）')
+  ok(/clampItemDim\(val\)/.test(dim) && /clamped === null\) return/.test(dim),
+    'onItemDim 交给 clampItemDim，空值/非法值不写回（不被钳成 5mm）')
   ok(!/Number\(val\) \|\| 0/.test(dim), '不再用 Number(val)||0 把空值变成 0')
+  ok(/n <= 0\) return null/.test(tplLayoutLib()), 'clampItemDim 对 ≤0 返回 null（不写回语义）')
 
-  // 撤销栈须含 layout
-  ok(/layout: t\.layout/.test(tv), '撤销快照含 layout（尺寸改错也能撤销）')
-  ok(/snap\.layout/.test(tv), 'restoreSnapshot 恢复 layout')
-  ok(/Array\.isArray\(snap\)/.test(tv), '兼容早期只存 fields 的快照')
+  // 撤销栈须含 layout（快照逻辑抽到 lib/field-edit.cjs）
+  const fe = fieldEditLib()
+  ok(/snapshotOf/.test(tv) && /layout: tpl\.layout \|\| null/.test(fe), '撤销快照含 layout（尺寸改错也能撤销）')
+  ok(/parseSnapshot/.test(tv) && /layout: snap\.layout \|\| null/.test(fe), 'restoreSnapshot 恢复 layout')
+  ok(/Array\.isArray\(snap\)/.test(fe), '兼容早期只存 fields 的快照')
 
   // P1-14 模态守卫 + P1-15 合并撤销
-  const kd = tv.slice(tv.indexOf('function onKeydown'), tv.indexOf('function clamp'))
+  const kd = tv.slice(tv.indexOf('function onKeydown'), tv.indexOf('async function saveTemplate'))
   ok(/pendingConfirm\.value\) return/.test(kd), '模态开着时不响应全局快捷键')
   ok(!/pendingConfirm[\s\S]{0,80}onKeydown/.test(kd.split('const pendingConfirm')[0] || ''), '守卫在函数前部而非末尾')
   ok(/pushUndoForNudge/.test(kd), '方向键走合并撤销入口')
-  ok(/NUDGE_MERGE_MS\s*=\s*800/.test(tv), '合并窗口已定义（按住 1.3s 不冲光 50 级栈）')
+  ok(/NUDGE_MERGE_MS\s*=\s*800/.test(fe), '合并窗口已定义（按住 1.3s 不冲光 50 级栈）')
   ok(!/e\.preventDefault\(\)\s*\n\s*pushUndo\(\)/.test(kd), '方向键不再每次按键都 pushUndo')
 
   // P1-11 跳转请求一次性
@@ -208,42 +214,52 @@ console.log('== 7. 多选对齐必须把「盒边缘」换算回「锚点」 =='
   const body = tv.slice(tv.indexOf('function alignSelected'), tv.indexOf('// ---- 一键布局'))
   ok(body.length > 0, '定位到 alignSelected 函数体')
 
-  // 每个对齐分支的正确口径。注意 x 轴要按 anchorRatio 换算，y 轴锚点恒在盒中心（与 align 无关）
+  // 换算逻辑已抽到 lib/field-edit.cjs：视图层只做「测量 → 交给纯函数 → 写回」
+  const feLib = fieldEditLib()
+  ok(/alignedX\(kind, b, bounds, W, r\)/.test(body), 'alignSelected 的 x 轴交给 alignedX')
+  ok(/alignedY\(kind, b, bounds, H\)/.test(body), 'alignSelected 的 y 轴交给 alignedY')
+  ok(/minLeft: Math\.min/.test(body) && /maxRight: Math\.max/.test(body)
+    && /minTop: Math\.min/.test(body) && /maxBottom: Math\.max/.test(body),
+    '包围盒四边在视图层测出后传入')
+  ok(/const r = anchorRatio\(f\)/.test(body), 'anchorRatio 已导入并使用')
+
+  // 每个对齐分支的正确口径（现在住在 lib 里）。注意 x 轴要按 anchorRatio 换算，y 轴锚点恒在盒中心。
   const branches = [
-    ['left', /if \(kind === 'left'\) f\.x = clamp\(\(\(minLeft \+ r \* b\.w\) \/ W\) \* 100\)/],
-    ['center-h', /if \(kind === 'center-h'\) f\.x = clamp\(\(\(\(minLeft \+ maxRight\) \/ 2 \+ \(r - 0\.5\) \* b\.w\) \/ W\) \* 100\)/],
-    ['right', /if \(kind === 'right'\) f\.x = clamp\(\(\(maxRight - \(1 - r\) \* b\.w\) \/ W\) \* 100\)/],
-    ['top', /if \(kind === 'top'\) f\.y = clamp\(\(minTop \/ H\) \* 100\)/],
-    ['center-v', /if \(kind === 'center-v'\) f\.y = clamp\(\(\(\(minTop \+ maxBottom\) \/ 2 - b\.h \/ 2\) \/ H\) \* 100\)/],
-    ['bottom', /if \(kind === 'bottom'\) f\.y = clamp\(\(\(maxBottom - b\.h\) \/ H\) \* 100\)/],
+    ['left', /if \(kind === 'left'\) return clampPct\(\(\(bounds\.minLeft \+ r \* box\.w\) \/ W\) \* 100\)/],
+    ['center-h', /if \(kind === 'center-h'\) return clampPct\(\(\(\(bounds\.minLeft \+ bounds\.maxRight\) \/ 2 \+ \(r - 0\.5\) \* box\.w\) \/ W\) \* 100\)/],
+    ['right', /if \(kind === 'right'\) return clampPct\(\(\(bounds\.maxRight - \(1 - r\) \* box\.w\) \/ W\) \* 100\)/],
+    ['top', /if \(kind === 'top'\) return clampPct\(\(bounds\.minTop \/ H\) \* 100\)/],
+    ['center-v', /if \(kind === 'center-v'\) return clampPct\(\(\(\(bounds\.minTop \+ bounds\.maxBottom\) \/ 2 - box\.h \/ 2\) \/ H\) \* 100\)/],
+    ['bottom', /if \(kind === 'bottom'\) return clampPct\(\(\(bounds\.maxBottom - box\.h\) \/ H\) \* 100\)/],
   ]
   for (const [kind, re] of branches) {
-    ok(re.test(body), `alignSelected 的 ${kind} 分支坐标换算正确`)
+    ok(re.test(feLib), `field-edit 的 ${kind} 分支坐标换算正确`)
   }
   // 关键回归点：center 不得把盒中心裸当锚点（那会让居中字段偏半个盒宽）
-  ok(!/center-h'\) f\.x = clamp\(\(\(\(minLeft \+ maxRight\) \/ 2\) \/ W\)/.test(body),
+  ok(!/center-h'\) return clampPct\(\(\(\(bounds\.minLeft \+ bounds\.maxRight\) \/ 2\) \/ W\)/.test(feLib),
     'center-h 没有把盒中心裸当锚点写入（这正是偏移的根因）')
-  ok(/const r = anchorRatio\(f\)/.test(body), 'anchorRatio 已导入并使用')
 
   // 口径自证：center-h 的语义是「盒中心落在包围盒中心」。
   // 渲染关系：盒左缘 = 锚点px − r×盒宽 ⇒ 盒中心 = 锚点px + (0.5 − r)×盒宽。
   // 故要盒中心 = target，锚点px 必须 = target − (0.5 − r)×盒宽。
-  // 下面用「代入真实公式 → 按渲染关系回推盒中心」验证，两边独立算，避免自证循环。
+  // 用**真实函数** alignedX 代入 → 按渲染关系回推盒中心，两边独立算，避免自证循环。
   const { anchorRatio } = require('../src/lib/field-layout.cjs')
+  const { alignedX } = require('../src/lib/field-edit.cjs')
   const W = 1000
   const boxW = 120
   const minLeft = 400
   const maxRight = 760
   const targetCenter = (minLeft + maxRight) / 2 // 580
   const centerFromAnchor = (anchorPx, r) => anchorPx - r * boxW + boxW / 2
+  const bounds = { minLeft, maxRight, minTop: 0, maxBottom: 100 }
   {
-    // 新公式（与 TemplateView.vue 保持一致）
+    // 真实函数（lib/field-edit.alignedX）算出的锚点，按渲染关系回推盒中心
     for (const align of ['left', 'center', 'right']) {
       const r = anchorRatio({ align })
-      const xPct = ((targetCenter + (r - 0.5) * boxW) / W) * 100
+      const xPct = alignedX('center-h', { w: boxW }, bounds, W, r)
       const landed = centerFromAnchor((xPct / 100) * W, r)
       ok(Math.abs(landed - targetCenter) < 1e-9,
-      `center-h 换算后 align=${align} 的盒中心落在 ${targetCenter}px（实得 ${landed}px）`)
+      `center-h（真实函数）换算后 align=${align} 的盒中心落在 ${targetCenter}px（实得 ${landed}px）`)
     }
   }
   {

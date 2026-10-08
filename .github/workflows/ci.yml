@@ -1,0 +1,44 @@
+name: CI
+
+# 每次推 main 或开 PR 都跑：领域层 24 套件 + 端到端。
+# 这是「不靠个人纪律」的第一道闸——在干净机器上回答「能不能构建、测试过不过」。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 领域层测试（24 套件）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 领域层测试（npm test）
+        run: npm test
+
+  e2e:
+    name: 端到端（120 人真实 printToPDF）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 构建前端（e2e 走 loadFile(dist/index.html)）
+        run: npm run build
+      - name: 端到端（npm run test:e2e）
+        run: npm run test:e2e

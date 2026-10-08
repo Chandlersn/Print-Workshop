@@ -1,0 +1,47 @@
+name: Release
+
+# 打 tag（v*）时自动构建并发布——把「PAT + 手刷 CDN + 漏改 latest.json」整类
+# 人工步骤一次性消灭。token 用 Actions 自带的 GITHUB_TOKEN（contents: write），
+# 不再需要 fine-grained PAT，也就不存在「用完忘了撤」的问题。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布安装包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 发版前再跑一遍：防止「测试没绿也发出去」
+      - name: 领域层测试
+        run: npm test
+
+      - name: 构建并打包（NSIS）
+        run: npm run dist
+
+      # release-upload.cjs 自己会核对三处版本号一致 / tag 在位 / 远端大小 == 本地
+      - name: 建 Release 并上传安装包
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release-upload.cjs
+
+      - name: 刷 jsDelivr 缓存（让更新横幅尽快看到新版本）
+        shell: bash
+        run: curl -sS "https://purge.jsdelivr.net/gh/Chandlersn/Print-Workshop@main/latest.json"
