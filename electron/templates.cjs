@@ -254,7 +254,10 @@ function storeBackground(buf, baseName, ext) {
   if (!size) throw new Error('无法识别图片尺寸（支持 PNG / JPEG）')
 
   fs.mkdirSync(BG_DIR, { recursive: true })
-  const fileName = `${Date.now().toString(36)}-${baseName}${ext}`
+  // 文件名前缀必须**唯一**，不能只靠 Date.now()：同一毫秒内连续两次上传会撞名，
+  // 后一张静默覆盖前一张（CI 在快机器上抓到了：本机慢、隔了 >1ms 才一直没暴露）。
+  // 与模板 id 同款做法：时间戳 + 随机段。
+  const fileName = `${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}-${baseName}${ext}`
   fs.writeFileSync(path.join(BG_DIR, fileName), buf)
 
   return {

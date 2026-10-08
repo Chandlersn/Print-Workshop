@@ -220,7 +220,10 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   const a = templates.uploadBackground(ICON)
   const b = templates.uploadBackground(ICON)
   ok(fs.existsSync(abs(a.background)), '上传后图片落盘')
-  ok(a.background !== b.background, '两次上传文件名不同（时间戳前缀，不会互相覆盖）')
+  ok(a.background !== b.background, '两次上传文件名不同（时间戳+随机前缀，不会互相覆盖）')
+  // 只靠 Date.now() 命名会在**同一毫秒内**撞名（快机器 / CI 抓到过：本机慢，隔了 >1ms 才一直没暴露）
+  const many = Array.from({ length: 8 }, () => templates.uploadBackground(ICON).background)
+  ok(new Set(many).size === many.length, '8 次连续上传文件名两两不同（不靠毫秒精度保证唯一）')
 
   templates.saveTemplate({
     name: '底图解耦测试', datasetId: ds.id, pageSize: { w: 210, h: 297 },

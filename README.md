@@ -198,7 +198,7 @@ release/                 安装包与免安装目录（构建产物，不进仓�
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：25 套件，1099 项断言
+npm test                        # 领域层测试：25 套件，1100 项断言
 npm run test:e2e                # 端到端：120 人真实 printToPDF（经启动器摘除破坏性环境变量）
 npm run dist                    # 打 NSIS 安装包（未配证书时自动跳过签名，图标与版本信息正常写入 EXE）
 npm run release:check           # 发版体检：版本号三处一致 + tag 在位 + Release 与资产是否齐（只读）
