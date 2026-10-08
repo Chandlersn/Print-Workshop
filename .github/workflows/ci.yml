@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   test:
-    name: 领域层测试（24 套件）
+    name: 领域层测试
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
