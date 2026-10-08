@@ -598,6 +598,20 @@ console.log('== 9. 列显隐：不许变成「静默改打印」，也不许「�
     '补录跳转在判断「目标列被藏」之前先等读盘落地', { awaitPrefsAt, hiddenCheckAt })
   ok(!/onMounted\(\(\) => \{[\s\S]{0,200}?loadDisplayPrefs\(\)/.test(dv),
     'onMounted 不再重复读一次（晚读会把刚写下去的隐藏状态用旧值盖回来）')
+
+  // 9l. 打印历史的「状态」徽标不许被拆行。
+  // 用户截图：窗口非最大化时，状态列被压到一字宽，「完成」拆成「完」/「成」两行。
+  // 根因：.det-flag 没用 white-space: nowrap，浏览器按 min-content（一字宽）给列宽。
+  // 修法（与所有「st-ok/st-failed/st-canceled」徽标共用）：white-space: nowrap + inline-block。
+  const pcSrc = src('src/views/PrintCenterView.vue')
+  const detFlagBlock = /\.det-flag\s*\{[^}]*\}/.exec(pcSrc)
+  ok(detFlagBlock, '.det-flag 规则存在', detFlagBlock && detFlagBlock[0])
+  ok(detFlagBlock && /white-space\s*:\s*nowrap/.test(detFlagBlock[0]),
+    '.det-flag 设了 white-space: nowrap（关键修复；表格列会按 unbreakable 宽度分配）')
+  ok(detFlagBlock && /display\s*:\s*inline-block/.test(detFlagBlock[0]),
+    '.det-flag 设了 display: inline-block（让 padding/border 可预测，不再被 inline 的基线对齐影响）')
+  ok(!/^\s*\.det-flag\s*{[^}]*white-space\s*:\s*normal/.test('x' + (detFlagBlock && detFlagBlock[0])),
+    '.det-flag 没有把 white-space 写回 normal')
 }
 
 rmDeep(TMP)

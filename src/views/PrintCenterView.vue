@@ -1023,11 +1023,15 @@ onMounted(refreshAll)
 }
 
 .det-flag {
+  display: inline-block;        /* 让 padding/border 生效可预测；inline-block 不会换行成块 */
+  white-space: nowrap;         /* 关键：禁止徽标文本被拆行；
+                                       否则窗口缩小、表格列压到一字宽时，「完成」会拆成「完」/「成」两行 */
   font-size: 12px;
   padding: 1px 8px;
   border-radius: 4px;
   border: 1px solid var(--line-strong);
   color: var(--ink-2);
+  vertical-align: middle;
 }
 
 .st-ok {
