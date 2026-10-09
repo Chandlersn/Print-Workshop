@@ -4,7 +4,8 @@
  * 设计边界（对应「自动化边界三问」）：
  * - 版本「检测/提示」仍由 version-check.cjs 负责（轻量信标，只决定要不要弹横幅）；
  *   本模块只接管「下载 + 安装」这一段——即普通软件那种点了就后台下、下完提示重启的体验。
- * - 主进程在确认有新版本后调用 startUpdate() 触发后台下载（autoDownload 关，手动触发省带宽）；
+ * - 主进程在确认有新版本后调用 startUpdate() 触发后台下载：autoDownload 关着，
+ *   下载由 update-available 事件里显式 downloadUpdate() 触发（否则只会 emit 事件、不下载）；
  *   下载完成弹原生对话框「现在重启 / 稍后」，确认后 quitAndInstall(true,true) 静默安装并重启。
  * - 仅在打包态（app.isPackaged）启用；开发态跳过，避免 dev 下 electron-updater 因无更新源报错。
  * - 更新源：GitHub Release（provider: 'github'）。清单 latest.yml 由 scripts/release-upload.cjs
@@ -54,7 +55,13 @@ function initAutoUpdater() {
   }
 
   autoUpdater.on('error', (e) => warn('更新错误：', e && (e.stack || e.message)))
-  autoUpdater.on('update-available', (info) => log('有可用更新：', info && info.version))
+  autoUpdater.on('update-available', (info) => {
+    log('有可用更新：', info && info.version)
+    // 关键：autoDownload 关着时，checkForUpdates() 只会 emit 本事件、不会下载
+    // （electron-updater: downloadPromise = autoDownload ? downloadUpdate() : null）。
+    // 必须在这里显式触发，否则永远走不到 update-downloaded、也就弹不出「现在重启」。
+    autoUpdater.downloadUpdate().catch((e) => warn('下载失败：', e && e.message))
+  })
   autoUpdater.on('update-not-available', () => log('已是最新'))
   autoUpdater.on('download-progress', (p) => log('下载进度', Math.floor((p && p.percent) || 0), '%'))
   autoUpdater.on('update-downloaded', (info) => {
