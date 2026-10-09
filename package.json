@@ -53,9 +53,6 @@
         "to": "seed"
       }
     ],
-    "electronDownload": {
-      "mirror": "https://npmmirror.com/mirrors/electron/"
-    },
     "win": {
       "target": [
         {
