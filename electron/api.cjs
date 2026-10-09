@@ -428,7 +428,7 @@ const OPS = {
   // 路径版：agent / CLI 没有「弹窗选文件」这一步，直接给路径
   'template:uploadBackground': {
     write: true,
-    params: { filePath: { required: true, desc: '底图文件绝对路径（png / jpg / jpeg / webp）' } },
+    params: { filePath: { required: true, desc: '底图文件绝对路径（png / jpg / jpeg）' } },
     run: (p) => templates.uploadBackground(String(p.filePath)),
   },
 
@@ -440,7 +440,7 @@ const OPS = {
       const result = await ctx.dialog.openFile({
         title: '上传底图',
         properties: ['openFile'],
-        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }],
       })
       if (result.canceled || !result.filePaths.length) return { canceled: true }
       return { canceled: false, ...templates.uploadBackground(result.filePaths[0]) }

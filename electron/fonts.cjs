@@ -13,6 +13,11 @@ const FONT_DIR_SYS = path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts')
 const FONT_DIR_USER = path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'Windows', 'Fonts')
 const UPLOAD_DIR = path.join(process.env.PRINTPRESS_DATA_DIR, 'print-fonts')
 
+/** 与 PDF 中 @font-face 使用同一个 family 名，避免文件名中的 CSS 语法字符造成画布回退字体。 */
+function normalizeFamily(name) {
+  return String(name == null ? '' : name).replace(/['"\\;{}()]/g, '').trim()
+}
+
 // 常用中文字体候选：文件名 → 期望 family 名
 const CANDIDATES = [
   { file: 'simsun.ttc', family: '宋体' },
@@ -90,7 +95,10 @@ function uploadedFonts() {
   if (!fs.existsSync(UPLOAD_DIR)) return []
   return fs.readdirSync(UPLOAD_DIR)
     .filter((f) => FONT_EXTS.has(path.extname(f).toLowerCase()))
-    .map((f) => ({ family: f.replace(/\.[^.]+$/, ''), file: f }))
+    .map((f) => {
+      const family = f.replace(/\.[^.]+$/, '')
+      return { family, cssFamily: normalizeFamily(family), file: f }
+    })
 }
 
 function fontUploadDir() {
@@ -107,7 +115,8 @@ function uploadFont(srcPath) {
   fontUploadDir()
   const dest = path.join(UPLOAD_DIR, base)
   fs.copyFileSync(srcPath, dest)
-  return { family: base.replace(/\.[^.]+$/, ''), file: base }
+  const family = base.replace(/\.[^.]+$/, '')
+  return { family, cssFamily: normalizeFamily(family), file: base }
 }
 
 function deleteFont(fileName) {
@@ -126,4 +135,4 @@ function deleteFont(fileName) {
   return { ok: true }
 }
 
-module.exports = { systemFonts, uploadedFonts, uploadFont, deleteFont, fontUploadDir, FONT_EXTS }
+module.exports = { systemFonts, uploadedFonts, uploadFont, deleteFont, fontUploadDir, FONT_EXTS, normalizeFamily }

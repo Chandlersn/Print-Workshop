@@ -14,7 +14,7 @@ const dataset = require('./dataset.cjs')
 
 const STORE_NAME = 'templates'
 const BG_DIR = path.join(process.env.PRINTPRESS_DATA_DIR, 'print-bg')
-const BG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp'])
+const BG_EXTS = new Set(['.png', '.jpg', '.jpeg'])
 
 const PAGE_SIZES = [
   { id: 'a3-landscape', name: 'A3 横版', w: 420, h: 297 },
@@ -272,7 +272,7 @@ function storeBackground(buf, baseName, ext) {
 function uploadBackground(srcPath) {
   const base = path.basename(srcPath)
   const ext = path.extname(base).toLowerCase()
-  if (!BG_EXTS.has(ext)) throw new Error('仅支持 png / jpg / webp 图片')
+  if (!BG_EXTS.has(ext)) throw new Error('仅支持 PNG / JPEG 图片')
   return storeBackground(fs.readFileSync(srcPath), safeBaseName(base, 'bg'), ext)
 }
 

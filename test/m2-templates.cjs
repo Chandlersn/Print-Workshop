@@ -57,6 +57,8 @@ async function main() {
   assert(bg.background.startsWith('print-bg/'), '底图入 print-bg 目录', bg.background)
   assert(bg.width === 1 && bg.height === 1, '尺寸读取正确', bg)
   assert(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, bg.background)), '文件真实落盘')
+  throws(() => templates.uploadBackground(path.join(process.env.PRINTPRESS_DATA_DIR, 'unsupported.webp')),
+    'WebP 尚不支持时上传入口明确拒绝')
 
   console.log('== 4. 模板 CRUD（须绑定数据集） ==')
   const dataset = require('../electron/dataset.cjs')
@@ -134,6 +136,8 @@ async function main() {
   fs.writeFileSync(fakeFont, 'not-a-real-font')
   const up = fonts.uploadFont(fakeFont)
   assert(up.family === '测试楷体', '上传字体 family=去扩展名', up)
+  assert(up.cssFamily === '测试楷体' && fonts.normalizeFamily("测试'楷体") === '测试楷体',
+    '画布与 PDF 共用规范化的字体名')
   assert(fonts.uploadedFonts().some((f) => f.family === '测试楷体'), '上传清单包含')
 
   const sys = fonts.systemFonts()

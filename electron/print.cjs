@@ -224,11 +224,25 @@ function buildBatchHtml(datasetId, templateId, rows) {
   // 多联：一页装多条记录，页数 ≠ 记录数，必须分开报，否则预览会按记录数撑高
   const layout = renderEngine.resolveLayout(tpl.layout, spec)
   const pageCount = layout.enabled ? Math.ceil(list.length / layout.perPage) : list.length
+  // 底图输出分辨率：交给界面提示「印出来够不够清」。
+  // 成品口径与渲染一致——多联是单格、对折是半页、单页是整张纸。
+  const itemW = layout.enabled ? layout.itemW : spec.w
+  const itemH = layout.enabled ? layout.itemH : spec.h
+  const bgDpi = (tpl.bgSize && tpl.bgSize.width > 0 && tpl.bgSize.height > 0 && itemW > 0 && itemH > 0)
+    ? {
+      // 与模板页一致：取宽、高两轴中较低的有效 dpi，避免拉伸时误报清晰。
+      dpi: Math.min(tpl.bgSize.width / (itemW / 25.4), tpl.bgSize.height / (itemH / 25.4)),
+      width: tpl.bgSize.width,
+      height: tpl.bgSize.height,
+      stretched: Math.abs(tpl.bgSize.width / tpl.bgSize.height - itemW / itemH) / (itemW / itemH) > 0.02,
+    }
+    : null
   return {
     html: renderEngine.buildHtml(tpl, list, { withToolbar: false }),
     snapshotHtml: renderEngine.buildHtml(tpl, list, { withToolbar: true }),
     recordCount: list.length,
     pageCount,
+    bgDpi,
     layout: layout.enabled
       ? (layout.fold
         ? { enabled: true, fold: true, perPage: 1 }

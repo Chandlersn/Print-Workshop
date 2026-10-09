@@ -7,8 +7,8 @@
  * 与源项目的差异点：底图/上传字体走 pp:// 协议读本地数据目录（无 HTTP 服务器）。
  */
 const fs = require('fs')
-const path = require('path')
 const fonts = require('./fonts.cjs')
+const { resolveInsideDataDir } = require('./store.cjs')
 const { PAGE_SIZES } = require('./templates.cjs')
 
 // 媒体根目录（主进程启动即设定；测试也会注入）。文件缺失时回退到 pp://。
@@ -40,7 +40,7 @@ function mimeFor(rel) {
 function readMediaFile(rel) {
   if (!DATA_DIR || !rel) return null
   try {
-    const abs = path.join(DATA_DIR, String(rel).replace(/\\/g, '/'))
+    const abs = resolveInsideDataDir(String(rel).replace(/\\/g, '/'))
     if (!fs.existsSync(abs)) return null
     return fs.readFileSync(abs)
   } catch {
@@ -129,9 +129,7 @@ function fieldStyle(f) {
  * 同一个字符串，否则字体声明存在却匹配不上（表现为「字体没生效」）。
  * 剔除集：引号、反斜杠、分号、大括号、圆括号——它们在 CSS 字符串内有语法意义。
  */
-function normalizeFamily(name) {
-  return String(name == null ? '' : name).replace(/['"\\;{}()]/g, '').trim()
-}
+const normalizeFamily = fonts.normalizeFamily
 
 /**
  * 为已上传字体生成 @font-face（family 名 = 去扩展名文件名，画布与渲染共用）。

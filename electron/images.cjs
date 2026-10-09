@@ -31,7 +31,7 @@ function jpegSize(buf) {
  *
  * 拖拽与剪贴板粘贴场景下，前端传来的文件名完全不可信（可以随手把别的东西改名成 .png）。
  * 所以真实格式一律以字节判定；同时只认 PNG / JPEG 两种「确实能读出尺寸」的，
- * webp 虽然在允许扩展名里但尺寸解析不支持，存进去也画不出来，故一律拒绝。
+ * WebP 的尺寸解析尚未实现，因此上传入口只提供 PNG / JPEG。
  */
 function sniffImageExt(buf) {
   if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47) return '.png'

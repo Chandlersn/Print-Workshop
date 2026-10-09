@@ -161,6 +161,10 @@ console.log('== 4b. 拖拽 / 粘贴上传底图：格式按内容判定，前端
 
   // 前端侧：必须读成 base64 且去掉 data: 前缀，否则主进程解出来是乱码
   const view = src('src/views/TemplateView.vue')
+  const bgApi = src('electron/api.cjs')
+  ok(/extensions: \['png', 'jpg', 'jpeg'\]/.test(bgApi) && !/extensions: \['png', 'jpg', 'jpeg', 'webp'\]/.test(bgApi),
+    '底图文件选择器不再展示尚不支持的 WebP')
+  ok(!/\(png\|jpe\?g\|webp\)/.test(view), '拖拽入口也不宣称支持 WebP')
   ok(/uploadBackgroundBytes/.test(view), '前端调用了字节版上传通道')
   ok(/readAsDataURL/.test(view), '前端用 FileReader 把 File 读成 base64')
   ok(/slice\(comma \+ 1\)/.test(view), 'base64 去掉了 data: 前缀')

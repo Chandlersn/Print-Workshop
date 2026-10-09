@@ -184,6 +184,20 @@ const zoomOptions = [
 ]
 const zoomK = computed(() => Number(zoom.value) / 100)
 
+/**
+ * 底图输出清晰度的分级样式：≥300dpi 正常、150–300 提醒、<150 警示。
+ * 判定用**取整后**的值——纸张毫米是整数，A4@300dpi 的 2480px 底图算出来是 299.96，
+ * 不取整会让标准的 300dpi 图被判成「偏低」，而界面上同时还写着「约 300 dpi」，自相矛盾。
+ * 与 src/lib/template-layout.cjs 的 computeBgDpi 用同一口径。
+ */
+function dpiClass(dpi) {
+  if (!dpi) return ''
+  const n = Math.round(dpi)
+  if (n >= 300) return 'dpi-good'
+  if (n >= 150) return 'dpi-ok'
+  return 'dpi-low'
+}
+
 // 页面毫米 → px（96dpi），iframe 视口 = 内容全宽（毫米换算像素），transform 只负责显示缩放
 const frameW = computed(() => previewInfo.value ? Math.round(previewInfo.value.page.w * 96 / 25.4) : 794)
 const frameH = computed(() => previewInfo.value ? Math.round(previewInfo.value.page.h * 96 / 25.4) : 1123)
@@ -566,6 +580,10 @@ onMounted(refreshAll)
           · {{ previewInfo.page.name }}
         </span>
         <span class="tb-spacer"></span>
+        <span v-if="previewInfo.bgDpi" class="preview-dpi" :class="dpiClass(previewInfo.bgDpi.dpi)">
+          底图 {{ previewInfo.bgDpi.width }}×{{ previewInfo.bgDpi.height }}px · 输出约 {{ Math.round(previewInfo.bgDpi.dpi) }} dpi
+          <template v-if="previewInfo.bgDpi.stretched"> · 比例不符，会被拉伸</template>
+        </span>
         <span class="tb-label">缩放</span>
         <CustomSelect v-model="zoom" :options="zoomOptions" width="90px" />
       </div>
@@ -947,6 +965,7 @@ onMounted(refreshAll)
 .preview-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
@@ -956,6 +975,20 @@ onMounted(refreshAll)
   font-size: 13px;
   color: var(--ink-2);
 }
+
+/* 底图输出分辨率：出片前唯一能提前判断「印出来清不清」的数 */
+.preview-dpi {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  color: var(--stone);
+  max-width: 100%;
+}
+
+.preview-dpi.dpi-good { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.preview-dpi.dpi-ok { color: var(--stone); }
+.preview-dpi.dpi-low { color: var(--cinnabar); border-color: var(--cinnabar); background: var(--cinnabar-soft); }
 
 .preview-scroll {
   max-height: 68vh;

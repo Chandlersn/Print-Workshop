@@ -55,6 +55,8 @@ console.log('== 3. 多联摘要（含「放不下 2 个」） ==')
   ok(tiny.cols === 0 && tiny.rows === 0 && tiny.perPage === 0 && tiny.ok === false, '放不下 → ok=false', tiny)
   const one = computeGridInfo({ w: 100, h: 54 }, { w: 85, h: 54 })
   ok(one.perPage === 1 && one.ok === false, '只放得下 1 个也判 ok=false（多联至少要 2 个）', one)
+  const crowded = computeGridInfo({ w: 297, h: 210 }, { w: 5, h: 5 })
+  ok(crowded.perPage > 400 && crowded.ok === false, '超过渲染引擎每页 400 格上限时回退单页', crowded)
 }
 
 console.log('== 4. 多联格子阵列（居中排布 + 放不下返回空） ==')
@@ -69,6 +71,8 @@ console.log('== 4. 多联格子阵列（居中排布 + 放不下返回空） =='
   ok(near(cells[8].left, ((21 + 2 * 85) / 297) * 100), '末格左缘正确', cells[8].left)
   ok(near(cells[8].top, ((24 + 2 * 54) / 210) * 100), '末格上缘正确', cells[8].top)
   ok(buildGridCells({ w: 20, h: 20 }, { w: 85, h: 54 }).length === 0, '放不下 2 个 → 空数组')
+  ok(buildGridCells({ w: 20, h: 120 }, { w: 85, h: 54 }).length === 0, '宽度放不下一格时不画假网格')
+  ok(buildGridCells({ w: 297, h: 210 }, { w: 5, h: 5 }).length === 0, '超过 400 格上限时不画网格')
 }
 
 console.log('== 5. 底图比例预警（>2% 才提示） ==')

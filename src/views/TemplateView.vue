@@ -13,7 +13,8 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { evenRow, anchorRatio } from '../lib/field-layout.cjs'
 import {
   resolveLayoutMode, resolveItemSpec, computeGridInfo, buildGridCells,
-  computeBgRatioWarn, clampPageDim, clampItemDim, ptToPx as ptToPxOf,
+  computeBgRatioWarn, computeBgDpi, computeBgRatioDeviation,
+  clampPageDim, clampItemDim, ptToPx as ptToPxOf,
 } from '../lib/template-layout.cjs'
 import {
   clampPct, snapTo, snapshotOf, parseSnapshot, pushCapped,
@@ -34,13 +35,25 @@ const itemSpec = computed(() => resolveItemSpec(activeTpl.value))
 
 /**
  * 版式摘要（仅用于界面提示；行列的权威计算在主进程 resolveLayout）。
- * ok=false 表示当前纸张放不下 2 个成品，出片时会退回单页。
+ * ok=false 表示当前配置会退回单页（尺寸缺失、放不下或超过 400 格）。
  */
 const gridInfo = computed(() => {
   const t = activeTpl.value
   if (!t || layoutMode.value !== 'grid') return null
+  if (!(Number(t.layout?.itemW) > 0) || !(Number(t.layout?.itemH) > 0)) {
+    return { cols: 0, rows: 0, perPage: 0, ok: false, invalid: true }
+  }
   return computeGridInfo(t.pageSize, itemSpec.value)
 })
+
+// 多联放不下或超出每页 400 格上限时，渲染引擎会按整页出片；清晰度提示也必须按整页算。
+const outputItemSpec = computed(() =>
+  layoutMode.value === 'grid' && gridInfo.value && !gridInfo.value.ok
+    ? activeTpl.value.pageSize
+    : itemSpec.value)
+const outputTarget = computed(() =>
+  layoutMode.value === 'grid' && gridInfo.value?.ok ? '成品'
+    : layoutMode.value === 'fold' ? '半页成品' : '纸张')
 
 const layoutOptions = [
   { value: 'single', label: '单页' },
@@ -67,7 +80,7 @@ const foldInfo = computed(() => {
  */
 const gridCells = computed(() => {
   const t = activeTpl.value
-  if (!t || !isGrid.value) return []
+  if (!t || !isGrid.value || !gridInfo.value?.ok) return []
   return buildGridCells(t.pageSize, itemSpec.value)
 })
 
@@ -205,6 +218,24 @@ const fontOptions = computed(() => [
   ...fonts.value.uploaded.map((f) => ({ value: f.family, label: f.family, group: '上传字体' })),
 ])
 
+// PDF 会把上传字体内联为 @font-face；画布也必须加载同一字体，否则字宽不同会使预览位置看起来漂移。
+let uploadedFontFaces = []
+function syncUploadedFontFaces() {
+  for (const face of uploadedFontFaces) document.fonts.delete(face)
+  uploadedFontFaces = []
+  for (const font of fonts.value.uploaded) {
+    if (!font.cssFamily) continue
+    try {
+      const url = `pp://media/print-fonts/${encodeURIComponent(font.file)}`
+      const face = new FontFace(font.cssFamily, `url("${url}")`)
+      document.fonts.add(face)
+      uploadedFontFaces.push(face)
+    } catch (err) {
+      console.warn(`[font] 注册失败 ${font.file}:`, err)
+    }
+  }
+}
+
 const selectedField = computed(() => {
   if (!activeTpl.value || selectedIdx.value < 0) return null
   return activeTpl.value.fields[selectedIdx.value] || null
@@ -226,7 +257,29 @@ const bgUrl = computed(() =>
 const bgRatioWarn = computed(() => {
   const t = activeTpl.value
   if (!t || !t.bgSize) return ''
-  return computeBgRatioWarn(t.bgSize, itemSpec.value, layoutMode.value)
+  return computeBgRatioWarn(t.bgSize, outputItemSpec.value,
+    outputTarget.value === '成品' ? 'grid' : outputTarget.value === '半页成品' ? 'fold' : 'single')
+})
+
+/**
+ * 底图铺到成品上之后的有效输出分辨率。
+ *
+ * 「导出会吃清晰度」这个反馈，实测下来导出链路是逐像素无损的（PDF 里就是源图原始码流）；
+ * 真正决定印出来清不清的是「底图像素 ÷ 成品尺寸」。这里把它算出来常驻显示，
+ * 免得用户在「预览看着还行 → 打出来发虚」之间反复猜。
+ */
+const bgDpi = computed(() => {
+  const t = activeTpl.value
+  if (!t || !t.bgSize) return null
+  return computeBgDpi(t.bgSize, outputItemSpec.value)
+})
+
+// 比例不一致 = 被拉伸（background-size:100% 100%），这是「看着被压缩了」的直接原因。
+// 与「分辨率不够」是两回事：前者靠裁图/换纸解决，后者只能换更清晰的底图。
+const bgStretched = computed(() => {
+  const t = activeTpl.value
+  if (!t || !t.bgSize) return false
+  return computeBgRatioDeviation(t.bgSize, outputItemSpec.value).stretched
 })
 
 // 画布始终按**整张纸**缩放：多联时页面上要画出 M 列 × N 行格子，
@@ -246,6 +299,7 @@ function ptToPx(pt) {
 async function refreshLists() {
   templates.value = await window.printpress.listTemplates()
   fonts.value = await window.printpress.listFonts()
+  syncUploadedFontFaces()
   datasets.value = await window.printpress.listDatasets()
 }
 
@@ -448,7 +502,7 @@ async function uploadBackground() {
  * 真实格式由主进程按内容嗅探决定——前端给的文件名后缀不可信，只当归档命名用。
  */
 const MAX_BG_BYTES = 20 * 1024 * 1024
-const IMAGE_LIKE = /\.(png|jpe?g|webp)$/i
+const IMAGE_LIKE = /\.(png|jpe?g)$/i
 
 const dragging = ref(false)
 // dragenter / dragleave 会在子元素间冒泡，用进出计数避免高亮闪烁
@@ -471,10 +525,10 @@ async function acceptImageFile(file) {
   if (!activeTpl.value || !file) return
   // 部分拖拽源不带 type，此时退回按文件名判断；最终仍由主进程按内容定夺
   const looksImage = file.type
-    ? file.type.startsWith('image/')
+    ? file.type === 'image/png' || file.type === 'image/jpeg'
     : !file.name || IMAGE_LIKE.test(file.name)
   if (!looksImage) {
-    errorMsg.value = '只能上传图片（png / jpg / webp）'
+    errorMsg.value = '只能上传 PNG / JPEG 图片'
     return
   }
   if (file.size > MAX_BG_BYTES) {
@@ -614,13 +668,14 @@ function removeField() {
  */
 function fieldStyle(f) {
   const shift = anchorRatio(f)
+  const family = fonts.value.uploaded.find((font) => font.family === f.fontFamily)?.cssFamily || f.fontFamily
   return {
     left: `${f.x}%`,
     top: `${f.y}%`,
     transform: shift ? `translateX(-${shift * 100}%)` : 'none',
     fontSize: `${ptToPx(f.fontSize)}px`,
     color: f.color,
-    fontFamily: f.fontFamily ? `"${f.fontFamily}"` : 'inherit',
+    fontFamily: family ? JSON.stringify(family) : 'inherit',
     fontWeight: f.bold ? 700 : 400,
     textAlign: f.align,
   }
@@ -934,6 +989,7 @@ async function uploadFont() {
     const result = await window.printpress.uploadFontDialog()
     if (result.canceled) return
     fonts.value = await window.printpress.listFonts()
+    syncUploadedFontFaces()
     flash(`字体「${result.family}」已上传`)
   } catch (err) {
     errorMsg.value = extractError(err)
@@ -949,6 +1005,7 @@ async function removeFont(file) {
       try {
         await window.printpress.deleteFont(file)
         fonts.value = await window.printpress.listFonts()
+        syncUploadedFontFaces()
       } catch (err) {
         errorMsg.value = extractError(err)
       }
@@ -972,6 +1029,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  for (const face of uploadedFontFaces) document.fonts.delete(face)
+  uploadedFontFaces = []
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('paste', onPaste)
   window.removeEventListener('pointermove', onPointerMove)
@@ -1148,6 +1207,12 @@ onBeforeUnmount(() => {
             <b>{{ gridInfo.cols }} 列 × {{ gridInfo.rows }} 行 = 每页 {{ gridInfo.perPage }} 个</b>
             {{ itemSpec.w }}×{{ itemSpec.h }}mm 成品；字段按单个成品排版，画布上每一格同步生效
           </template>
+          <template v-else-if="gridInfo.invalid">
+            成品尺寸未填写，已按单页出片——请填写成品宽高
+          </template>
+          <template v-else-if="gridInfo.perPage > 400">
+            每页将排 {{ gridInfo.perPage }} 个成品（上限 400），已按单页出片——请增大成品尺寸
+          </template>
           <template v-else>
             当前纸张放不下 2 个 {{ itemSpec.w }}×{{ itemSpec.h }}mm 的成品——请换更大的纸张，或缩小成品尺寸
           </template>
@@ -1157,6 +1222,17 @@ onBeforeUnmount(() => {
           对折桌牌：<b>{{ foldInfo.w }}×{{ foldInfo.h }}mm 半页成品</b> · 一页一条记录 · 上半联自动倒置——打印后沿折线对折即成双面台签，无需打印机双面功能
         </p>
         <p v-if="bgRatioWarn" class="warn-line warn-strong">{{ bgRatioWarn }}</p>
+        <!-- 底图输出清晰度：把「印出来会不会发虚」提前讲清楚。
+             与上面的比例警告分工明确——比例讲「会不会变形」，这里讲「够不够清」。 -->
+        <p v-if="bgDpi && bgDpi.level !== 'good'" class="warn-line" :class="{ 'warn-strong': bgDpi.level === 'low' || bgDpi.level === 'bad' }">
+          底图 {{ activeTpl.bgSize.width }}×{{ activeTpl.bgSize.height }}px ·
+          <b>{{ bgDpi.text }}</b>
+          <template v-if="bgStretched"> · 底图比例与{{ outputTarget }}不符，会被拉伸</template>
+          —— {{ bgDpi.advice }}
+        </p>
+        <p v-else-if="bgDpi" class="warn-line">
+          底图 {{ activeTpl.bgSize.width }}×{{ activeTpl.bgSize.height }}px · {{ bgDpi.text }}（{{ bgDpi.advice }}）
+        </p>
 
         <!-- 字段面板：数据页启用「印」的字段平铺于此，点击即加入画布 -->
         <div v-if="activeDatasetId" class="field-palette">
@@ -1789,32 +1865,47 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+/* 画布字段框：**必须与渲染引擎的 .pf 共用同一套定位口径**。
+   两边都靠「盒宽」算 translateX 位移（anchorRatio：center→0.5 / right→1 / left→0），
+   所以画布盒宽必须**恰好等于文字宽**，多出来的每一像素都会变成出片位置漂移。
+
+   踩过的坑（用户报「导出版本的字段会往右漂移一点点」）：
+   ① `padding: 2px 6px` + `border: 1px dashed` 让盒比文字两侧各宽 6.8px，而渲染的 .pf
+      是 padding:0 / border:0 ⇒ 左对齐偏 +6.8px、右对齐反向偏 −6.8px（实测 1.88mm）。
+   ② `max-width: 90%` 在长文本时把盒宽截到 90%（文字 827px、盒只剩 682px），
+      而 transform:translateX() 的百分比是按**盒宽**算的 ⇒ 居中长文本偏 72px、
+      右对齐偏 145px（实测 21.92mm / 41.96mm）——这才是"漂移"最刺眼的那种。
+   现在：盒宽 = 文字宽（nowrap 下 shrink-to-fit，与渲染一致）；hover / 选中态改用
+   **outline**（不参与布局）画在文字外侧。
+   —— 动这段之前先读 test/canvas-align.cjs，它钉住了「不许有 padding / max-width」。 */
 .field-box {
   position: absolute;
-  max-width: 90%;
-  padding: 2px 6px;
-  border: 1px dashed transparent;
+  white-space: nowrap;
+  line-height: normal; /* 与渲染 .pf 一致（不设 line-height 即 normal） */
   cursor: move;
   user-select: none;
-  white-space: nowrap;
-  line-height: 1.2;
 }
 
-.field-box:hover { border-color: var(--line-strong); }
+.field-box:hover {
+  outline: 1px dashed var(--line-strong);
+  outline-offset: 3px;
+}
 
 .field-box.selected {
-  border-color: var(--cinnabar);
-  outline: 1px solid var(--cinnabar-soft);
+  outline: 1px solid var(--cinnabar);
+  outline-offset: 3px;
 }
 
 .field-box.nodata {
   opacity: 0.45;
-  border: 1px dashed var(--cinnabar);
+  outline: 1px dashed var(--cinnabar);
+  outline-offset: 3px;
 }
 
 /* 失效字段：数据列不存在——朱砂警示标，一眼定位打印中心「字段不匹配」的来源 */
 .field-box.stale {
-  border: 1px dashed var(--cinnabar);
+  outline: 1px dashed var(--cinnabar);
+  outline-offset: 3px;
   background: var(--cinnabar-soft);
 }
 
@@ -1822,7 +1913,7 @@ onBeforeUnmount(() => {
   content: '已失效';
   position: absolute;
   top: -15px;
-  left: -1px;
+  left: -7px; /* 盒已无 padding，补偿回原来的视觉位置 */
   padding: 0 5px;
   border-radius: 4px;
   background: var(--cinnabar);
@@ -1947,9 +2038,11 @@ onBeforeUnmount(() => {
 .guide-v { top: 0; bottom: 0; width: 1px; }
 .guide-h { left: 0; right: 0; height: 1px; }
 
+/* 多选成员：用 box-shadow 画环，这样能和 .selected 的 outline 同时显示
+   （一个元素只有一条 outline，若这里也用 outline 会把选中态盖掉）。
+   box-shadow 同样不参与布局，不会破坏盒宽口径。 */
 .field-box.inmulti {
-  border-color: var(--cinnabar);
-  border-style: dashed;
+  box-shadow: 0 0 0 1px var(--cinnabar);
 }
 
 .fill-badge {

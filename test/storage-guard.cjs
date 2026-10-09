@@ -74,6 +74,9 @@ console.log('== 2. 删除模板不得删到数据目录外 ==')
     background: '../victim.txt',
     fields: [{ column: '姓名', label: '姓名', x: 50, y: 50, fontSize: 12, align: 'center' }],
   })
+  const html = engine.buildHtml(tpl, [{ 姓名: '张三' }], { withToolbar: false })
+  ok(!html.includes(Buffer.from('IMPORTANT').toString('base64')),
+    '渲染 HTML 不内联数据目录外的文件')
   templates.deleteTemplate(tpl.id)
   ok(fs.existsSync(victim), 'background 为 ../ 时目录外文件未被删除')
   ok(!templates.listTemplates().some((t) => t.id === tpl.id), '模板记录本身仍被删除（元数据清理不受阻）')

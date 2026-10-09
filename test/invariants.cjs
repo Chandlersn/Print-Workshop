@@ -51,6 +51,8 @@ const CONTRACT = [
   { id: 'I-16', file: 'test/robustness.cjs', anchor: '== 7. 多选对齐必须把「盒边缘」换算回「锚点」 ==' },
   { id: 'I-17', file: 'test/robustness.cjs', anchor: 'P1-10 清空尺寸不被静默锁死' },
   { id: 'I-18', file: 'test/api-cli.cjs', anchor: '== 1. api.cjs 必须能在纯 Node 下加载（分层地基） ==' },
+  { id: 'I-19', file: 'test/canvas-align.cjs', anchor: '== 1. 画布字段框的盒宽必须恰好等于文字宽 ==' },
+  { id: 'I-20', file: 'test/bg-fidelity.cjs', anchor: '== 7. 导出路径不许引入任何图片重编码（静态守卫）==' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')
