@@ -16,7 +16,7 @@
     "test:design-e2e": "node test/helpers/electron-runner.cjs test/design-e2e.cjs",
     "test:design-export-e2e": "node test/helpers/electron-runner.cjs test/design-export-e2e.cjs",
     "bench:storage": "node test/bench-storage.cjs",
-    "dist": "npm run build && electron-builder --win --x64",
+    "dist": "npm run build && electron-builder --win --x64 --publish never",
     "release:check": "node scripts/release-upload.cjs --dry-run",
     "release:upload": "node scripts/release-upload.cjs"
   },
