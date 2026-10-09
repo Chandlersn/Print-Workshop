@@ -129,6 +129,10 @@ function deleteFont(fileName) {
   if (usedBy.length) {
     throw new Error(`字体正在被模板使用：${usedBy.join('、')}，请先移除模板中的引用`)
   }
+  const designUsers = require('./designs.cjs').fontUsedBy(family)
+  if (designUsers.length) {
+    throw new Error(`字体正在被底图工程使用：${designUsers.join('、')}。历史版本仍需此字体，请保留字体或删除未被模板引用的工程`)
+  }
   const dest = path.join(UPLOAD_DIR, base)
   if (!fs.existsSync(dest)) throw new Error(`字体文件不存在: ${base}`)
   fs.unlinkSync(dest)

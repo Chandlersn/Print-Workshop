@@ -80,6 +80,14 @@ const ADDED_CHANNELS = [
   'template:uploadBackgroundBytes',
   'template:discardBackground',
   'font:upload',
+  'design:list',
+  'design:get',
+  'design:save',
+  'design:delete',
+  'design:importDialog',
+  'design:importBytes',
+  'design:importBackground',
+  'design:exportPng',
 ]
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }
@@ -135,7 +143,7 @@ async function run() {
 
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
-      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径版 + 整批删除 + 字节版）`, added)
+      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径、批次、素材与图层工程）`, added)
 
     // ipc.cjs 必须从注册表派生，不能回退成手写
     const ipcSrc = stripComments(src('electron/ipc.cjs'))

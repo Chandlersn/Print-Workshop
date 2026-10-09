@@ -120,7 +120,8 @@ function fieldStyle(f) {
     if (fam) parts.push(`font-family:'${fam}';`)
   }
   parts.push(`text-align:${align};`)
-  return parts.join('')
+  // 此返回值写进 HTML 属性；字体名中的 &copy 等合法文件名片段不能被当成实体解码。
+  return escapeHtml(parts.join(''))
 }
 
 /**
@@ -138,7 +139,7 @@ const normalizeFamily = fonts.normalizeFamily
  *   会让单份 HTML 膨胀到 16MB，且出片要构建 preview + snapshot 两份）。
  */
 function fontFaceCss(onlyFamilies) {
-  const want = Array.isArray(onlyFamilies) && onlyFamilies.length
+  const want = Array.isArray(onlyFamilies)
     ? new Set(onlyFamilies.map(normalizeFamily).filter(Boolean))
     : null
   const rules = []
@@ -152,6 +153,47 @@ function fontFaceCss(onlyFamilies) {
     rules.push(`@font-face { font-family:'${fam}'; src:url('${inlineUrl('print-fonts/' + f.file)}') format('${fmt}'); }`)
   }
   return rules.join('\n')
+}
+
+/** 固定版本的底图必须与实际成品同尺寸，禁止在拼版回退时悄悄拉伸。 */
+function resolveTemplateDesign(template) {
+  if (!template.backgroundDesign) return null
+  if (template.background) throw new Error('模板不能同时使用图片底图和图层工程底图')
+  const ref = template.backgroundDesign
+  if (!ref.id || !Number.isInteger(ref.revision) || ref.revision < 1) {
+    throw new Error('底图工程必须引用已保存的固定版本')
+  }
+  const doc = require('./designs.cjs').resolveDesign(ref)
+  const spec = pageSpec(template.pageSize)
+  const layout = resolveLayout(template.layout, spec)
+  if (template.layout?.mode === 'grid' && !layout.enabled) {
+    throw new Error('底图工程无法应用：当前纸张放不下有效多联版式，请调整纸张或成品尺寸')
+  }
+  const w = layout.enabled ? layout.itemW : spec.w
+  const h = layout.enabled ? layout.itemH : spec.h
+  if (Math.abs(doc.artboard.w - w) > 0.01 || Math.abs(doc.artboard.h - h) > 0.01) {
+    throw new Error(`底图工程尺寸 ${doc.artboard.w}×${doc.artboard.h}mm 与成品 ${w}×${h}mm 不一致，请调整工程或成品尺寸`)
+  }
+  return doc
+}
+
+/** 一次批量任务共用经过校验的静态工程资源，预览与归档不重复读取大图。 */
+function prepareTemplateDesign(template) {
+  const design = resolveTemplateDesign(template)
+  if (!design) return { html: '', css: '', fontFamilies: [], info: null }
+  const { renderDesign, imageDpi } = require('./design-layout.cjs')
+  const rendered = renderDesign(design, {
+    classPrefix: 'print-design',
+    fontFamily: normalizeFamily,
+    assetUrl: (asset) => {
+      const bytes = readMediaFile(asset.path)
+      if (!bytes) throw new Error(`底图素材缺失或无法读取：${asset.name || asset.path}`)
+      return `data:${mimeFor(asset.path)};base64,${bytes.toString('base64')}`
+    },
+  })
+  const dpi = design.layers.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image')
+    .map((layer) => imageDpi(layer, design.assets[layer.assetId]))
+  return { ...rendered, info: { name: design.name, revision: design.revision, layerCount: design.layers.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
 }
 
 // 未知纸张的回退默认显式命名，不依赖数组顺序（顺序只管下拉展示）
@@ -251,7 +293,7 @@ function resolveLayout(layout, spec) {
  *           故同一套排版在每格重复——输出契约（页数 × 纸张）不变。
  * 对折模式（fold）：一记录一页，页内上下两个镜像半页，字段坐标相对半页。
  */
-function buildHtml(template, records, { withToolbar = true } = {}) {
+function buildHtml(template, records, { withToolbar = true, preparedDesign } = {}) {
   const spec = pageSpec(template.pageSize)
   const widthMm = spec.w
   const heightMm = spec.h
@@ -259,8 +301,9 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
   const fields = (template.fields || [])
     .filter((f) => f.column || f.key) // column 为权威属性，key 是旧版 UI 的存法（兼容读取）
   const layout = resolveLayout(template.layout, spec)
+  const designOutput = preparedDesign || prepareTemplateDesign(template)
 
-  const fieldsHtml = (rec) => fields
+  const fieldsHtml = (rec) => designOutput.html + fields
     .map((f) => `<div class="pf" style="${fieldStyle(f)}">${escapeHtml(rec[f.column || f.key])}</div>`)
     .join('')
 
@@ -298,12 +341,13 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
   }
 
   // 只内联本模板实际用到的字体：全部内联会让单份 HTML 随字体库无限膨胀（实测 16MB/份）
-  const usedFamilies = [...new Set(fields.map((f) => f.fontFamily).filter(Boolean))]
+  const usedFamilies = [...new Set([...fields.map((f) => f.fontFamily), ...designOutput.fontFamilies].filter(Boolean))]
   const fontCss = fontFaceCss(usedFamilies)
   return [
     '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n',
     `<title>${escapeHtml(template.name || '打印预览')}</title>\n<style>\n`,
     fontCss ? fontCss + '\n' : '',
+    designOutput.css ? designOutput.css + '\n' : '',
     `@page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }\n`,
     '* { box-sizing: border-box; }\n',
     'body { margin: 0; background: #f0f0f0; }\n',
@@ -323,7 +367,7 @@ function buildHtml(template, records, { withToolbar = true } = {}) {
       + (layout.enabled && bg ? ` background-image: url('${bg}');` : '')
       + ' }\n',
     // 裁切线：格边虚线，仅供手工裁切对位（0.2mm 极细，裁掉即不可见）
-    '.cell.cut { border: 0.2mm dashed rgba(0,0,0,0.35); }\n',
+    '.cell.cut { outline: 0.2mm dashed rgba(0,0,0,0.35); outline-offset: -0.2mm; }\n',
     // 对折桌牌：上下两个半页，上联倒置；fold-line 为折线（对折参考，不裁切）
     '.fold-half { position: absolute; left: 0; width: 100%; height: 50%; overflow: hidden; '
       + 'background-repeat: no-repeat; background-size: 100% 100%;'
@@ -358,5 +402,7 @@ module.exports = {
   fontFaceCss,
   pageSpec,
   resolveLayout,
+  resolveTemplateDesign,
+  prepareTemplateDesign,
   buildHtml,
 }

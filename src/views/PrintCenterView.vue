@@ -580,6 +580,11 @@ onMounted(refreshAll)
           · {{ previewInfo.page.name }}
         </span>
         <span class="tb-spacer"></span>
+        <span v-if="previewInfo.designInfo" class="preview-dpi" :class="previewInfo.designInfo.minDpi == null ? '' : dpiClass(previewInfo.designInfo.minDpi)">
+          图层底图「{{ previewInfo.designInfo.name }}」· 第 {{ previewInfo.designInfo.revision }} 版 · {{ previewInfo.designInfo.layerCount }} 个图层
+          <template v-if="previewInfo.designInfo.minDpi != null"> · 图片最低约 {{ Math.round(previewInfo.designInfo.minDpi) }} dpi</template>
+          <template v-else> · 文字与形状直接输出</template>
+        </span>
         <span v-if="previewInfo.bgDpi" class="preview-dpi" :class="dpiClass(previewInfo.bgDpi.dpi)">
           底图 {{ previewInfo.bgDpi.width }}×{{ previewInfo.bgDpi.height }}px · 输出约 {{ Math.round(previewInfo.bgDpi.dpi) }} dpi
           <template v-if="previewInfo.bgDpi.stretched"> · 比例不符，会被拉伸</template>

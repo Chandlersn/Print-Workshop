@@ -1,6 +1,6 @@
 name: CI
 
-# 每次推 main 或开 PR 都跑：领域层 24 套件 + 端到端。
+# 每次推 main 或开 PR 都跑：领域层测试 + 实际 PDF 和编辑器端到端。
 # 这是「不靠个人纪律」的第一道闸——在干净机器上回答「能不能构建、测试过不过」。
 on:
   push:
@@ -42,3 +42,7 @@ jobs:
         run: npm run build
       - name: 端到端（npm run test:e2e）
         run: npm run test:e2e
+      - name: 图层编辑与 PDF 保真（npm run test:design-e2e）
+        run: npm run test:design-e2e
+      - name: PNG 像素、透明度与显示缩放（npm run test:design-export-e2e）
+        run: npm run test:design-export-e2e

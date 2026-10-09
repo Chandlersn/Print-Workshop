@@ -69,6 +69,16 @@ contextBridge.exposeInMainWorld('printpress', {
   uploadBackgroundBytes: (payload) => ipcRenderer.invoke('template:uploadBackgroundBytes', payload),
   discardBackground: (payload) => ipcRenderer.invoke('template:discardBackground', payload),
 
+  // 可编辑底图工程（素材只走受控导入，不暴露文件系统）
+  listDesigns: () => ipcRenderer.invoke('design:list'),
+  getDesign: (id, revision) => ipcRenderer.invoke('design:get', id, revision),
+  saveDesign: (design) => ipcRenderer.invoke('design:save', design),
+  deleteDesign: (id) => ipcRenderer.invoke('design:delete', id),
+  uploadDesignImageDialog: () => ipcRenderer.invoke('design:importDialog'),
+  uploadDesignImageBytes: (payload) => ipcRenderer.invoke('design:importBytes', payload),
+  importDesignBackground: (payload) => ipcRenderer.invoke('design:importBackground', payload),
+  exportDesignPng: (payload) => ipcRenderer.invoke('design:exportPng', payload),
+
   // 字体
   listFonts: () => ipcRenderer.invoke('font:list'),
   uploadFontDialog: () => ipcRenderer.invoke('font:uploadDialog'),

@@ -205,7 +205,13 @@ console.log('== 4c. 底图的上传入口与删除方式（前端静态核查）
     '删底图的分支排在 targets 判空之前（否则按 Delete 永远没反应）')
 
   // 底图**不进**撤销栈：换图 / 删图会真删文件，撤销回来只会是张破图
-  ok(!/background: t\.background/.test(view), '底图不进撤销快照（撤销回来只会是破图）')
+  const fieldSnapshot = JSON.parse(require('../src/lib/field-edit.cjs').snapshotOf({
+    fields: [], layout: { mode: 'single' }, background: 'print-bg/source.png',
+    bgSize: { width: 100, height: 100 }, backgroundDesign: { id: 'design_test', revision: 1 },
+  }))
+  ok(!Object.hasOwn(fieldSnapshot, 'background') && !Object.hasOwn(fieldSnapshot, 'bgSize')
+    && !Object.hasOwn(fieldSnapshot, 'backgroundDesign'),
+  '底图不进撤销快照（撤销回来只会是破图）')
   ok(/discardBackground/.test(view), '换图 / 删图都会丢弃旧图文件')
   ok(/@error="onBgError"/.test(view) && /function onBgError/.test(view),
     '底图加载失败时自动清引用（换了图没保存就走了的兜底）')

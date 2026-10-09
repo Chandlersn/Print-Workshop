@@ -64,7 +64,7 @@ function listTemplates() {
       name: t.name,
       pageSize: t.pageSize,
       fieldCount: (t.fields || []).length,
-      hasBackground: Boolean(t.background),
+      hasBackground: Boolean(t.background || t.backgroundDesign),
       datasetId: t.datasetId || '',
       datasetName: ds ? ds.name : '',
       updatedAt: t.updatedAt,
@@ -122,8 +122,11 @@ function validateLayout(template) {
  */
 function removeBgFile(bgPath) {
   if (!bgPath) return false
+  // 单图底图清理不能删除图层工程共用素材（或数据目录中的其他文件）。
+  const relative = String(bgPath).replace(/\\/g, '/')
+  if (!/^print-bg\/[^/]+\.(png|jpe?g)$/i.test(relative)) return false
   try {
-    fs.unlinkSync(resolveInsideDataDir(bgPath))
+    fs.unlinkSync(resolveInsideDataDir(relative))
     return true
   } catch (err) {
     // 越界 / 文件已不在：留痕但不让调用方失败
@@ -135,6 +138,8 @@ function removeBgFile(bgPath) {
 function saveTemplate(template) {
   if (!template || typeof template !== 'object') throw new Error('模板数据为空')
   if (!template.name || !String(template.name).trim()) throw new Error('模板名称不能为空')
+  // 延迟加载避免 render-engine 引用本文件纸张常量时产生循环初始化。
+  if (template.backgroundDesign) require('./render-engine.cjs').resolveTemplateDesign(template)
   if (!template.datasetId) throw new Error('模板必须关联数据集（先在工具栏选择数据集）')
   const layoutBad = validateLayout(template)
   if (layoutBad.length) {

@@ -32,6 +32,7 @@ const fs = require('fs')
 const { loadJson, saveJson } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
+const designs = require('./designs.cjs')
 const fonts = require('./fonts.cjs')
 const printDomain = require('./print.cjs')
 const dataDirModule = require('./data-dir.cjs')
@@ -474,6 +475,85 @@ const OPS = {
       path: { required: true, desc: '要丢弃的底图存储路径（如 print-bg/xxx.png）' },
     },
     run: (p) => templates.discardBackground(String(p.path)),
+  },
+
+  // ==================== 可编辑底图 ====================
+
+  'design:list': {
+    params: {},
+    run: () => designs.listDesigns(),
+  },
+
+  'design:get': {
+    params: { id: { required: true, desc: '底图工程 id' }, revision: { required: false, desc: '固定版本；省略读取最新保存版本' } },
+    fromIpc: (id, revision) => ({ id, revision }),
+    run: (p) => designs.getDesign(p.id, p.revision),
+  },
+
+  'design:save': {
+    write: true,
+    params: { design: { required: true, desc: '完整底图工程；更新时携带读取到的 revision' } },
+    fromIpc: (design) => ({ design }),
+    run: (p) => designs.saveDesign(p.design),
+  },
+
+  'design:delete': {
+    write: true,
+    params: { id: { required: true, desc: '底图工程 id' } },
+    fromIpc: (id) => ({ id }),
+    run: (p) => designs.deleteDesign(p.id),
+  },
+
+  'design:importDialog': {
+    write: true,
+    gui: 'dialog',
+    params: {},
+    run: async (_p, ctx) => {
+      const result = await ctx.dialog.openFile({
+        title: '添加底图图片', properties: ['openFile'],
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }],
+      })
+      if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true }
+      return designs.importImageFile(result.filePaths[0])
+    },
+  },
+
+  'design:importBytes': {
+    write: true,
+    params: { base64: { required: true, desc: '原始 PNG/JPEG 图片 base64，不含 data: 前缀' }, name: { required: false, desc: '显示文件名' } },
+    run: (p) => designs.importImageBytes(p),
+  },
+
+  'design:importBackground': {
+    write: true,
+    params: { background: { required: true, desc: '现有 print-bg 相对路径' }, w: { required: true, desc: '成品宽度 mm' }, h: { required: true, desc: '成品高度 mm' }, name: { required: false, desc: '工程名称' } },
+    run: (p) => designs.importLegacyBackground(p),
+  },
+
+  'design:exportPng': {
+    write: true,
+    gui: 'printer',
+    params: {
+      design: { required: true, desc: '当前可编辑草稿，无需先保存工程' },
+      dpi: { required: false, desc: '150、300或600；默认300' },
+      transparent: { required: false, desc: 'true忽略画布背景色并保留图层透明度' },
+      filePath: { required: false, desc: 'PNG绝对输出路径；省略则显示保存对话框。渲染仍需要Electron宿主能力' },
+    },
+    run: async (p, ctx) => {
+      const prepared = ctx.printer.prepareDesignPng(p)
+      let filePath = p.filePath
+      if (!filePath) {
+        if (!ctx.dialog) throw guiRequired('design:exportPng', '保存对话框（请用filePath指定输出路径）')
+        const result = await ctx.dialog.saveFile({
+          title: '导出高清 PNG 底图',
+          defaultPath: `${printDomain.sanitizeFilename(prepared.name)}-${prepared.dpi}dpi.png`,
+          filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+        })
+        if (result.canceled || !result.filePath) return { canceled: true }
+        filePath = result.filePath
+      }
+      return ctx.printer.exportDesignPng(prepared, filePath)
+    },
   },
 
   // ==================== 字体 ====================

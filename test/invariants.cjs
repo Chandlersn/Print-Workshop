@@ -53,6 +53,9 @@ const CONTRACT = [
   { id: 'I-18', file: 'test/api-cli.cjs', anchor: '== 1. api.cjs 必须能在纯 Node 下加载（分层地基） ==' },
   { id: 'I-19', file: 'test/canvas-align.cjs', anchor: '== 1. 画布字段框的盒宽必须恰好等于文字宽 ==' },
   { id: 'I-20', file: 'test/bg-fidelity.cjs', anchor: '== 7. 导出路径不许引入任何图片重编码（静态守卫）==' },
+  { id: 'I-21', file: 'test/designs.cjs', anchor: '新版本不可改变模板固定的旧版本，旧编辑器保存产生冲突' },
+  { id: 'I-22', file: 'test/design-render.cjs', anchor: '旧图转工程后删除旧文件或模板不影响工程原素材' },
+  { id: 'I-23', file: 'test/design-render.cjs', anchor: '打印等待CSS背景实际解码完成，共用URL只解码一次' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

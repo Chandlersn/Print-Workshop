@@ -23,6 +23,9 @@ docs/assets/结构总览.svg
 docs/assets/路线图.svg
 data/print-bg/
 data/print-fonts/
+data/designs/
+data/design-assets/
+data/designs.write.lock/
 data/archive/
 .workbuddy-ai/
 *.exe

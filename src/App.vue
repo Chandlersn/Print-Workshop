@@ -7,18 +7,24 @@ import { ref, watch, onMounted } from 'vue'
 import DatasetView from './views/DatasetView.vue'
 import TemplateView from './views/TemplateView.vue'
 import PrintCenterView from './views/PrintCenterView.vue'
+import BackgroundDesignerView from './views/BackgroundDesignerView.vue'
 import GuideDialog from './components/GuideDialog.vue'
 import { cellNav } from './lib/cell-nav.js'
+import { designerNav } from './lib/designer-nav.js'
 
 const TABS = [
   { id: 'dataset', label: '数据', hint: '导入名单' },
   { id: 'template', label: '模板', hint: '设计版式' },
+  { id: 'designer', label: '底图制作', hint: '编辑图片与图层' },
   { id: 'print', label: '打印中心', hint: '批量出片' },
 ]
 
 const activeTab = ref('dataset')
 const env = ref(null)
 const theme = ref('light')
+
+watch(() => designerNav.request, (request) => { if (request) activeTab.value = 'designer' })
+watch(() => designerNav.result, (result) => { if (result) activeTab.value = 'template' })
 
 // 去补录直达：打印中心校验弹窗点单元格 → 切到数据页（DatasetView 自行消费 cellNav.req）
 watch(cellNav, (r) => {
@@ -261,9 +267,12 @@ onMounted(async () => {
     </div>
 
     <main class="app-main">
-      <DatasetView v-if="activeTab === 'dataset'" />
-      <TemplateView v-else-if="activeTab === 'template'" />
-      <PrintCenterView v-else />
+      <KeepAlive include="TemplateView,BackgroundDesignerView">
+        <DatasetView v-if="activeTab === 'dataset'" />
+        <TemplateView v-else-if="activeTab === 'template'" />
+        <BackgroundDesignerView v-else-if="activeTab === 'designer'" />
+        <PrintCenterView v-else />
+      </KeepAlive>
     </main>
 
     <!-- 首启三步引导 -->

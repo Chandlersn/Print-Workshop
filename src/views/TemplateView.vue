@@ -7,9 +7,11 @@
  * - 预览：选中数据集首行真实数据，空值半透明提示（打印时将留空）
  * 吸附对齐 / 多选 / 撤销重做在 M4。
  */
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import DesignSurface from '../components/DesignSurface.vue'
+import { designerNav, openDesigner } from '../lib/designer-nav.js'
 import { evenRow, anchorRatio } from '../lib/field-layout.cjs'
 import {
   resolveLayoutMode, resolveItemSpec, computeGridInfo, buildGridCells,
@@ -165,6 +167,104 @@ const msg = ref('')
 const errorMsg = ref('')
 const dragState = ref(null)
 const canvasEl = ref(null)
+const designs = ref([])
+const activeDesign = ref(null)
+const selectedDesignId = ref('')
+const templateKey = ref('')
+let requestedDesignNonce = null
+let designReadToken = 0
+const hasBackground = computed(() => Boolean(activeTpl.value?.background || activeTpl.value?.backgroundDesign))
+const designOptions = computed(() => designs.value.map((d) => ({
+  value: d.id, label: `${d.name} · v${d.revision} · ${d.artboard.w}×${d.artboard.h}mm`,
+})))
+const candidateDesign = computed(() => designs.value.find((d) => d.id === selectedDesignId.value))
+const designSurfaceWidth = computed(() => activeDesign.value
+  ? CANVAS_W * activeDesign.value.artboard.w / activeTpl.value.pageSize.w : CANVAS_W)
+
+function designSizeIssue(doc) {
+  if (!doc || !activeTpl.value) return ''
+  if (isGrid.value && !gridInfo.value?.ok) return '请先调整纸张或成品尺寸，让纸张至少容纳 2 个成品'
+  const { w, h } = outputItemSpec.value
+  return Math.abs(doc.artboard.w - w) > 0.01 || Math.abs(doc.artboard.h - h) > 0.01
+    ? `工程 ${doc.artboard.w}×${doc.artboard.h}mm 与当前成品 ${w}×${h}mm 不一致` : ''
+}
+const designSizeWarning = computed(() => designSizeIssue(activeDesign.value))
+const candidateSizeWarning = computed(() => designSizeIssue(candidateDesign.value))
+
+async function loadActiveDesign() {
+  const token = ++designReadToken
+  const ref = activeTpl.value?.backgroundDesign
+  activeDesign.value = null
+  if (!ref) return
+  try {
+    const doc = await window.printpress.getDesign(ref.id, ref.revision)
+    if (token === designReadToken) activeDesign.value = doc
+  } catch (err) {
+    if (token === designReadToken) errorMsg.value = extractError(err)
+  }
+}
+watch(() => activeTpl.value?.backgroundDesign
+  ? `${activeTpl.value.backgroundDesign.id}:${activeTpl.value.backgroundDesign.revision}` : '', loadActiveDesign)
+
+async function applyDesignReference(ref, matchSize = false) {
+  const t = activeTpl.value
+  if (!t) return
+  const doc = await window.printpress.getDesign(ref.id, ref.revision)
+  if (activeTpl.value !== t) return
+  if (matchSize) {
+    if (isGrid.value) {
+      ensureLayout()
+      t.layout.itemW = doc.artboard.w
+      t.layout.itemH = doc.artboard.h
+    } else {
+      t.pageSize = { id: 'custom', w: doc.artboard.w, h: doc.artboard.h * (isFold.value ? 2 : 1) }
+    }
+  }
+  const issue = designSizeIssue(doc)
+  if (issue) throw new Error(`${issue}，请调整尺寸后再应用`)
+  t.backgroundDesign = { id: doc.id, revision: doc.revision }
+  // 旧图保留到用户主动移除：编辑器已经复制素材，不因切换草稿损坏已保存模板。
+  t.background = ''
+  t.bgSize = null
+  activeDesign.value = doc
+  bgSelected.value = false
+  flash(`已应用「${doc.name}」v${doc.revision}，保存模板后用于打印`)
+}
+
+async function applySelectedDesign(matchSize = false) {
+  if (!candidateDesign.value) return
+  errorMsg.value = ''
+  try {
+    await applyDesignReference(candidateDesign.value, matchSize)
+  } catch (err) { errorMsg.value = extractError(err) }
+}
+
+function editBackgroundDesign() {
+  const t = activeTpl.value
+  if (!t) return
+  if (isGrid.value && !gridInfo.value?.ok) {
+    errorMsg.value = '请先调整纸张或成品尺寸，让纸张至少容纳 2 个成品'
+    return
+  }
+  openDesigner({
+    templateKey: templateKey.value,
+    designRef: t.backgroundDesign ? { ...t.backgroundDesign } : undefined,
+    background: t.background || undefined,
+    artboard: { ...outputItemSpec.value },
+    name: `${t.name || '未命名模板'}底图`,
+  })
+  requestedDesignNonce = designerNav.request?.nonce
+}
+
+watch(() => designerNav.result, async (result) => {
+  if (!result || result.templateKey !== templateKey.value || result.nonce !== requestedDesignNonce) return
+  requestedDesignNonce = null
+  if (result.canceled) return
+  try {
+    await applyDesignReference(result.designRef)
+    designs.value = await window.printpress.listDesigns()
+  } catch (err) { errorMsg.value = extractError(err) }
+})
 
 // 底图选中态：点底图选中它，再按 Delete 移除。
 // 走「选中 → Delete」而不是「点一下就删」，是为了跟字段同一套心智——
@@ -287,7 +387,7 @@ const bgStretched = computed(() => {
 const canvasH = computed(() => {
   const t = activeTpl.value
   if (!t) return 540
-  return Math.round((CANVAS_W * t.pageSize.h) / t.pageSize.w)
+  return (CANVAS_W * t.pageSize.h) / t.pageSize.w
 })
 
 function ptToPx(pt) {
@@ -301,6 +401,7 @@ async function refreshLists() {
   fonts.value = await window.printpress.listFonts()
   syncUploadedFontFaces()
   datasets.value = await window.printpress.listDatasets()
+  designs.value = await window.printpress.listDesigns()
 }
 
 function extractError(err) {
@@ -316,6 +417,7 @@ function flash(text) {
 function newTemplate() {
   errorMsg.value = '' // 切换编辑对象前清掉上一次的报错，避免提示张冠李戴
   msg.value = ''
+  templateKey.value = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`
   activeTpl.value = {
     name: '未命名模板',
     pageSize: { id: 'a4-landscape', w: 297, h: 210 },
@@ -341,6 +443,7 @@ async function openTemplate(id) {
     errorMsg.value = '' // 换模板即清掉旧报错——错误属于上一个模板，不该跟过来
     msg.value = ''
     activeTpl.value = await window.printpress.getTemplate(id)
+    templateKey.value = id
     ensureLayout() // 旧模板没有 layout 字段：补默认单页，避免下游读到 undefined
     selectedIdx.value = -1
     multiSel.value = new Set()
@@ -368,16 +471,21 @@ async function openTemplate(id) {
   }
 }
 
+let catalogReadToken = 0
 async function loadCatalog(dsId) {
+  const token = ++catalogReadToken
   catalog.value = []
   sampleRow.value = null
   if (!dsId) return
   try {
-    catalog.value = await window.printpress.fieldCatalog(dsId)
-    const ds = await window.printpress.getDataset(dsId)
+    const [fields, ds] = await Promise.all([
+      window.printpress.fieldCatalog(dsId), window.printpress.getDataset(dsId),
+    ])
+    if (token !== catalogReadToken || dsId !== activeDatasetId.value) return
+    catalog.value = fields
     sampleRow.value = ds.rows.find((r) => Object.values(r).some((v) => String(v).trim())) || ds.rows[0] || null
   } catch (err) {
-    errorMsg.value = extractError(err)
+    if (token === catalogReadToken && dsId === activeDatasetId.value) errorMsg.value = extractError(err)
   }
 }
 
@@ -429,6 +537,7 @@ async function applyBackgroundResult(result) {
   const t = activeTpl.value
   if (!t) return
   const prev = t.background
+  delete t.backgroundDesign
   t.background = result.background
   t.bgSize = { width: result.width, height: result.height }
   bgSelected.value = false
@@ -446,7 +555,7 @@ async function applyBackgroundResult(result) {
 /** 点底图 = 选中它（属性面板切到底图信息，按 Delete 即可移除） */
 function selectBackground() {
   const t = activeTpl.value
-  if (!t || !t.background) return
+  if (!t || !hasBackground.value) return
   bgSelected.value = true
   selectedIdx.value = -1
   multiSel.value = new Set()
@@ -458,8 +567,9 @@ function selectBackground() {
  */
 async function removeBackground() {
   const t = activeTpl.value
-  if (!t || !t.background) return
+  if (!t || !hasBackground.value) return
   const prev = t.background
+  delete t.backgroundDesign
   t.background = ''
   t.bgSize = null
   bgSelected.value = false
@@ -939,6 +1049,10 @@ function onKeydown(e) {
 async function saveTemplate() {
   if (!activeTpl.value) return
   errorMsg.value = ''
+  if (designSizeWarning.value) {
+    errorMsg.value = `${designSizeWarning.value}，请调整尺寸后保存`
+    return
+  }
   if (!activeDatasetId.value) {
     errorMsg.value = '模板必须关联数据集：请先在工具栏选择数据集，再保存'
     return
@@ -1013,6 +1127,41 @@ async function removeFont(file) {
   }
 }
 
+let viewMounted = false
+let viewActive = true
+function bindTemplateEvents() {
+  window.addEventListener('keydown', onKeydown)
+  window.addEventListener('paste', onPaste)
+}
+function unbindTemplateEvents() {
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('paste', onPaste)
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', onPointerUp)
+  dragState.value = null
+  guideV.value = null
+  guideH.value = null
+  dragging.value = false
+  dragDepth = 0
+}
+onActivated(() => {
+  viewActive = true
+  bindTemplateEvents()
+  if (viewMounted) {
+    refreshLists().then(() => {
+      // KeepAlive 保留排版草稿，数据页改过的打印字段和样例仍需重新读取。
+      return Promise.all([
+        activeDatasetId.value ? loadCatalog(activeDatasetId.value) : Promise.resolve(),
+        activeTpl.value?.backgroundDesign ? loadActiveDesign() : Promise.resolve(),
+      ])
+    }).catch((err) => { errorMsg.value = extractError(err) })
+  }
+})
+onDeactivated(() => {
+  viewActive = false
+  unbindTemplateEvents()
+})
+
 onMounted(async () => {
   // 纸张与成品尺寸常量由主进程下发（单一权威定义源）
   try {
@@ -1023,18 +1172,16 @@ onMounted(async () => {
     window.__PAGE_SIZES__ = []
     ITEM_SIZE_PRESETS.value = []
   }
-  window.addEventListener('keydown', onKeydown)
-  window.addEventListener('paste', onPaste)
-  await refreshLists()
+  if (viewActive) bindTemplateEvents()
+  try { await refreshLists() } catch (err) { errorMsg.value = extractError(err) }
+  viewMounted = true
 })
 
 onBeforeUnmount(() => {
+  viewActive = false
   for (const face of uploadedFontFaces) document.fonts.delete(face)
   uploadedFontFaces = []
-  window.removeEventListener('keydown', onKeydown)
-  window.removeEventListener('paste', onPaste)
-  window.removeEventListener('pointermove', onPointerMove)
-  window.removeEventListener('pointerup', onPointerUp)
+  unbindTemplateEvents()
 })
 </script>
 
@@ -1185,6 +1332,20 @@ onBeforeUnmount(() => {
           <button class="btn-danger" @click="removeTemplate">删除</button>
         </div>
 
+        <div class="design-toolbar">
+          <span class="tb-label">图层底图</span>
+          <CustomSelect v-model="selectedDesignId" :options="designOptions" width="290px" placeholder="选择已保存工程" />
+          <button class="btn-ghost" :disabled="!candidateDesign" @click="applySelectedDesign()">应用工程</button>
+          <button v-if="candidateSizeWarning" class="btn-ghost" @click="applySelectedDesign(true)">匹配工程尺寸并应用</button>
+          <button class="btn-ghost" @click="editBackgroundDesign">{{ activeTpl.backgroundDesign ? '编辑底图工程' : bgUrl ? '将底图转为图层编辑' : '制作新底图' }}</button>
+          <button v-if="hasBackground" class="btn-ghost" @click="uploadBackground">更换为图片</button>
+          <button v-if="activeTpl.backgroundDesign" class="btn-ghost" @click="removeBackground">移除工程底图</button>
+        </div>
+        <p v-if="activeDesign" class="warn-line">
+          底图工程：{{ activeDesign.name }} · 固定版本 v{{ activeDesign.revision }} · {{ activeDesign.artboard.w }}×{{ activeDesign.artboard.h }}mm
+        </p>
+        <p v-if="designSizeWarning" class="warn-line warn-strong">{{ designSizeWarning }}，请调整工程或成品尺寸后保存</p>
+
         <!-- 多选对齐条：选中 ≥2 个字段时出现 -->
         <div v-if="multiSel.size > 1" class="align-bar">
           <span class="align-label">已选 {{ multiSel.size }} 个字段</span>
@@ -1268,7 +1429,7 @@ onBeforeUnmount(() => {
                    放在所有字段之前，字段在上层，不会挡住拖拽；容器本身不吃事件，
                    只有中间那块按钮可点。有字段时收成底部的小胶囊，避免占住纸面中央。 -->
               <div
-                v-if="!bgUrl"
+                v-if="!hasBackground"
                 class="canvas-drop"
                 :class="{ 'drop-compact': activeTpl.fields.length > 0 }"
               >
@@ -1283,6 +1444,9 @@ onBeforeUnmount(() => {
 
               <!-- 单页：整页底图 + 字段 -->
               <template v-if="!isGrid && !isFold">
+                <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
+                  <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                </div>
                 <img
                   v-if="bgUrl"
                   :src="bgUrl"
@@ -1314,6 +1478,9 @@ onBeforeUnmount(() => {
                    字段只需在下半联摆位，上半联实时镜像同步 -->
               <template v-if="isFold">
                 <div class="canvas-fold-half flip">
+                  <div v-if="activeDesign" class="canvas-design">
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                  </div>
                   <img
                     v-if="bgUrl"
                     :src="bgUrl"
@@ -1334,6 +1501,9 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div class="canvas-fold-half fold-ref">
+                  <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                  </div>
                   <img
                     v-if="bgUrl"
                     :src="bgUrl"
@@ -1361,7 +1531,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div class="canvas-fold-line"></div>
-                <p v-if="bgUrl && activeTpl.fields.length === 0" class="canvas-hint">
+                <p v-if="hasBackground && activeTpl.fields.length === 0" class="canvas-hint">
                   {{ activeDatasetId ? '点击上方字段面板，把字段加入下半联（上半联自动镜像）' : '选择数据集后添加字段' }}
                 </p>
               </template>
@@ -1375,6 +1545,9 @@ onBeforeUnmount(() => {
                   :class="{ cut: cutMarks }"
                   :style="{ left: c.left + '%', top: c.top + '%', width: c.w + '%', height: c.h + '%' }"
                 >
+                  <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                  </div>
                   <img
                     v-if="bgUrl"
                     :src="bgUrl"
@@ -1410,7 +1583,7 @@ onBeforeUnmount(() => {
               <div v-if="guideV !== null" class="snap-guide guide-v" :style="{ left: guideV + 'px' }"></div>
               <div v-if="guideH !== null" class="snap-guide guide-h" :style="{ top: guideH + 'px' }"></div>
 
-              <p v-if="bgUrl && !isGrid && !isFold && activeTpl.fields.length === 0" class="canvas-hint">
+              <p v-if="hasBackground && !isGrid && !isFold && activeTpl.fields.length === 0" class="canvas-hint">
                 {{ activeDatasetId ? '点击上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
               </p>
 
@@ -1418,7 +1591,7 @@ onBeforeUnmount(() => {
                    没有按钮，提示必须出现得及时，否则用户不知道还能删。
                    但**选中字段时要收起来**：此刻用户的心思在字段上，飘一句「点底图」只会打架，
                    而且底图正压在字段底下，本来也轮不到它被点。 -->
-              <p v-if="bgUrl && !selectedField" class="bg-tip">
+              <p v-if="hasBackground && !selectedField" class="bg-tip">
                 {{ bgSelected ? '按 Delete 键移除底图' : '点击底图选中，再按 Delete 移除' }}
               </p>
             </div>
@@ -1428,10 +1601,18 @@ onBeforeUnmount(() => {
             <h3 class="side-title">{{ bgSelected ? '底图' : '字段属性' }}</h3>
             <!-- 底图选中：只报信息与删除方式，不放按钮——删除统一走 Delete 键 -->
             <template v-if="bgSelected && !selectedField">
+              <template v-if="activeDesign">
+                <div class="fill-badge">{{ activeDesign.name }} · v{{ activeDesign.revision }}</div>
+                <p class="kbd-hint">{{ activeDesign.artboard.w }} × {{ activeDesign.artboard.h }} mm · {{ activeDesign.layers.length }} 个图层</p>
+                <button class="btn-ghost" @click="editBackgroundDesign">编辑图层</button>
+                <p class="kbd-hint">按 Delete 解除模板引用，工程保留</p>
+              </template>
+              <template v-else>
               <div class="fill-badge">
                 底图 {{ activeTpl.bgSize ? `${activeTpl.bgSize.width} × ${activeTpl.bgSize.height} px` : '（尺寸未知）' }}
               </div>
               <p class="kbd-hint">按 Delete 键移除底图，图片文件会一并删掉</p>
+              </template>
             </template>
             <template v-if="selectedField">
               <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">
@@ -1727,10 +1908,14 @@ onBeforeUnmount(() => {
   position: relative;
   width: 760px;
   background: #fff;
-  border: 1px solid var(--line-strong);
+  outline: 1px solid var(--line-strong);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
+
+.design-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+.canvas-design { position: absolute; inset: 0; cursor: pointer; overflow: hidden; }
+.canvas-design.selected { outline: 2px solid var(--cinnabar); outline-offset: -2px; }
 
 .canvas-bg {
   position: absolute;
