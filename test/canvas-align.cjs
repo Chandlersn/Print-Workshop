@@ -140,6 +140,9 @@ console.log('== 5. 吸附/对齐数学仍以盒边缘为准（不被本次修改
 console.log('== 6. 上传字体在画布与 PDF 使用同一字体名 ==')
 {
   const fontModule = fs.readFileSync(path.join(ROOT, 'electron/fonts.cjs'), 'utf-8')
+  const layoutModule = fs.readFileSync(path.join(ROOT, 'electron/design-layout.cjs'), 'utf-8')
+  const surfaceSrc = fs.readFileSync(path.join(ROOT, 'src/components/DesignSurface.vue'), 'utf-8')
+  const designerSrc = fs.readFileSync(path.join(ROOT, 'src/views/BackgroundDesignerView.vue'), 'utf-8')
   ok(/new FontFace\(font\.cssFamily/.test(tplSrc) && /document\.fonts\.add\(face\)/.test(tplSrc),
     '画布注册并加载上传字体，而不是只在下拉菜单里列出')
   ok(/fontFamily: family \? JSON\.stringify\(family\)/.test(tplSrc),
@@ -147,6 +150,30 @@ console.log('== 6. 上传字体在画布与 PDF 使用同一字体名 ==')
   ok(/const normalizeFamily = fonts\.normalizeFamily/.test(engineSrc)
     && /cssFamily: normalizeFamily\(family\)/.test(fontModule),
     'PDF 与画布共用同一规范化函数')
+  // I-24 字体名规范化只有一处权威实现
+  // 原来 fonts.cjs / DesignSurface.vue / BackgroundDesignerView.vue 各写了一份
+  // `replace(/['"\\;{}()]/g,'').trim()`；任何一处被改动（比如把 () 从剔除集拿掉）
+  // 都会让 @font-face 声明与引用方静默错配——正是本套件第 6 节要防的那类故障。
+  const INLINE_RULE = "replace(/['\"\\\\;{}()]/g"
+  ok(layoutModule.includes('function normalizeFamily(name)') && layoutModule.includes(INLINE_RULE),
+    '规范化实现只留在 design-layout.cjs（零依赖，Vue 与 Node 都能引用）')
+  ok(fontModule.includes("const { normalizeFamily } = require('./design-layout.cjs')"),
+    'fonts.cjs 复用同一实现而不是再写一份')
+  ok(!surfaceSrc.includes(INLINE_RULE) && !designerSrc.includes(INLINE_RULE),
+    '画布与编辑器不再各自复制一份规范化规则')
+  // 图层 fontFamily 为空 = 编辑器里的「默认字体」。画布靠继承 theme.css 拿字体，
+  // 出片靠 renderDesign 显式写死，两处必须是同一个栈，否则异机会「画布 ≠ 出片」。
+  // 比对按 family 词元（引号内整体保留），免得逗号后的空格 / 大小写造成假阴性。
+  const DEFAULT_STACK = '"Microsoft YaHei","PingFang SC",sans-serif'
+  const themeSrc = fs.readFileSync(path.join(ROOT, 'src/styles/theme.css'), 'utf-8')
+  const bodyFont = (themeSrc.match(/html,\s*body\s*\{[^}]*font-family:\s*([^;]+);/) || [])[1]
+  const familyTokens = (value) => (String(value).match(/"[^"]*"|'[^']*'|[^,\s]+/g) || []).map((x) => x.toLowerCase())
+  ok(layoutModule.includes(`const DEFAULT_FONT_STACK = '${DEFAULT_STACK}'`),
+    '默认字体栈在 design-layout.cjs 里显式声明')
+  ok(bodyFont && JSON.stringify(familyTokens(bodyFont)) === JSON.stringify(familyTokens(DEFAULT_STACK)),
+    '画布继承的字体栈与出片写死的字体栈逐字一致', bodyFont)
+  ok(/fam \? `\$\{cssString\(fam\)\},sans-serif` : DEFAULT_FONT_STACK/.test(layoutModule),
+    '空 family 走默认字体栈而不是退化成裸 sans-serif')
 }
 
 console.log(`\n画布对齐契约：${pass} 项断言通过`)

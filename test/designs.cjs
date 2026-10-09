@@ -44,17 +44,44 @@ try {
   })
   check('已退出进程留下的保存锁自动恢复，活进程锁不会被删除', () => {
     const lock = path.join(tmp, 'designs.write.lock')
+    const owner = path.join(lock, `${process.pid}-aabbcc.json`)
     const crash = spawnSync(process.execPath, ['-e', "const fs=require('fs'),p=require('path'); const d=p.join(process.env.PRINTPRESS_DATA_DIR,'designs.write.lock');fs.mkdirSync(d);fs.writeFileSync(p.join(d,process.pid+'-aabbcc.json'),JSON.stringify({pid:process.pid,createdAt:Date.now()}));process.exit(0)"], { env: process.env, encoding: 'utf8' })
     assert.equal(crash.status, 0, crash.stderr)
     assert.ok(designs.saveDesign(draft()).id)
     assert.equal(fs.existsSync(lock), false)
     fs.mkdirSync(lock)
-    const owner = path.join(lock, `${process.pid}-aabbcc.json`)
     fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, createdAt: Date.now() }))
     try {
       assert.throws(() => designs.saveDesign(draft()), /另一个进程/)
       assert.equal(fs.existsSync(owner), true)
     } finally { fs.unlinkSync(owner); fs.rmdirSync(lock) }
+    // PID 复用兜底：PID 还活着但锁已超过 TTL，只可能是旧进程崩溃后被复用的残留锁。
+    // 没有这条兜底，保存会永久报「另一个进程正在保存」且没有任何自助恢复入口。
+    fs.mkdirSync(lock)
+    fs.writeFileSync(owner, JSON.stringify({ pid: process.pid, createdAt: Date.now() - 2 * 60 * 60 * 1000 }))
+    assert.ok(designs.saveDesign(draft()).id)
+    assert.equal(fs.existsSync(lock), false)
+    // 锁位置出现普通文件（杀软 / 同步盘 / 手工误建）时同样必须自愈：
+    // 本模块的锁一律是目录，文件永远轮不到我们释放。
+    fs.writeFileSync(lock, 'not-a-lock')
+    assert.ok(designs.saveDesign(draft()).id)
+    assert.equal(fs.existsSync(lock), false)
+  })
+  check('数据目录尚不存在时导入素材也能自建目录（不许抛原生 ENOENT）', () => {
+    // 导入素材这条路径不持锁，不能依赖 withLock 建目录：GUI 有 ensureDataDir() 兜着，
+    // 但 CLI / agent（PRINTPRESS_DATA_DIR 指向全新目录）会直接拿到一句 fs 报错。
+    const fresh = path.join(tmp, 'fresh-nested', 'data')
+    assert.equal(fs.existsSync(fresh), false)
+    const child = spawnSync(process.execPath, ['-e',
+      "const fs=require('fs'),p=require('path');"
+      + "const d=require('./electron/designs.cjs');"
+      + "const a=d.importImageBytes({name:'x.png',base64:fs.readFileSync('test/fixtures/tiny.png').toString('base64')});"
+      + "if(!fs.existsSync(p.join(process.env.PRINTPRESS_DATA_DIR,'design-assets')))process.exit(3);"
+      + 'console.log(a.id)'],
+    { cwd: root, env: { ...process.env, PRINTPRESS_DATA_DIR: fresh }, encoding: 'utf8' })
+    assert.equal(child.status, 0, child.stderr)
+    assert.match(child.stdout.trim(), /^asset_[a-f0-9]{64}$/)
+    assert.equal(fs.existsSync(fresh), true)
   })
   check('JPEG EXIF 方向 5–8 使用转置后的宽高，方向 3 保持宽高且原字节不变', () => {
     const jpeg = fs.readFileSync(path.join(__dirname, 'fixtures/design-portrait.jpg'))

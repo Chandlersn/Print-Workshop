@@ -1,6 +1,6 @@
 <script setup>
 import { computed, getCurrentInstance, watch } from 'vue'
-import { renderDesign } from '../../electron/design-layout.cjs'
+import { renderDesign, normalizeFamily } from '../../electron/design-layout.cjs'
 
 const props = defineProps({
   design: { type: Object, required: true },
@@ -27,7 +27,7 @@ const content = computed(() => {
     return renderDesign(props.design, {
       classPrefix: prefix,
       assetUrl,
-      fontFamily: (name) => String(name || '').replace(/['"\\;{}()]/g, '').trim(),
+      fontFamily: normalizeFamily,
     })
   } catch (err) {
     return { html: '', css: '', error: err.message || String(err) }
@@ -39,15 +39,12 @@ const surfaceStyle = computed(() => ({
   height: `${props.design.artboard.h}mm`,
   transform: `scale(${scale.value})`,
 }))
-function resourceError(event) {
-  if (event.target?.tagName === 'IMG') emit('error', '底图素材无法加载，请检查工程图片是否完整。')
-}
 </script>
 
 <template>
   <div class="design-surface" :style="height ? { height: `${height}px` } : {}" aria-hidden="true">
     <component :is="'style'">{{ content.css }}</component>
-    <div class="design-surface-content" :style="surfaceStyle" @error.capture="resourceError" v-html="content.html"></div>
+    <div class="design-surface-content" :style="surfaceStyle" v-html="content.html"></div>
     <span v-if="content.error" class="design-surface-error">{{ content.error }}</span>
   </div>
 </template>

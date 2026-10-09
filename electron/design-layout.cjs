@@ -32,6 +32,32 @@ function color(value, fallback) {
   return s
 }
 
+/**
+ * family 名规范化：**唯一权威实现**（画布 / 编辑器 / PDF / 打印 / PNG 导出共用）。
+ *
+ * 上传文件名里可能带引号等 CSS 语法字符（`测试'楷体.ttf`），而模板与图层里存的
+ * 往往是用户手输的原名。@font-face 声明与引用方必须归一到同一个字符串，否则
+ * 字体声明存在却匹配不上（表现为「字体没生效」）。
+ * 剔除集：引号、反斜杠、分号、大括号、圆括号——它们在 CSS 字符串内有语法意义。
+ *
+ * 为什么落在这里而不是 fonts.cjs：本模块被 Vue 与 Node 共用且零依赖，而
+ * fonts.cjs 会 require('child_process') 并在模块加载时读 process.env，
+ * 渲染进程 import 它会直接崩。fontFamily 空串表示「默认字体」，按原样返回。
+ */
+function normalizeFamily(name) {
+  return String(name == null ? '' : name).replace(/['"\\;{}()]/g, '').trim()
+}
+
+/**
+ * 图层 fontFamily 为空（编辑器里的「默认字体」）时使用的字体栈。
+ *
+ * 必须与 App 画布继承的字体栈逐字一致（`src/styles/theme.css` 的 `html, body`），
+ * 否则同一个「默认字体」在画布与出片上会落到不同字形——本机可能恰好相同，
+ * 换台机器就是「画布 ≠ 出片」的静默裂缝。两处成对，改一处必须同时改另一处，
+ * `test/canvas-align.cjs` §6 会断言两者相等。
+ */
+const DEFAULT_FONT_STACK = '"Microsoft YaHei","PingFang SC",sans-serif'
+
 function normalizeDesign(input) {
   const doc = object(input, '底图工程')
   if (doc.schemaVersion !== undefined && doc.schemaVersion !== 1 && doc.schemaVersion !== 2) throw new Error('不支持的底图工程版本')
@@ -180,7 +206,8 @@ function renderDesign(input, options = {}) {
       const c = l.crop
       body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%"></div></div>`
     } else if (l.type === 'text') {
-      style.push(`font-family:${cssString(family(l.fontFamily))},sans-serif`, `font-size:${l.fontSize}pt`, `font-weight:${l.bold ? 700 : 400}`, `line-height:${l.lineHeight}`, `letter-spacing:${l.letterSpacing}pt`, `color:${l.color}`, `text-align:${l.align}`, 'white-space:pre-wrap', 'overflow-wrap:anywhere', 'overflow:hidden')
+      const fam = family(l.fontFamily)
+      style.push(`font-family:${fam ? `${cssString(fam)},sans-serif` : DEFAULT_FONT_STACK}`, `font-size:${l.fontSize}pt`, `font-weight:${l.bold ? 700 : 400}`, `line-height:${l.lineHeight}`, `letter-spacing:${l.letterSpacing}pt`, `color:${l.color}`, `text-align:${l.align}`, 'white-space:pre-wrap', 'overflow-wrap:anywhere', 'overflow:hidden')
       body = escapeHtml(l.text)
     } else {
       const sw = Math.min(l.strokeWidth, l.w, l.h)
@@ -198,4 +225,4 @@ function renderDesign(input, options = {}) {
   return { html: `<div class="${prefix}-root">${fragments.join('')}</div>`, css: css.join('\n'), fontFamilies: collectFontFamilies(doc) }
 }
 
-module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, LIMITS }
+module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, LIMITS }

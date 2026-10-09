@@ -211,17 +211,31 @@ async function applyDesignReference(ref, matchSize = false) {
   if (!t) return
   const doc = await window.printpress.getDesign(ref.id, ref.revision)
   if (activeTpl.value !== t) return
-  if (matchSize) {
-    if (isGrid.value) {
-      ensureLayout()
-      t.layout.itemW = doc.artboard.w
-      t.layout.itemH = doc.artboard.h
-    } else {
-      t.pageSize = { id: 'custom', w: doc.artboard.w, h: doc.artboard.h * (isFold.value ? 2 : 1) }
+  // 「匹配工程尺寸并应用」会改纸张或成品尺寸，而这些改动不进撤销栈。
+  // 所以失败时必须原样回滚，否则用户会留下一个被悄悄改过、又没应用成功的尺寸。
+  const sizeBefore = matchSize
+    ? { pageSize: t.pageSize, layout: t.layout ? { ...t.layout } : undefined }
+    : null
+  try {
+    if (matchSize) {
+      if (isGrid.value) {
+        ensureLayout()
+        t.layout.itemW = doc.artboard.w
+        t.layout.itemH = doc.artboard.h
+      } else {
+        t.pageSize = { id: 'custom', w: doc.artboard.w, h: doc.artboard.h * (isFold.value ? 2 : 1) }
+      }
     }
+    const issue = designSizeIssue(doc)
+    if (issue) throw new Error(`${issue}，请调整尺寸后再应用`)
+  } catch (err) {
+    if (sizeBefore) {
+      t.pageSize = sizeBefore.pageSize
+      if (sizeBefore.layout === undefined) delete t.layout
+      else t.layout = sizeBefore.layout
+    }
+    throw err
   }
-  const issue = designSizeIssue(doc)
-  if (issue) throw new Error(`${issue}，请调整尺寸后再应用`)
   t.backgroundDesign = { id: doc.id, revision: doc.revision }
   // 旧图保留到用户主动移除：编辑器已经复制素材，不因切换草稿损坏已保存模板。
   t.background = ''

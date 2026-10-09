@@ -14,6 +14,15 @@ const MAX_PIXELS = 80000000
 const ASSET_ID = /^asset_([a-f0-9]{64})$/
 const DESIGN_ID = /^design_[a-f0-9]{24}$/
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
+/**
+ * 保存锁的最终兜底超时（与 PID 无关）。
+ *
+ * `withLock` 的临界区只做「读索引 + 读单个版本 JSON + statSync 字体 + 两次原子写」，
+ * 素材字节的哈希与校验都在锁外，正常远低于 1 分钟。活着的 PID 却持有超过 1 小时的锁，
+ * 只可能是「旧进程崩溃后 PID 被复用」——此时 `process.kill(pid, 0)` 会误判为活锁，
+ * 没有这条兜底就会永久锁死保存（且没有任何自助恢复入口）。
+ */
+const LOCK_TTL_MS = 60 * 60 * 1000
 // Metadata only: source bytes are hashed on every read, but a known hash need not be inflated again.
 const VERIFIED_IMAGES = new Map()
 
@@ -34,24 +43,30 @@ function withLock(run) {
     for (let attempt = 0; attempt < 3 && !acquired; attempt++) {
       try { fs.renameSync(pending, lock); acquired = true } catch (err) {
         if (!fs.existsSync(lock)) throw err
-        if (!recoverAbandonedLock(lock)) throw new Error('底图工程正在由另一个进程保存，请稍后重试')
+        if (!recoverAbandonedLock(lock)) {
+          // 把锁的绝对路径写进报错：重试解决不了残留锁，用户/agent 需要知道删什么。
+          throw new Error(`底图工程正在由另一个进程保存，请稍后重试（若长期如此，可关闭所有批印坊窗口后删除：${lock}）`)
+        }
       }
     }
     if (!acquired) throw new Error('底图工程正在保存，请稍后重试')
     return run()
   } finally {
+    // 清理失败绝不能顶掉 run() 的真实结果：这里只尽力而为，剩下的由下一次
+    // withLock 的 recoverAbandonedLock 回收（空目录会被直接 rmdir 掉）。
     const owned = acquired ? lock : pending
-    const owner = path.join(owned, ownerName)
-    if (fs.existsSync(owner)) fs.unlinkSync(owner)
-    try { fs.rmdirSync(owned) } catch (err) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(err.code)) throw err }
+    try { fs.unlinkSync(path.join(owned, ownerName)) } catch { /* 已被清理或不可删 */ }
+    try { fs.rmdirSync(owned) } catch { /* 非空/占用/已不存在都留给下一次回收 */ }
   }
 }
 function recoverAbandonedLock(lock) {
   let stat
   try { stat = fs.statSync(lock) } catch (err) { if (err.code === 'ENOENT') return true; throw err }
-  // Never expire an unidentified lock by time alone: a long-running live save may own it.
+  // 本模块的锁一律是目录（由 rename 一个非空 pending 目录产生）。这个位置出现普通文件
+  // 只可能是外部误建（杀软 / 同步盘 / 手工），它永远不会被我们释放——直接清掉，
+  // 否则保存会永久报「另一个进程正在保存」且无路可走。
   if (!stat.isDirectory()) {
-    return false
+    try { fs.unlinkSync(lock); return true } catch (err) { return err.code === 'ENOENT' }
   }
   const owners = fs.readdirSync(lock)
   for (const name of owners) {
@@ -65,7 +80,10 @@ function recoverAbandonedLock(lock) {
     if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(owner.createdAt)) return false
     let alive = true
     try { process.kill(owner.pid, 0) } catch (err) { if (err.code === 'ESRCH') alive = false }
+    // 早于本次开机 = 上一次开机留下的残留。
     if (owner.createdAt < Date.now() - os.uptime() * 1000 - 5000) alive = false
+    // PID 复用兜底：临界区远短于 TTL，所以「PID 还活着但锁已超过 TTL」只可能是残留锁。
+    if (owner.createdAt < Date.now() - LOCK_TTL_MS) alive = false
     if (alive) return false
     // Only remove the unique dead owner's file; another process's new lock is nonempty.
     try { fs.unlinkSync(file) } catch (err) { if (err.code !== 'ENOENT') throw err }
@@ -77,6 +95,10 @@ function recoverAbandonedLock(lock) {
   }
 }
 function atomicFile(file, bytes) {
+  // assertRealDataPath 会 realpathSync(DATA_DIR)，所以数据目录必须先存在。
+  // 导入素材这条路径不持锁（importBuffer 不做 withLock），不能依赖 withLock 建目录：
+  // 否则全新数据目录下第一次导入会抛原生 ENOENT。
+  fs.mkdirSync(DATA_DIR, { recursive: true })
   let existing = path.dirname(file)
   while (!fs.existsSync(existing)) existing = path.dirname(existing)
   assertRealDataPath(existing)

@@ -1,9 +1,9 @@
 <script setup>
-import { ref, computed, watch, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
-import { normalizeDesign, imageDpi } from '../../electron/design-layout.cjs'
+import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK } from '../../electron/design-layout.cjs'
 import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
   createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection,
@@ -109,6 +109,8 @@ let initialized = false
 let active = false
 let draftTimer = null
 let gesture = null
+// 双击文字图层的判定状态（见 pointerDown 里的说明）
+let lastTextDown = { id: '', at: 0 }
 let keyBefore = null
 let keyboardTimer = null
 const fontFaces = []
@@ -201,7 +203,7 @@ async function refreshFonts() {
   for (const font of fonts.value.uploaded) {
     if (loadedFontFiles.has(font.file)) continue
     loadedFontFiles.add(font.file)
-    const family = font.cssFamily || String(font.family).replace(/['"\\;{}()]/g, '').trim()
+    const family = font.cssFamily || normalizeFamily(font.family)
     const face = new FontFace(family, `url("pp://media/print-fonts/${encodeURIComponent(font.file)}")`)
     document.fonts.add(face); fontFaces.push(face)
     face.load().catch(() => {
@@ -226,7 +228,6 @@ async function save(copy = false, apply = false) {
   try {
     const submitted = normalizeDesign(clone(design.value))
     if (copy) { delete submitted.id; submitted.revision = 0; submitted.name = `${submitted.name} 副本` }
-    const submittedContent = fingerprint(submitted)
     const contentBeforeCopy = fingerprint(design.value)
     const saved = await window.printpress.saveDesign(submitted)
     // Edits made while the write is in flight are retained and remain dirty.
@@ -236,7 +237,8 @@ async function save(copy = false, apply = false) {
       design.value.revision = saved.revision
       if (copy && design.value.name === submitted.name.replace(/ 副本$/, '')) design.value.name = submitted.name
     }
-    savedFingerprint.value = fingerprint(saved) || submittedContent
+    // 落点就是主进程规范化后的文档本身：它的指纹永远非空，比较基准只能是它。
+    savedFingerprint.value = fingerprint(saved)
     message.value = dirty.value ? '已保存提交时的版本；之后的修改尚未保存。' : `已保存 · 第 ${saved.revision} 版`
     await refreshProjects()
     persistDraft()
@@ -373,6 +375,103 @@ async function addImage() {
   catch (err) { fail(err) }
   finally { busy.value = false }
 }
+
+// ---- 粘贴 / 拖拽直接加图片图层 ----
+/**
+ * 剪贴板截图与拖进来的文件都只有内存字节、没有文件路径，所以统一读成 base64 走
+ * design:importBytes（与模板页 uploadBackgroundBytes 同一条思路）。真实格式由主进程
+ * 按内容嗅探（designs.cjs），前端给的文件名只当归档命名用——拖拽/粘贴场景下它完全不可信。
+ * 上限与领域层 MAX_BYTES 对齐，避免前端比主进程更严、报错口径打架。
+ */
+const MAX_IMAGE_BYTES = 64 * 1024 * 1024
+const IMAGE_LIKE = /\.(png|jpe?g)$/i
+const dropActive = ref(false)
+// dragenter / dragleave 会在子元素间冒泡，用进出计数避免高亮闪烁
+let dropDepth = 0
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const out = String(reader.result || '')
+      const comma = out.indexOf(',')
+      resolve(comma >= 0 ? out.slice(comma + 1) : out) // 去掉 data:image/png;base64, 前缀
+    }
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/** 粘贴与拖拽共用：校验 → 导入素材 → 立刻落成一个图片图层（与「＋ 图片」同一条落点）。 */
+async function acceptImageFile(file) {
+  if (!file || busy.value) return
+  // 部分拖拽源不带 type，此时退回按文件名判断；最终仍由主进程按内容定夺
+  const looksImage = file.type
+    ? file.type === 'image/png' || file.type === 'image/jpeg'
+    : !file.name || IMAGE_LIKE.test(file.name)
+  if (!looksImage) { fail(new Error('只能粘贴 / 拖入 PNG 或 JPEG 图片')); return }
+  if (file.size > MAX_IMAGE_BYTES) {
+    fail(new Error(`图片超过 ${MAX_IMAGE_BYTES / 1024 / 1024}MB，请先压缩后再导入`))
+    return
+  }
+  busy.value = true
+  try {
+    const base64 = await fileToBase64(file)
+    const asset = await window.printpress.uploadDesignImageBytes({ base64, name: file.name || '粘贴的图片' })
+    add('image', asset)
+    // add() 内部的 commit 会 clearFeedback，所以这句提示必须写在它之后
+    message.value = `已加入图片图层：${asset.name}`
+  } catch (err) { fail(err) }
+  finally { busy.value = false }
+}
+
+/**
+ * Ctrl+V 直接粘贴截图。
+ * 焦点在输入框 / 文本域 / 可编辑区时不能抢——那里的粘贴属于文字编辑。
+ */
+function onPaste(event) {
+  if (!active || pending.value || showExport.value) return
+  if (event.target?.closest?.('input,textarea,select,[contenteditable="true"]')) return
+  const items = event.clipboardData && event.clipboardData.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (!file) continue
+    event.preventDefault()
+    acceptImageFile(file)
+    return
+  }
+}
+
+function onDragEnter() {
+  if (pending.value || showExport.value) return
+  dropDepth += 1
+  dropActive.value = true
+}
+
+function onDragOver(event) {
+  if (pending.value || showExport.value) return
+  event.preventDefault() // 不阻止默认行为的话，浏览器会直接把这个文件打开
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave() {
+  dropDepth = Math.max(0, dropDepth - 1)
+  if (dropDepth === 0) dropActive.value = false
+}
+
+function onDrop(event) {
+  event.preventDefault()
+  dropDepth = 0
+  dropActive.value = false
+  if (pending.value || showExport.value) return
+  const dt = event.dataTransfer
+  const file = dt && dt.files && dt.files.length ? dt.files[0] : null
+  if (file) { acceptImageFile(file); return }
+  // 从网页里拖图只有 URL、没有文件内容，暂不支持（也避免去下载外链资源）
+  fail(new Error('请把图片文件直接拖进来（暂不支持拖入网页图片链接）'))
+}
 function setDoc(key, value) {
   commit((doc) => { doc[key] = value })
 }
@@ -387,6 +486,9 @@ function setLayer(key, value, numeric = false) {
   const id = single.value.id
   commit((doc) => {
     const layer = doc.layers.find((item) => item.id === id)
+    // 工程名与组名都有非空校验，图层名保持一致：空名在图层列表里是一行无法辨认的空白。
+    // 抛错走 commit 的回滚 + inputEpoch 重绘，输入框会退回模型里的旧名字。
+    if (key === 'name' && !String(value).trim()) throw new Error('图层名称不能为空')
     const previous = layer[key]
     layer[key] = numeric ? Number(value) : value
     if (layer.type === 'image' && keepRatio.value && (key === 'w' || key === 'h') && previous > 0) {
@@ -491,9 +593,142 @@ function hitStyle(layer) {
     transform: `rotate(${layer.rotation}deg)`,
   }
 }
+// ---- 画布内就地编辑文字（像改 PPT 的文本框）----
+/**
+ * 双击文字图层后，在画布上原位出现一个编辑框，所见即所得地改字。
+ *
+ * 与出片保持一致的关键：**复用 DesignSurface 的同一套坐标变换**——内容按毫米排版、
+ * 再整体 scale 到画布宽度，字号同样用 pt。于是编辑框里的字与打印出来的字同源同尺寸，
+ * 不需要手工换算 px，也不会因换算舍入而错位（换算一次 96/72 就可能差一像素）。
+ */
+const editingTextId = ref('')
+const editingValue = ref('')
+// 模板 ref 在 <script setup> 里必须绑定同名变量（脚本中不能用 $refs 访问）
+const inlineTextEditor = ref(null)
+const editingText = computed(() => (editingTextId.value
+  ? design.value.layers.find((layer) => layer.id === editingTextId.value) || null
+  : null))
+// 编辑中的图层先隐去画布上的文字，否则会和编辑框里的字叠成双影
+const surfaceDesign = computed(() => {
+  const id = editingTextId.value
+  if (!id) return design.value
+  return { ...design.value, layers: design.value.layers.map((layer) => (layer.id === id ? { ...layer, text: '' } : layer)) }
+})
+const textEditScale = computed(() => canvasWidth.value / (design.value.artboard.w * 96 / 25.4))
+const textEditLayerStyle = computed(() => ({
+  position: 'absolute',
+  left: '0',
+  top: '0',
+  width: `${design.value.artboard.w}mm`,
+  height: `${design.value.artboard.h}mm`,
+  transform: `scale(${textEditScale.value})`,
+  transformOrigin: '0 0',
+  pointerEvents: 'none',
+  zIndex: 6,
+}))
+const inlineTextStyle = computed(() => {
+  const layer = editingText.value
+  if (!layer) return {}
+  const fam = normalizeFamily(layer.fontFamily)
+  // 逐项对齐 renderDesign 的文字样式（design-layout.cjs），少一项就会「编辑时一个样、出片另一个样」
+  return {
+    left: `${layer.x}mm`,
+    top: `${layer.y}mm`,
+    width: `${layer.w}mm`,
+    height: `${layer.h}mm`,
+    transform: `rotate(${layer.rotation}deg)`,
+    opacity: layer.opacity,
+    fontFamily: fam ? `"${fam}",sans-serif` : DEFAULT_FONT_STACK,
+    fontSize: `${layer.fontSize}pt`,
+    fontWeight: layer.bold ? 700 : 400,
+    lineHeight: layer.lineHeight,
+    letterSpacing: `${layer.letterSpacing}pt`,
+    color: layer.color,
+    textAlign: layer.align,
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere',
+  }
+})
+
+function beginTextEdit(layer) {
+  if (!layer || layer.type !== 'text' || layer.locked) return
+  // 正在编辑别的图层就先提交，否则刚敲的字会被静默丢掉（pointerDown 里的 preventDefault
+  // 挡掉了浏览器的默认焦点转移，blur 不会来救场）。
+  if (editingTextId.value && editingTextId.value !== layer.id) finishTextEdit()
+  const fresh = design.value.layers.find((item) => item.id === layer.id) || layer
+  if (!selectedIds.value.includes(fresh.id)) selectLayer(fresh)
+  editingValue.value = fresh.text
+  editingTextId.value = fresh.id
+}
+
+/**
+ * 提交画布上的就地编辑。重复调用安全：第一次收尾后 editingTextId 即为空。
+ *
+ * 触发点有四处，少一个都会「看不见地丢字」：
+ *  ① textarea 的 blur（Tab 走开、窗口失焦）；
+ *  ② Esc —— 照 PPT 的习惯：Esc 收工并保留改动（想撤销按 Ctrl+Z）；
+ *  ③ window 捕获阶段的 pointerdown —— 见 onWindowPointerDown；
+ *  ④ 保存 / 切页 / 关窗前主动收尾（onKeyDown 的 Ctrl+S 分支、deactivate、onBeforeUnload）。
+ *
+ * 特别注意 ③ 为什么必须自己来：pointerDown() 对 pointerdown 调了 preventDefault()，
+ * 浏览器就不会把焦点移走，点另一个图层时 blur 根本不会触发，只能主动收尾。
+ * 另外，**文档无焦点的窗口里 Chromium 不派发 focus/blur 事件**（离屏窗口、e2e 环境），
+ * 所以 ③ 也是唯一在那种环境下仍然生效的收尾路径。
+ */
+function finishTextEdit() {
+  const id = editingTextId.value
+  if (!id) return
+  editingTextId.value = '' // 先退出编辑态，避免 blur 重入
+  const layer = design.value.layers.find((item) => item.id === id)
+  if (!layer || editingValue.value === layer.text) return // 没改就不进撤销栈
+  commit((doc) => {
+    const target = doc.layers.find((item) => item.id === id)
+    if (target) target.text = editingValue.value
+  })
+}
+
+// 点编辑框以外的地方就收工：画布、右侧面板、工具栏都算数。
+function onWindowPointerDown(event) {
+  if (!editingTextId.value) return
+  if (event.target === inlineTextEditor.value) return // 点编辑框内部是在挪光标，不收工
+  finishTextEdit()
+}
+
+watch(editingTextId, async (id) => {
+  if (!id) return
+  await nextTick()
+  const el = inlineTextEditor.value
+  if (!el) return
+  el.focus()
+  el.select() // 整段选中：想重写就直接打字，想微调点一下取消选择
+})
+
 function pointerDown(event, layer, resize = false) {
   if (event.button !== 0 || pending.value) return
   event.preventDefault(); event.stopPropagation()
+  /*
+   * 双击文字图层 → 直接改字。
+   *
+   * 两个都不能用的写法：
+   * ① 模板上的 @dblclick —— 本函数对 pointerdown 调了 preventDefault()，按 Pointer Events
+   *    规范会一并抑制随后的 mousedown / click / dblclick，那个监听器永远收不到事件；
+   * ② event.detail === 2 —— detail 是 MouseEvent 的概念，Chromium 的 pointerdown 上恒为 0
+   *    （实测两次按下拿到 [0, 0]），永远判不出来。
+   *
+   * 所以只能自己记「上一次按下同一文字图层的时刻」。400ms 取在 Windows 默认双击间隔
+   * （500ms）之内，并且只在同一图层上才算——点了别的图层就重新计时，不会跨图层误判。
+   */
+  if (!resize) {
+    const now = Date.now()
+    const isDouble = layer.type === 'text' && !layer.locked
+      && lastTextDown.id === layer.id && now - lastTextDown.at < 400
+    lastTextDown = { id: layer.type === 'text' && !layer.locked ? layer.id : '', at: now }
+    if (isDouble) {
+      lastTextDown = { id: '', at: 0 } // 消费掉，避免第三下继续触发
+      beginTextEdit(layer)
+      return
+    }
+  }
   if (!resize && (event.shiftKey || event.ctrlKey || event.metaKey)) { selectLayer(layer, event); return }
   if (!selectedIds.value.includes(layer.id)) selectLayer(layer)
   if (!resize) selectedIds.value = expandSelection(design.value, selectedIds.value)
@@ -588,7 +823,8 @@ function onKeyDown(event) {
   if (!active || pending.value || showExport.value || event.isComposing) return
   const input = event.target?.closest?.('input,textarea,select,[contenteditable="true"]')
   const modifier = event.ctrlKey || event.metaKey
-  if (modifier && event.key.toLowerCase() === 's') { event.preventDefault(); event.target?.blur?.(); save(); return }
+  // 就地编辑要先落定再存盘，否则「改完字按 Ctrl+S」会把旧文字存下去
+  if (modifier && event.key.toLowerCase() === 's') { event.preventDefault(); finishTextEdit(); event.target?.blur?.(); save(); return }
   if (input) return
   if (event.key === 'Escape') { cancelGesture(); selectedIds.value = []; return }
   if (modifier && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
@@ -612,7 +848,7 @@ function onKeyDown(event) {
   }
 }
 function onKeyUp(event) { if (event.key.startsWith('Arrow')) finishKeyboardMove() }
-function onBeforeUnload() { document.activeElement?.blur?.(); endGesture(); finishKeyboardMove(); persistDraft() }
+function onBeforeUnload() { finishTextEdit(); document.activeElement?.blur?.(); endGesture(); finishKeyboardMove(); persistDraft() }
 function activate() {
   if (active) return
   active = true
@@ -620,17 +856,28 @@ function activate() {
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('blur', endGesture)
   window.addEventListener('beforeunload', onBeforeUnload)
+  // 捕获阶段：要在 pointerDown 的 preventDefault 之前收尾，也要先于被点控件的 click 处理器，
+  // 这样「改完字直接点保存」保存到的就是新文字。
+  window.addEventListener('pointerdown', onWindowPointerDown, true)
+  // 粘贴挂在 window 上（而不是画布上）：截图粘贴时焦点可能在任意地方，
+  // 挂画布会漏掉大多数情况。用 active 门控，切走标签页后不再响应。
+  window.addEventListener('paste', onPaste)
   if (initialized) Promise.allSettled([refreshProjects(), refreshFonts()]).then((results) => {
     for (const result of results) if (result.status === 'rejected') fail(result.reason)
   })
 }
 function deactivate() {
   active = false
+  finishTextEdit()
   endGesture(); finishKeyboardMove(); persistDraft()
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('blur', endGesture)
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('pointerdown', onWindowPointerDown, true)
+  window.removeEventListener('paste', onPaste)
+  dropDepth = 0
+  dropActive.value = false
 }
 onMounted(async () => {
   try {
@@ -679,12 +926,13 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
       <aside class="designer-panel tools-panel">
         <h3>添加内容</h3>
         <div class="tool-grid">
-          <button data-testid="design-add-image" :disabled="busy" @click="addImage">＋ 图片</button>
+          <button data-testid="design-add-image" :disabled="busy" title="也可以 Ctrl+V 粘贴截图，或把图片文件拖进画布" @click="addImage">＋ 图片</button>
           <button data-testid="design-add-text" @click="add('text')">＋ 文字</button>
           <button data-testid="design-add-rect" @click="add('rect')">＋ 矩形</button>
           <button @click="add('ellipse')">＋ 椭圆</button>
           <button @click="add('line')">＋ 直线</button>
         </div>
+        <p class="muted">图片也可以直接 <b>Ctrl+V</b> 粘贴截图，或把图片文件拖进画布。</p>
         <h3>工程库 <span>{{ projects.length }}</span></h3>
         <p v-if="!projects.length" class="muted">保存后可在这里重新打开。</p>
         <div class="project-list">
@@ -734,19 +982,34 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           <button title="恢复预览大小" @click="zoom = 1">{{ Math.round(zoom * 100) }}%</button>
           <button title="放大" @click="zoom = Math.min(3, round(zoom + 0.25))">＋</button>
         </div>
-        <div class="canvas-scroll" @pointerdown.self="selectedIds = []">
+        <div class="canvas-scroll" :class="{ 'drop-active': dropActive }" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
           <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
-            <DesignSurface :design="design" :width="canvasWidth" :height="canvasHeight" @error="fail" />
-            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)" @dblclick="layer.type === 'text' && $refs.textEditor?.focus()">
-              <button v-if="single?.id === layer.id && editable.some(item => item.id === layer.id)" class="resize-handle" aria-label="调整图层大小" title="拖动调整大小；Shift 保持比例" @pointerdown.stop="pointerDown($event, layer, true)"></button>
+            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" @error="fail" />
+            <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
+              <textarea
+                ref="inlineTextEditor"
+                data-testid="design-inline-text"
+                class="inline-text-editor"
+                :style="inlineTextStyle"
+                :value="editingValue"
+                spellcheck="false"
+                @input="editingValue = $event.target.value"
+                @pointerdown.stop
+                @keydown.esc.prevent="finishTextEdit"
+                @blur="finishTextEdit"
+              ></textarea>
+            </div>
+            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)">
+              <button v-if="single?.id === layer.id && editable.some(item => item.id === layer.id)" class="resize-handle" :class="{ 'line-resize-handle': layer.type === 'line' }" :aria-label="layer.type === 'line' ? '调整直线长度' : '调整图层大小'" :title="layer.type === 'line' ? '拖动线段末端调整长度' : '拖动调整大小；Shift 保持比例'" @pointerdown.stop="pointerDown($event, layer, true)"></button>
             </div>
             <div v-for="guide in visibleGuides" :key="guide.id" :data-guide-line="guide.id" class="persistent-guide" :class="guide.axis === 'x' ? 'vertical' : 'horizontal'" :style="guide.axis === 'x' ? { left: `${guide.position * pxPerMm}px` } : { top: `${guide.position * pxPerMm}px` }"></div>
             <div v-if="guides.x !== null" class="snap-guide vertical" :style="{ left: `${guides.x * pxPerMm}px` }"></div>
             <div v-if="guides.y !== null" class="snap-guide horizontal" :style="{ top: `${guides.y * pxPerMm}px` }"></div>
+            <div v-if="dropActive" class="drop-hint" aria-hidden="true">松开鼠标，把图片加为图层</div>
           </div>
         </div>
         <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
-        <p class="shortcut-note">Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
+        <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
       </div>
       <aside class="designer-panel inspector">
         <h3>工程与画布</h3>
@@ -795,7 +1058,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
               <label>不透明度 %<input type="number" min="0" max="100" step="1" :value="Math.round(single.opacity * 100)" @change="setLayer('opacity', Number($event.target.value) / 100, true)"></label>
             </div>
             <template v-if="single.type === 'text'">
-              <label>固定文字<textarea ref="textEditor" data-testid="design-text" rows="4" :value="single.text" @change="setLayer('text', $event.target.value)"></textarea></label>
+              <label>固定文字<textarea data-testid="design-text" rows="4" :value="single.text" @change="setLayer('text', $event.target.value)"></textarea></label>
               <label>字体<select :value="single.fontFamily" @change="setLayer('fontFamily', $event.target.value)"><option value="">默认字体</option><option v-for="name in fontNames" :key="name" :value="name">{{ name }}</option><option v-if="single.fontFamily && !fontNames.includes(single.fontFamily)" :value="single.fontFamily">{{ single.fontFamily }}（当前未找到）</option></select></label>
               <div class="property-grid">
                 <label>字号 pt<input type="number" min="1" step="1" :value="single.fontSize" @change="setLayer('fontSize', $event.target.value, true)"></label>
@@ -884,6 +1147,12 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .canvas-toolbar { display: flex; align-items: center; gap: 7px; background: var(--paper-card); border: 1px solid var(--line); padding: 8px; border-radius: 8px 8px 0 0; }
 .toolbar-spacer { flex: 1; }
 .canvas-scroll { overflow: auto; min-height: 430px; height: calc(100vh - 295px); max-height: 880px; padding: 30px; background-color: var(--line); background-image: radial-gradient(var(--stone) .6px, transparent .6px); background-size: 12px 12px; }
+/* 拖入高亮：用 outline 而不是 border —— 不参与布局，画布尺寸不会被拖动过程改变 */
+.canvas-scroll.drop-active { outline: 2px dashed var(--cinnabar); outline-offset: -4px; }
+.drop-hint { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: var(--paper-card); opacity: .88; color: var(--cinnabar); font-size: 13px; font-weight: 600; pointer-events: none; }
+/* 画布内就地编辑：尺寸/字号/行距全部由 inline style 按图层数据给出，这里只做「把浏览器默认外观清干净」，
+   否则 textarea 自带的 border/padding 会让编辑中的字比出片时偏一点。outline 不占布局。 */
+.inline-text-editor { position: absolute; box-sizing: border-box; margin: 0; padding: 0; border: 0; background: transparent; resize: none; overflow: hidden; transform-origin: center center; pointer-events: auto; caret-color: currentColor; outline: 1px dashed var(--cinnabar); outline-offset: 2px; }
 .design-stage { position: relative; flex-shrink: 0; background: #fff; box-shadow: 0 3px 16px #0003; margin: 0 auto; isolation: isolate; }
 .layer-hit { position: absolute; cursor: move; touch-action: none; outline: 1px solid transparent; transform-origin: center; user-select: none; }
 .layer-hit:hover { outline-color: #b03a2e88; } .layer-hit.chosen { outline: 1px solid #b03a2e; z-index: 2; }
@@ -893,8 +1162,8 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .layer-hit.line-hit::after { content: ''; display: none; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed #b03a2e; transform: translateY(-50%); pointer-events: none; }
 .layer-hit.line-hit:hover::after, .layer-hit.line-hit.chosen::after { display: block; }
 .layer-hit.line-hit.locked::after { border-color: #8c8577; }
-.resize-handle.line-resize-handle { top: 50%; right: -5px; bottom: auto; transform: translateY(-50%); cursor: ew-resize; }
 .resize-handle { position: absolute; padding: 0; width: 10px; height: 10px; right: -5px; bottom: -5px; background: #fff; border: 1px solid #b03a2e; border-radius: 1px; cursor: nwse-resize; touch-action: none; }
+.resize-handle.line-resize-handle { top: 50%; right: -5px; bottom: auto; transform: translateY(-50%); cursor: ew-resize; }
 .snap-guide { position: absolute; pointer-events: none; z-index: 10; }
 .snap-guide.vertical { top: 0; bottom: 0; border-left: 1px dashed #d02775; } .snap-guide.horizontal { left: 0; right: 0; border-top: 1px dashed #d02775; }
 .persistent-guide { position: absolute; pointer-events: none; z-index: 9; }

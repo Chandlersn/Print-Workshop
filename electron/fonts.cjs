@@ -13,10 +13,13 @@ const FONT_DIR_SYS = path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts')
 const FONT_DIR_USER = path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'Windows', 'Fonts')
 const UPLOAD_DIR = path.join(process.env.PRINTPRESS_DATA_DIR, 'print-fonts')
 
-/** 与 PDF 中 @font-face 使用同一个 family 名，避免文件名中的 CSS 语法字符造成画布回退字体。 */
-function normalizeFamily(name) {
-  return String(name == null ? '' : name).replace(/['"\\;{}()]/g, '').trim()
-}
+/**
+ * 与画布 / PDF / 打印共用同一个 family 名规范化实现。
+ *
+ * 权威定义在 design-layout.cjs（零依赖，Vue 与 Node 都能 import）；本文件只转出，
+ * 不再自己写一份——两份漂移会让 @font-face 声明与引用方静默错配（I-24）。
+ */
+const { normalizeFamily } = require('./design-layout.cjs')
 
 // 常用中文字体候选：文件名 → 期望 family 名
 const CANDIDATES = [

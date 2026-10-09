@@ -46,6 +46,43 @@ async function drag(selector, dx, dy, { snap = false } = {}) {
   await new Promise(resolve => setTimeout(resolve, 150))
 }
 
+/** 真实双击（两次 clickCount 递增的按键），用于验证 pointerdown 里的 detail 判定 */
+async function doubleClick(selector) {
+  const point = await evaluate(`(() => { const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)} })()`)
+  for (const clickCount of [1, 2]) {
+    ui.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount, ...point })
+    ui.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount, ...point })
+    await new Promise(resolve => setTimeout(resolve, 40))
+  }
+  await new Promise(resolve => setTimeout(resolve, 150))
+}
+
+/**
+ * 真实点击画布上「没有图层」的一处空白。
+ *
+ * 不能随便点画布中心：那里通常正好压着刚加的文字图层，会变成选中/拖动而不是「点空白」。
+ * 所以在画布可视区里从右下往左上扫，取第一个不落在任何图层命中框上的点。
+ */
+async function clickBlankCanvas() {
+  const point = await evaluate(`(() => {
+    const stage = document.querySelector('[data-testid="design-stage"]')
+    const scroll = document.querySelector('.canvas-scroll')
+    stage.scrollIntoView({ block: 'center', inline: 'center' })
+    const s = stage.getBoundingClientRect(), c = scroll.getBoundingClientRect()
+    const hits = [...document.querySelectorAll('[data-canvas-layer-id]')].map(el => el.getBoundingClientRect())
+    const left = Math.max(s.left, c.left) + 4, right = Math.min(s.right, c.right) - 4
+    const top = Math.max(s.top, c.top) + 4, bottom = Math.min(s.bottom, c.bottom) - 4
+    for (let y = bottom; y > top; y -= 8) for (let x = right; x > left; x -= 8) {
+      if (!hits.some(r => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)) return { x: Math.round(x), y: Math.round(y) }
+    }
+    throw new Error('画布上没有找到空白处')
+  })()`)
+  ui.webContents.sendInputEvent({ type: 'mouseMove', ...point })
+  ui.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+  ui.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
+  await new Promise(resolve => setTimeout(resolve, 150))
+}
+
 async function main() {
   await app.whenReady()
   protocol.handle('pp', async (request) => {
@@ -115,8 +152,13 @@ async function main() {
   ipcMain.handle('app:meta', () => ({ version: require('../package.json').version }))
   ipcMain.handle('app:checkUpdate', () => ({ status: 'current' }))
   ui = new BrowserWindow({ show: false, width: 1440, height: 1000, webPreferences: { preload: path.join(ROOT, 'electron', 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false, offscreen: true } })
+  // 注意：这个窗口是 show:false + offscreen，**文档没有焦点**。Chromium 在这种情况下照常更新
+  // document.activeElement，却不派发 focus/blur 事件（ui.show()/ui.focus()/webContents.focus()
+  // 都拿不回焦点，CDP 的 Emulation.setFocusEmulationEnabled 又会把这个环境挂死）。
+  // 所以就地编辑的收尾走「捕获阶段 pointerdown」这条不依赖焦点事件的路（见 finishTextEdit 注释），
+  // 靠 blur 的那条另用派发 FocusEvent 验连线。
   const errors = []
-  ui.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message) })
+  ui.webContents.on('console-message', (_event, level, message) => { if (level >= 3) { errors.push(message); console.log('PAGE-ERR:', message) } })
   await ui.loadFile(path.join(ROOT, 'dist', 'index.html'))
   await waitFor(`Boolean([...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')))`, '底图导航')
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')).click()`)
@@ -126,6 +168,47 @@ async function main() {
   await fill('[data-testid="design-name"]', '真实界面保存验收')
   await click('[data-testid="design-add-text"]')
   await waitFor(`Boolean(document.querySelector('[data-testid="design-text"]'))`, '文字属性')
+  // 双击画布上的文字图层 → 在画布上原位出现编辑框（像改 PPT 的文本框）。
+  // 此前模板挂在 @dblclick 上，而 pointerDown 对 pointerdown 调了 preventDefault，
+  // 按 Pointer Events 规范会抑制 mousedown/click/dblclick，那个监听器永远收不到事件。
+  const firstTextId = await evaluate(`document.querySelector('[data-canvas-layer-id]').dataset.canvasLayerId`)
+  await doubleClick(`[data-canvas-layer-id="${firstTextId}"]`)
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-inline-text"]'))`, '画布内出现就地编辑框')
+  ok(await evaluate(`document.activeElement === document.querySelector('[data-testid="design-inline-text"]')`), '双击文字图层在画布上就地编辑并自动聚焦')
+  ok(await evaluate(`(() => { const el=document.querySelector('[data-testid="design-inline-text"]');return el.selectionStart===0 && el.selectionEnd===el.value.length })()`), '就地编辑框整段选中，可直接重写')
+  // 编辑框与出片共用同一套毫米坐标 + pt 字号，几何必须和图层命中框重合
+  const editGeom = await evaluate(`(() => {
+    const box = document.querySelector('[data-testid="design-inline-text"]')
+    const layer = document.querySelector('[data-canvas-layer-id="${firstTextId}"]')
+    const b = box.getBoundingClientRect(), l = layer.getBoundingClientRect()
+    return { dx: Math.abs(b.left - l.left), dy: Math.abs(b.top - l.top), dw: Math.abs(b.width - l.width), dh: Math.abs(b.height - l.height) }
+  })()`)
+  ok(editGeom.dx < 1 && editGeom.dy < 1 && editGeom.dw < 1 && editGeom.dh < 1, `就地编辑框与图层几何重合（偏差 ${editGeom.dx.toFixed(2)}/${editGeom.dy.toFixed(2)}/${editGeom.dw.toFixed(2)}/${editGeom.dh.toFixed(2)} px）`)
+  ok(await evaluate(`!(document.querySelector('[data-design-layer="${firstTextId}"]')?.textContent || '').trim()`), '编辑时画布上的原文字已隐去，不会与编辑框叠成双影')
+  await fill('[data-testid="design-inline-text"]', '画布上直接改的字')
+  ok(await evaluate(`document.querySelector('[data-testid="design-inline-text"]').value === '画布上直接改的字'`), '就地编辑框内容随输入更新')
+  // ① 点画布空白处收工。这是真实 pointerdown：pointerDown() 对 pointerdown 调了 preventDefault，
+  //    浏览器不会移走焦点、blur 不会触发，所以必须靠捕获阶段的 pointerdown 自己收尾。
+  await clickBlankCanvas()
+  await waitFor(`!document.querySelector('[data-testid="design-inline-text"]')`, '点画布空白处退出就地编辑')
+  await waitFor(`(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text==='画布上直接改的字'`, '就地编辑内容写入工程')
+  ok(await evaluate(`(document.querySelector('[data-design-layer="${firstTextId}"]')?.textContent || '').includes('画布上直接改的字')`), '画布上重新画出改后的文字')
+  // ② blur 提交：生产环境靠它（Tab 走开 / 窗口失焦）。离屏窗口的文档没有焦点，
+  //    Chromium 不会派发 focus/blur，所以这里直接派发 FocusEvent 验证这条连线接好了。
+  await doubleClick(`[data-canvas-layer-id="${firstTextId}"]`)
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-inline-text"]'))`, '再次进入就地编辑')
+  await fill('[data-testid="design-inline-text"]', '失焦提交的字')
+  await evaluate(`document.querySelector('[data-testid="design-inline-text"]').dispatchEvent(new FocusEvent('blur'))`)
+  await waitFor(`!document.querySelector('[data-testid="design-inline-text"]')`, '失焦后退出就地编辑')
+  await waitFor(`(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text==='失焦提交的字'`, '失焦提交的内容写入工程')
+  // ③ Esc 收工（照 PPT 的习惯：Esc 保留改动，想撤销按 Ctrl+Z）。没改就不该多出一条历史。
+  const undoDisabledBefore = await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`)
+  await doubleClick(`[data-canvas-layer-id="${firstTextId}"]`)
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-inline-text"]'))`, '第三次进入就地编辑')
+  await evaluate(`document.querySelector('[data-testid="design-inline-text"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+  await waitFor(`!document.querySelector('[data-testid="design-inline-text"]')`, 'Esc 退出就地编辑')
+  ok(await evaluate(`(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text==='失焦提交的字'`), 'Esc 退出时没改过内容就不产生新版本')
+  ok(undoDisabledBefore === await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`), 'Esc 空退出不改动撤销栈')
   await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
   await click('[data-testid="design-add-rect"]')
   await click('[data-testid="design-undo"]')
@@ -158,6 +241,78 @@ async function main() {
   await new Promise(resolve => setTimeout(resolve, 100))
   ok(await evaluate(`Boolean(document.querySelector('[data-canvas-layer-id="${rectLayer.id}"]'))`), '锁定图层不会被Delete删除')
   await click(`[data-layer-id="${rectLayer.id}"] [aria-label="解锁图层"]`)
+
+  // Paste and drop add an image layer without ever opening the OS file picker.
+  const pasteJpeg = nativeImage.createFromBuffer(jpeg).resize({ width: 120 }).toJPEG(80)
+  const bytesToFile = `(base64, name, type) => { const bin = atob(base64); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i); return new File([bytes], name, { type }) }`
+  const pasteBytes = JSON.stringify(pasteJpeg.toString('base64'))
+  const draftDesign = `JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design`
+  ok(await evaluate(`(() => { const dt=new DataTransfer(); dt.items.add(new File([new Uint8Array([1,2,3])],'x.png',{type:'image/png'})); const ev=new ClipboardEvent('paste',{clipboardData:dt}); return Boolean(ev.clipboardData && ev.clipboardData.items[0] && ev.clipboardData.items[0].getAsFile()) })()`), '测试环境可用 ClipboardEvent 模拟粘贴文件')
+  const layersBeforePaste = await evaluate(`document.querySelectorAll('[data-layer-id]').length`)
+  await evaluate(`(() => {
+    const make = ${bytesToFile}
+    const dt = new DataTransfer()
+    dt.items.add(make(${pasteBytes}, '粘贴截图.jpg', 'image/jpeg'))
+    document.querySelector('.canvas-scroll').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 1}`, 'Ctrl+V 粘贴截图新增图片图层')
+  await waitFor(`(${draftDesign})?.layers.length===${layersBeforePaste + 1}`, '粘贴结果写入草稿')
+  const pastedDesign = await evaluate(draftDesign)
+  const pastedLayer = pastedDesign.layers[pastedDesign.layers.length - 1]
+  ok(pastedLayer.type === 'image' && pastedLayer.name === '粘贴截图.jpg', '粘贴截图落成图片图层并沿用文件名')
+  ok(fs.readFileSync(path.join(DATA, pastedDesign.assets[pastedLayer.assetId].path)).equals(pasteJpeg), '粘贴的图片字节原样落盘，不受前端文件名影响')
+
+  const dropJpeg = nativeImage.createFromBuffer(jpeg).resize({ width: 96 }).toJPEG(75)
+  const dropBytes = JSON.stringify(dropJpeg.toString('base64'))
+  await evaluate(`(() => {
+    const make = ${bytesToFile}
+    const dt = new DataTransfer()
+    dt.items.add(make(${dropBytes}, '拖入图片.jpg', 'image/jpeg'))
+    document.querySelector('.canvas-scroll').dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`Boolean(document.querySelector('.canvas-scroll.drop-active') && document.querySelector('.drop-hint'))`, '拖入文件时显示投放提示')
+  await evaluate(`(() => {
+    const make = ${bytesToFile}
+    const dt = new DataTransfer()
+    dt.items.add(make(${dropBytes}, '拖入图片.jpg', 'image/jpeg'))
+    document.querySelector('.canvas-scroll').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 2}`, '拖入图片新增图层')
+  ok(await evaluate(`!document.querySelector('.canvas-scroll.drop-active') && !document.querySelector('.drop-hint')`), '投放后拖拽高亮提示消失')
+  await waitFor(`(${draftDesign})?.layers.length===${layersBeforePaste + 2}`, '拖入结果写入草稿')
+  const droppedDesign = await evaluate(draftDesign)
+  const droppedLayer = droppedDesign.layers[droppedDesign.layers.length - 1]
+  ok(droppedLayer.type === 'image' && droppedLayer.name === '拖入图片.jpg', '拖入文件同样落成图片图层')
+  ok(fs.readFileSync(path.join(DATA, droppedDesign.assets[droppedLayer.assetId].path)).equals(dropJpeg), '拖入的图片字节原样落盘')
+
+  // Re-importing the exact same bytes must reuse the stored asset rather than duplicate the file.
+  await evaluate(`(() => {
+    const make = ${bytesToFile}
+    const dt = new DataTransfer()
+    dt.items.add(make(${pasteBytes}, '同名副本.jpg', 'image/jpeg'))
+    document.querySelector('.canvas-scroll').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 3}`, '相同字节再次拖入仍新增图层')
+  await waitFor(`(${draftDesign})?.layers.length===${layersBeforePaste + 3}`, '去重结果写入草稿')
+  const dedupedDesign = await evaluate(draftDesign)
+  const dedupedLayer = dedupedDesign.layers[dedupedDesign.layers.length - 1]
+  ok(dedupedLayer.assetId === pastedLayer.assetId && Object.keys(dedupedDesign.assets).length === Object.keys(droppedDesign.assets).length, '相同字节复用同一素材，不重复占盘')
+
+  await evaluate(`(() => {
+    const dt = new DataTransfer()
+    dt.items.add(new File([new Uint8Array([1,2,3])], 'notes.txt', { type: 'text/plain' }))
+    document.querySelector('.canvas-scroll').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`Boolean(document.querySelector('.notice.error'))`, '非图片拖入被拒绝')
+  ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 3}`), '非图片拖入不会新增图层')
+  await click('.notice.error button')
+
+  // Later assertions count this same project's layers, so undo every addition first.
+  for (let i = 0; i < 3; i += 1) {
+    await click('[data-testid="design-undo"]')
+    await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 2 - i}`, `撤销第 ${i + 1} 次导入`)
+  }
+  ok(true, '撤销可完整回退粘贴与拖入产生的图层')
 
   // Exercise the real dialog IPC/importer; only the OS file picker result is substituted.
   const originalDialog = dialog.showOpenDialog
