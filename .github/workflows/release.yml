@@ -18,6 +18,8 @@ jobs:
   release:
     name: 构建并发布安装包
     runs-on: windows-latest
+    env:
+      ELECTRON_MIRROR: https://registry.npmmirror.com/-/binary/electron/
     steps:
       - uses: actions/checkout@v4
 
