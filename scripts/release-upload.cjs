@@ -137,9 +137,15 @@ async function main() {
   if (release) {
     console.log(`     已存在 Release: ${release.html_url}`)
     const hit = (release.assets || []).find((a) => a.name === assetName)
+    if (hit && hit.size === localSize) {
+      // 完全一致：同一次构建重跑，无需上传
+      console.log(`     资产大小与本地一致（${hit.size}），无需上传`)
+      console.log('\n无需上传，全部就绪。')
+      process.exit(bad ? 1 : 0)
+    }
     if (hit) {
-      ok(hit.size === localSize, `资产大小与本地一致（${hit.size}）`, { 远端: hit.size, 本地: localSize })
-      if (hit.size === localSize) { console.log('\n无需上传，全部就绪。'); process.exit(bad ? 1 : 0) }
+      // 同版本重发（改了代码重新构建）→ 大小必然变，属正常，覆盖重传即可
+      console.log(`     已存在旧资产但大小不同（远端 ${hit.size} / 本地 ${localSize}），将覆盖重传`)
     } else {
       console.log(`     缺资产 ${assetName}，将补传`)
     }
