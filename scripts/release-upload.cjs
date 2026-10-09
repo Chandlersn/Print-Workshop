@@ -19,6 +19,7 @@
  */
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 
 const ROOT = path.resolve(__dirname, '..')
 const OWNER = 'Chandlersn'
@@ -56,6 +57,27 @@ async function api(method, url, body, extraHeaders) {
   let json = null
   try { json = text ? JSON.parse(text) : null } catch { /* 非 JSON 响应 */ }
   return { status: res.status, ok: res.ok, json, text }
+}
+
+/** 上传一个资产；同名已存在则先删后传（重跑脚本时常见），避免「资产已存在」报错 */
+async function uploadAsset(releaseId, name, body) {
+  const list = await api('GET', `${API}/repos/${OWNER}/${REPO}/releases/${releaseId}/assets`)
+  const exist = (list.json || []).find((a) => a.name === name)
+  if (exist) {
+    console.log(`     已存在 ${name}，先删后传`)
+    await api('DELETE', `${API}/repos/${OWNER}/${REPO}/releases/assets/${exist.id}`)
+  }
+  const up = await fetch(
+    `https://uploads.github.com/repos/${OWNER}/${REPO}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/octet-stream', 'Content-Length': String(body.length) },
+      body,
+    },
+  )
+  const text = await up.text()
+  ok(up.ok, `上传 ${name} 返回 ${up.status}`, up.ok ? '' : text.slice(0, 300))
+  if (!up.ok) process.exit(1)
 }
 
 function readVersionHistoryEntry(version) {
@@ -146,17 +168,32 @@ async function main() {
   console.log('\n== 6. 上传安装包 ==')
   console.log(`     ${assetName}（${localSize} 字节）…`)
   const buf = fs.readFileSync(exe)
-  const up = await fetch(
-    `https://uploads.github.com/repos/${OWNER}/${REPO}/releases/${release.id}/assets?name=${encodeURIComponent(assetName)}`,
-    {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/octet-stream', 'Content-Length': String(buf.length) },
-      body: buf,
-    },
-  )
-  const upText = await up.text()
-  ok(up.ok, `上传返回 ${up.status}`, up.ok ? '' : upText.slice(0, 300))
-  if (!up.ok) process.exit(1)
+  await uploadAsset(release.id, assetName, buf)
+
+  // ── 6b. 自动更新清单 latest.yml（electron-updater 靠它校验 sha512 + 定位安装包）──
+  console.log('\n== 6b. 上传 latest.yml（自动更新清单）==')
+  const sha512 = crypto.createHash('sha512').update(buf).digest('base64')
+  const latestYml = [
+    `version: ${pkgVer}`,
+    'files:',
+    `  - url: ${assetName}`,
+    `    sha512: ${sha512}`,
+    `    size: ${localSize}`,
+    `path: ${assetName}`,
+    `sha512: ${sha512}`,
+    `releaseDate: '${new Date().toISOString()}'`,
+  ].join('\n') + '\n'
+  await uploadAsset(release.id, 'latest.yml', Buffer.from(latestYml, 'utf-8'))
+
+  // 差异更新用的 blockmap（若存在则一并上传，全量下载不依赖它）
+  const blockmapName = `PrintPress-${pkgVer}-Setup.exe.blockmap`
+  const blockmapPath = path.join(ROOT, 'release', `批印坊 Setup ${pkgVer}.exe.blockmap`)
+  if (fs.existsSync(blockmapPath)) {
+    console.log(`     顺带上传 ${blockmapName}`)
+    await uploadAsset(release.id, blockmapName, fs.readFileSync(blockmapPath))
+  } else {
+    console.log('     （无 blockmap，跳过；全量下载不受影响）')
+  }
 
   // ── 7. 回读复核 ──
   console.log('\n== 7. 回读复核 ==')

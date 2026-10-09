@@ -11,6 +11,7 @@ const path = require('path')
 const fs = require('fs')
 const { pathToFileURL } = require('url')
 const versionCheck = require('./version-check.cjs')
+const autoUpdate = require('./auto-update.cjs')
 
 // 运行数据目录：优先用户自定义（data-dir.json 引导配置），否则
 // 开发态放仓库 data/（便于查看与备份），打包后放 %APPDATA%
@@ -164,6 +165,7 @@ function main() {
 
   app.whenReady().then(() => {
     registerMediaProtocol()
+    autoUpdate.initAutoUpdater()
     const win = createWindow()
 
     // 启动自动更新检测：页面加载完才查一次、3 秒超时、任何失败静默——
@@ -171,7 +173,11 @@ function main() {
     win.webContents.on('did-finish-load', () => {
       versionCheck.checkForUpdate({ currentVersion: app.getVersion() })
         .then((r) => {
-          if (r.status === 'newer') win.webContents.send('update:available', r.info)
+          if (r.status === 'newer') {
+            win.webContents.send('update:available', r.info)
+            // 检测到新版即后台下载，实现「点更新 → 自动下载 → 重启安装」
+            autoUpdate.startUpdate()
+          }
         })
         .catch(() => { /* 检测永不阻塞、永不报错 */ })
     })
