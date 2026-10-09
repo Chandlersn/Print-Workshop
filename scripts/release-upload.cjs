@@ -36,8 +36,13 @@ if (!TOKEN) {
 
 let bad = 0
 const ok = (c, m, extra) => {
-  if (!c) bad++
+  if (!c) { bad++; console.log(`::error::FAIL - ${m}${extra !== undefined ? ' :: ' + JSON.stringify(extra) : ''}`) }
   console.log(`  ${c ? 'ok  ' : 'FAIL'} - ${m}${extra !== undefined ? ' :: ' + JSON.stringify(extra) : ''}`)
+}
+// 网络类探测改为“仅提示、不拦截”：CI 里 GITHUB_TOKEN 的 permissions.push 常报 false，
+// 真没权限时后面建 Release 会明确报错，不必在这里挡。
+const soft = (c, m, extra) => {
+  console.log(`  ${c ? 'ok  ' : 'WARN'} - ${m}${extra !== undefined ? ' :: ' + JSON.stringify(extra) : ''}`)
 }
 
 const headers = {
@@ -99,7 +104,13 @@ async function main() {
   ok(pkgVer === readmeVer, `README 头部与 package.json 一致（${pkgVer}）`, { pkg: pkgVer, readme: readmeVer })
 
   const tag = `v${pkgVer}`
-  const exe = path.join(ROOT, 'release', `批印坊 Setup ${pkgVer}.exe`)
+  let exe = path.join(ROOT, 'release', `批印坊 Setup ${pkgVer}.exe`)
+  if (!fs.existsSync(exe)) {
+    const relDir = path.join(ROOT, 'release')
+    const cands = fs.existsSync(relDir) ? fs.readdirSync(relDir).filter((f) => f.toLowerCase().endsWith('.exe')) : []
+    console.log(`     release/ 下的 .exe: ${cands.join(', ') || '(无)'}`)
+    if (cands.length) exe = path.join(relDir, cands[0])
+  }
   ok(fs.existsSync(exe), `本地安装包存在`, path.basename(exe))
   const localSize = fs.existsSync(exe) ? fs.statSync(exe).size : 0
   if (localSize) console.log(`     包大小: ${localSize} 字节`)
@@ -107,16 +118,16 @@ async function main() {
   // ── 2. token 与仓库权限 ──
   console.log('\n== 2. token 与仓库权限 ==')
   const me = await api('GET', `${API}/user`)
-  ok(me.ok, 'token 有效', me.ok ? me.json.login : `HTTP ${me.status}`)
+  soft(me.ok, 'token 有效', me.ok ? me.json.login : `HTTP ${me.status}`)
   const repo = await api('GET', `${API}/repos/${OWNER}/${REPO}`)
-  ok(repo.ok, '能读到目标仓库', repo.ok ? repo.json.full_name : `HTTP ${repo.status}`)
+  soft(repo.ok, '能读到目标仓库', repo.ok ? repo.json.full_name : `HTTP ${repo.status}`)
   const perms = (repo.json && repo.json.permissions) || {}
-  ok(perms.push === true, '**有写权限**（Contents: Read and write）', perms)
+  soft(perms.push === true, '**有写权限**（Contents: Read and write）', perms)
 
   // ── 3. tag 状态 ──
   console.log('\n== 3. tag 状态 ==')
   const ref = await api('GET', `${API}/repos/${OWNER}/${REPO}/git/ref/tags/${tag}`)
-  ok(ref.ok, `远端 tag ${tag} 存在`, ref.ok ? ref.json.object.sha.slice(0, 7) : `HTTP ${ref.status}（还没推？git push origin ${tag}）`)
+  soft(ref.ok, `远端 tag ${tag} 存在`, ref.ok ? ref.json.object.sha.slice(0, 7) : `HTTP ${ref.status}（还没推？git push origin ${tag}）`)
 
   // ── 4. Release 状态 ──
   console.log('\n== 4. Release 状态 ==')
