@@ -194,6 +194,24 @@ const OPS = {
     run: (_p, ctx) => ctx.app.relaunch(),
   },
 
+  // ── 应用内更新（下载 + 安装）──────────────────────────────
+  // 「关于」里的「检查更新」以前只做轻量信标检测（version-check 读 latest.json），
+  // 命中新版只画一个红徽标、**没有任何路径能真正开始下载**；真下载只发生在启动那一次。
+  // 结果是用户点完按钮看到「发现新版本」却什么都不动，看起来就像坏了。
+  // 这两条通道把「点一下就更新」接上：startUpdate 触发后台下载（进度经 update:state 推送），
+  // installUpdate 在下载完成后重启安装。都不接受任何参数。
+  'app:startUpdate': {
+    gui: 'updater',
+    params: {},
+    run: (_p, ctx) => ctx.autoUpdate.start(),
+  },
+
+  'app:installUpdate': {
+    gui: 'updater',
+    params: {},
+    run: (_p, ctx) => ctx.autoUpdate.install(),
+  },
+
   // ==================== 通用 JSON 存储 ====================
   // 白名单是显式的，不是语法校验：文件名形状校验挡不住领域库名
   // （datasets / templates / print-jobs 全都符合），那等于给了绕过领域层的
@@ -1042,6 +1060,8 @@ function normalizeCtx(ctx) {
     app: c.app || {},
     dialog: c.dialog || null,
     printer: c.printer || null,
+    // 自动更新能力（electron-updater 在 main 侧，本层不得 require electron）
+    autoUpdate: c.autoUpdate || null,
     emit: typeof c.emit === 'function' ? c.emit : () => {},
   }
 }
@@ -1056,6 +1076,9 @@ function assertCapabilities(name, op, ctx) {
   }
   if (op.gui === 'relaunch' && typeof ctx.app.relaunch !== 'function') {
     throw guiRequired(name, '进程重启能力')
+  }
+  if (op.gui === 'updater' && !ctx.autoUpdate) {
+    throw guiRequired(name, '应用内更新能力（仅打包态 GUI 可用）')
   }
 }
 

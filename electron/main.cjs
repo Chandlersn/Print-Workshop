@@ -189,7 +189,15 @@ function main() {
 
   app.whenReady().then(() => {
     registerMediaProtocol()
-    autoUpdate.initAutoUpdater()
+    // 更新状态全程可见：阶段变化（检测中 / 下载 N% / 已下载 / 失败原因）都推给渲染层。
+    // 早先失败只进 console.warn，打包态没有控制台 ⇒ 真失败也看不见，用户只看到「点了没反应」。
+    // 窗口在下面才创建，所以按调用时刻取窗口，不做提前绑定。
+    autoUpdate.initAutoUpdater((state) => {
+      const w = BrowserWindow.getAllWindows()[0]
+      if (w && !w.isDestroyed() && w.webContents && !w.webContents.isDestroyed()) {
+        w.webContents.send('update:state', state)
+      }
+    })
     const win = createWindow()
 
     // 启动自动更新检测：页面加载完才查一次、3 秒超时、任何失败静默——

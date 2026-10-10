@@ -110,6 +110,9 @@ const ADDED_CHANNELS = [
   'asset:rebuildThumb',
   'asset:listOrphans',
   'asset:purgeOrphans',
+  // 应用内更新（I-35）：信标只负责提示，这两条才真下载 / 真安装；能力经 ctx.autoUpdate 注入
+  'app:startUpdate',
+  'app:installUpdate',
 ]
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }
@@ -165,7 +168,7 @@ async function run() {
 
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
-      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径、批次、素材、图层工程、内置预设、使用记录与打开导出）`, added)
+      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径、批次、素材、图层工程、内置预设、使用记录、打开导出与应用内更新）`, added)
 
     // ipc.cjs 必须从注册表派生，不能回退成手写
     const ipcSrc = stripComments(src('electron/ipc.cjs'))

@@ -662,6 +662,52 @@ console.log('== 9. 列显隐：不许变成「静默改打印」，也不许「�
     '.det-flag 没有把 white-space 写回 normal')
 }
 
+console.log('== 10. 「检查更新」必须真能触发更新（前端静态核查） ==')
+{
+  // I-35。2026-10-10 用户报「0.2.13 点更新没触发自动下载」——查下来不是下载失败：
+  // 「关于」里的「检查更新」只调 version-check 信标（读 CDN latest.json）画一个红徽标，
+  // **源码里没有任何路径通向 electron-updater**，真下载只发生在应用启动那一次。
+  // 于是「点按钮 → 显示发现新版本 → 什么都不动」看起来就像功能坏了。
+  // 更要命的是更新器当时把失败全丢进 console.warn —— 打包态没有控制台，
+  // 真下载失败也 100% 看不见（又一次「看不见的失败最危险」）。
+  //
+  // 这条守卫钉三件事：① 信标 → 真更新器 的连线必须在；
+  // ② 两条更新通道只能由 GUI 拿到（CLI / agent 一律 GUI_REQUIRED）；
+  // ③ 失败与「为什么没下载」必须能显示出来，不许只进 console。
+  const preloadSrc = src('electron/preload.cjs')
+  const appSrc = src('src/App.vue')
+  const apiSrc = src('electron/api.cjs')
+  const updSrc = src('electron/auto-update.cjs')
+
+  ok(/startUpdate:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('app:startUpdate'\)/.test(preloadSrc),
+    'preload 暴露 startUpdate（渲染层有「开始下载」的入口）')
+  ok(/installUpdate:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('app:installUpdate'\)/.test(preloadSrc),
+    'preload 暴露 installUpdate（下载完成后能重启安装）')
+  ok(/onUpdateState:\s*\(cb\)/.test(preloadSrc) && /ipcRenderer\.on\('update:state'/.test(preloadSrc),
+    'preload 订阅 update:state（进度与失败原因能进界面）')
+
+  ok(/'app:startUpdate':\s*\{/.test(apiSrc) && /gui:\s*'updater'/.test(apiSrc),
+    '注册表登记 app:startUpdate 并标 gui:updater')
+  ok(/op\.gui === 'updater' && !ctx\.autoUpdate/.test(apiSrc),
+    'assertCapabilities 有 updater 分支（无 GUI 上下文给 GUI_REQUIRED，不是 TypeError）')
+  ok(/autoUpdate:\s*c\.autoUpdate \|\| null/.test(apiSrc),
+    'normalizeCtx 放行 ctx.autoUpdate（漏了会被静默丢掉，通道恒 GUI_REQUIRED）')
+
+  ok(/async function startRealUpdate/.test(appSrc) && /window\.printpress\.startUpdate\(\)/.test(appSrc),
+    'App.vue 的「检查更新」会真正调 startUpdate()，不再只画徽标就结束')
+  ok(/window\.printpress\.onUpdateState\(/.test(appSrc),
+    'App.vue 订阅更新状态（进度 / 失败原因渲染到界面）')
+  ok(/onInstallUpdate/.test(appSrc) && /window\.printpress\.installUpdate\(\)/.test(appSrc),
+    'App.vue 有「立即重启安装」的入口')
+
+  ok(/function setState/.test(updSrc) && /phase:\s*'error'/.test(updSrc),
+    'auto-update.cjs 把失败收敛成 error 状态并广播（不再只 console.warn）')
+  ok(/return \{ started: false, reason/.test(updSrc),
+    'startUpdate() 不支持时返回 reason（界面能说清「为什么没下载」）')
+  ok(/phase !== 'downloaded'/.test(updSrc),
+    'installUpdate() 只允许在「已下载」后重启安装（否则重启到一个没变的版本）')
+}
+
 rmDeep(TMP)
 console.log(`\nIPC 收口与结构：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

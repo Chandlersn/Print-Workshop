@@ -30,6 +30,15 @@ contextBridge.exposeInMainWorld('printpress', {
     ipcRenderer.on('update:available', handler)
     return () => ipcRenderer.removeListener('update:available', handler)
   },
+  // 应用内更新：startUpdate 真正开始后台下载（以前只有徽标提示、没有下载入口），
+  // installUpdate 在下载完成后重启安装，onUpdateState 订阅阶段与失败原因
+  startUpdate: () => ipcRenderer.invoke('app:startUpdate'),
+  installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
+  onUpdateState: (cb) => {
+    const handler = (_e, state) => cb(state)
+    ipcRenderer.on('update:state', handler)
+    return () => ipcRenderer.removeListener('update:state', handler)
+  },
 
   // 通用 JSON 存储（后续被领域通道取代，M1 起逐步收敛）
   loadData: (name) => ipcRenderer.invoke('store:load', name),

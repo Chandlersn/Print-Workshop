@@ -3,7 +3,7 @@
  * 应用外壳：顶部品牌栏 + 三页导航。
  * 三页规模足够小，用组件切换而非 vue-router，少一层依赖。
  */
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import DatasetView from './views/DatasetView.vue'
 import TemplateView from './views/TemplateView.vue'
 import PrintCenterView from './views/PrintCenterView.vue'
@@ -124,14 +124,51 @@ const showGuide = ref(false)
 const checkState = ref('') // '' | checking | newer | current | unavailable
 const foundVersion = ref('')
 
+/**
+ * 应用内更新（下载 + 安装）的实时状态，由主进程推送。
+ *
+ * 为什么需要它：早先「检查更新」只做轻量信标检测（version-check 读 latest.json），
+ * 命中新版只画一个红徽标，**没有任何路径能开始下载**；真下载只发生在启动那一次。
+ * 于是用户点完按钮看到「发现新版本」却什么都不动，看起来就像功能坏了。
+ * 现在按钮会真正调 startUpdate()，并按下面的阶段如实显示进度与失败原因——
+ * 失败再也不能只进 console（打包态没有控制台，等于把失败藏起来）。
+ */
+const updateState = ref({ phase: 'idle' })
+const updateBusy = ref(false)
+const updateMsg = ref('')
+
+const updatePhase = computed(() => (updateState.value && updateState.value.phase) || 'idle')
+
+const updatePhaseText = computed(() => {
+  const s = updateState.value || {}
+  switch (s.phase) {
+    case 'checking': return '正在检测更新…'
+    case 'available': return `发现新版本 v${s.version || ''}，准备下载`
+    case 'downloading': return `正在后台下载 ${s.percent || 0}%`
+    case 'downloaded': return `v${s.version || ''} 已下载完成，重启即可安装`
+    case 'none': return '已是最新'
+    default: return ''
+  }
+})
+
+/** 有话说时才占一行：正在检测 / 有新版本 / 下载中 / 已下载 / 失败 / 不支持应用内更新 */
+const updateRowVisible = computed(() => {
+  const p = updatePhase.value
+  return p === 'checking' || p === 'available' || p === 'downloading' || p === 'downloaded'
+    || p === 'error' || Boolean(updateMsg.value)
+})
+
 async function onCheckUpdate() {
   checkState.value = 'checking'
+  updateMsg.value = ''
   try {
     const r = await window.printpress.checkUpdate()
     if (r.status === 'newer') {
       foundVersion.value = r.info.version
       updateInfo.value = r.info
       checkState.value = 'newer'
+      // 信标说「有新版本」还不够——必须真正触发更新器，否则就是「点了没反应」
+      await startRealUpdate()
     } else if (r.status === 'current') {
       checkState.value = 'current'
     } else {
@@ -139,6 +176,30 @@ async function onCheckUpdate() {
     }
   } catch {
     checkState.value = 'unavailable'
+  }
+}
+
+/** 真正开始后台下载。拿不到更新器时说清原因（并保留「前往发布页」这条出路）。 */
+async function startRealUpdate() {
+  if (updateBusy.value) return
+  updateBusy.value = true
+  try {
+    const r = (await window.printpress.startUpdate()) || {}
+    if (!r.started) updateMsg.value = r.reason || '当前环境不支持应用内更新'
+  } catch (err) {
+    updateMsg.value = '无法启动更新：' + (err && err.message ? err.message : err)
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+/** 下载完成后重启安装（由主进程 quitAndInstall） */
+async function onInstallUpdate() {
+  try {
+    const r = (await window.printpress.installUpdate()) || {}
+    if (!r.ok) updateMsg.value = r.reason || '现在还不能安装更新'
+  } catch (err) {
+    updateMsg.value = '安装失败：' + (err && err.message ? err.message : err)
   }
 }
 
@@ -223,6 +284,11 @@ onMounted(async () => {
   try {
     window.printpress.onUpdateAvailable((info) => { updateInfo.value = info })
   } catch { /* 订阅失败仅影响自动提醒，手动检查仍可用 */ }
+  try {
+    // 订阅应用内更新的阶段变化：启动时那次自动下载、以及「检查更新」触发的下载，
+    // 进度与失败原因都经这里进界面（订阅一次，整个会话有效）
+    window.printpress.onUpdateState((s) => { updateState.value = s || { phase: 'idle' } })
+  } catch { /* 订阅失败仅影响进度显示，按钮仍可用 */ }
 })
 </script>
 
@@ -253,16 +319,30 @@ onMounted(async () => {
       <button class="theme-toggle" @click="openAbout">关于</button>
     </header>
 
-    <!-- 新版本横幅：启动检测到远程版本更大时出现，带出口链接，可关闭 -->
+    <!-- 新版本横幅：启动检测到远程版本更大时出现。可一键更新（真下载 + 下载完成后重启安装），
+         也可去发布页手动下载；下载进度与失败原因就地显示，不再「点了没反应」 -->
     <div v-if="updateInfo" class="update-bar">
       <span class="ub-text">
         新版本 <b>v{{ updateInfo.version }}</b> 已发布{{ updateInfo.notes ? '：' + updateInfo.notes : '' }}
       </span>
+      <span v-if="updatePhaseText" class="ub-state">{{ updatePhaseText }}</span>
+      <span v-else-if="updateMsg" class="ub-state">{{ updateMsg }}</span>
+      <button
+        v-if="updatePhase === 'downloaded'"
+        class="ub-action"
+        @click="onInstallUpdate"
+      >立即重启安装</button>
+      <button
+        v-else-if="updatePhase !== 'checking' && updatePhase !== 'downloading'"
+        class="ub-action"
+        :disabled="updateBusy"
+        @click="startRealUpdate"
+      >立即更新</button>
       <a
         class="ub-link"
         :href="updateInfo.url || (meta && meta.releasesUrl) || '#'"
         target="_blank"
-      >前往下载</a>
+      >前往发布页</a>
       <button class="ub-close" @click="updateInfo = null">知道了</button>
     </div>
 
@@ -324,12 +404,22 @@ onMounted(async () => {
           <div class="about-row">
             <span class="ar-label">检查更新</span>
             <span class="ar-value check-group">
-              <button class="footer-btn" :disabled="checkState === 'checking'" @click="onCheckUpdate">
+              <button class="footer-btn" :disabled="checkState === 'checking' || updateBusy" @click="onCheckUpdate">
                 {{ checkState === 'checking' ? '检测中…' : '检查更新' }}
               </button>
               <span v-if="checkState === 'newer'" class="cr cr-new">发现新版本 v{{ foundVersion }}</span>
               <span v-else-if="checkState === 'current'" class="cr cr-ok">已是最新</span>
               <span v-else-if="checkState === 'unavailable'" class="cr cr-fail">检测失败（离线或网络受限）</span>
+            </span>
+          </div>
+          <!-- 更新进度：下载状态与失败原因都必须看得见（早先只进 console，打包态等于藏起来） -->
+          <div v-if="updateRowVisible" class="about-row">
+            <span class="ar-label">更新进度</span>
+            <span class="ar-value check-group">
+              <span v-if="updatePhase === 'error'" class="cr cr-fail">更新失败：{{ updateState.message || '未知原因' }}</span>
+              <span v-else-if="updateMsg" class="cr cr-warn">{{ updateMsg }}</span>
+              <span v-else-if="updatePhaseText" class="cr" :class="updatePhase === 'downloaded' ? 'cr-ok' : 'cr-new'">{{ updatePhaseText }}</span>
+              <button v-if="updatePhase === 'downloaded'" class="footer-btn" @click="onInstallUpdate">立即重启安装</button>
             </span>
           </div>
           <div class="about-row">
@@ -441,6 +531,21 @@ onMounted(async () => {
   color: var(--cinnabar);
   text-decoration: underline;
 }
+
+.ub-state { flex-shrink: 0; color: var(--ink-2); }
+
+/* 横幅里的动作按钮：与「前往发布页」区分开——那是真下载，这是外部链接 */
+.ub-action {
+  flex-shrink: 0;
+  padding: 2px 12px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 5px;
+  background: var(--paper-card);
+  color: var(--cinnabar);
+  font-size: 12px;
+}
+
+.ub-action:disabled { opacity: 0.6; }
 
 .ub-close {
   flex-shrink: 0;
