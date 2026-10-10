@@ -6,6 +6,8 @@ data/*.json
 data/*.json.bak
 data/*.tmp
 test/.tmp-*/
+# CI 的 e2e 失败现场（日志 + 截图），只在上传 artifact 前临时存在
+e2e-logs/
 vite.config.js.timestamp-*.mjs
 *.log
 .DS_Store

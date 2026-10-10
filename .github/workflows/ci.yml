@@ -2,6 +2,13 @@ name: CI
 
 # 每次推 main 或开 PR 都跑：领域层测试 + 实际 PDF 和编辑器端到端。
 # 这是「不靠个人纪律」的第一道闸——在干净机器上回答「能不能构建、测试过不过」。
+#
+# 关于失败现场（2026-10-10 补）：
+# e2e 的两个套件依赖真实桌面会话（CDP 真鼠标 + offscreen 窗口），在 windows-latest 上
+# 长期红；但**失败输出以前根本拿不到**——GitHub 的 job logs API 要 admin 权限，本机又没装
+# gh，于是界面上只能看到「失败」两个字，每次发版都容易被误判成「发布失败」（已真实发生过
+# 一次）。现在每个 e2e 步骤都把输出 tee 进文件，并在 always() 里连测试自己写的失败截图 /
+# 量测一起收进 artifact（e2e-diagnostics）——失败时下载下来就能看现场。
 on:
   push:
     branches: [main]
@@ -30,6 +37,8 @@ jobs:
   e2e:
     name: 端到端（120 人真实 printToPDF）
     runs-on: windows-latest
+    # 卡死时别烧满 6 小时（GitHub 默认 360 分钟）；已产生的日志仍由 always() 步骤传上来
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,9 +49,33 @@ jobs:
         run: npm ci
       - name: 构建前端（e2e 走 loadFile(dist/index.html)）
         run: npm run build
+      # 三个套件都用 bash + tee：GitHub 的 bash 默认带 -eo pipefail，npm 失败时这一步照样红，
+      # 但输出留在了文件里（以前是「红了，但看不到为什么」）。
       - name: 端到端（npm run test:e2e）
-        run: npm run test:e2e
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:e2e 2>&1 | tee e2e-logs/01-test-e2e.log
       - name: 图层编辑与 PDF 保真（npm run test:design-e2e）
-        run: npm run test:design-e2e
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:design-e2e 2>&1 | tee e2e-logs/02-design-e2e.log
       - name: PNG 像素、透明度与显示缩放（npm run test:design-export-e2e）
-        run: npm run test:design-export-e2e
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:design-export-e2e 2>&1 | tee e2e-logs/03-design-export-e2e.log
+      # 测试自己会往 .workbuddy-ai/tmp/<…> 写失败截图与量测（design-e2e 失败时存 failure.png）。
+      # 那是**隐藏目录**，而 upload-artifact 默认不收隐藏文件，所以先搬到非隐藏的 e2e-logs/ 再传。
+      - name: 收拢失败现场
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p e2e-logs
+          for d in design-acceptance design-png-acceptance; do
+            if [ -d ".workbuddy-ai/tmp/$d" ]; then cp -r ".workbuddy-ai/tmp/$d" "e2e-logs/"; fi
+          done
+          find e2e-logs -type f | head -60
+      - name: 上传失败现场（日志 + 失败截图 + 量测）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics
+          path: e2e-logs/
+          if-no-files-found: warn
+          retention-days: 14
