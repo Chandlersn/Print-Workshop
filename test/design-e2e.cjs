@@ -641,7 +641,7 @@ async function main() {
   ok(await evaluate(`document.querySelector('.editor .name-input').value==='未保存的模板名称草稿'`), '不应用返回保留模板草稿')
   await clickText('.design-toolbar button', '编辑底图工程')
   await waitFor(`Boolean(document.querySelector('[data-testid="design-apply"]'))`, '返回编辑器截图')
-  await evaluate(`document.querySelector('.app-main').scrollTop=0;document.querySelector('.inspector').scrollTop=0;new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
+  await evaluate(`document.querySelector('.app-main').scrollTop=0;(()=>{const el=document.querySelector('.inspector');if(el)el.scrollTop=0})();new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`)
   await new Promise(resolve => setTimeout(resolve, 200))
   fs.writeFileSync(path.join(OUTPUT, 'designer.png'), (await ui.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG())
   const appliedHtml = renderer.buildHtml(appliedTemplate, [{ name: '王五' }], { withToolbar: false })

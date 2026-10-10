@@ -67,7 +67,9 @@ const showAssets = ref(false)
 // 属性面板（工程与画布/检查器）也是浮层：不占网格列，画布始终满宽；
 // 默认展开保持原有工作流，收起后给画布让出整个右侧。
 // 注意它**不做事 关闭**——点画布选图层是主工作流，只走开关按钮。
-const showInspector = ref(true)
+// 属性面板不再有手动开关：选中图层即自动弹出（右侧浮层），点空白画布取消选中即自动收起。
+// 工程级设置（名称/画布/参考线）在左侧工具面板常驻——它们是「文档」属性，不该依赖选中态。
+const showInspector = computed(() => selectedIds.length > 0)
 const sessionToken = ref(0)
 // 已加入素材库的原图 id 集合：图层行的 ★/＋ 状态以此为准（getAsset 有 entry = 已收藏）
 const adoptedIds = ref(new Set())
@@ -91,11 +93,6 @@ async function adoptLayerAsset(layer) {
     message.value = '已加入素材库：这张图受管理，删除图层不会清理原件'
   } catch (err) { fail(err) }
   finally { busy.value = false }
-}
-/** 行内排序：让被点的行（或其所在组整体）成为当前选择，再走统一 reorder */
-function reorderRow(row, direction) {
-  selectedIds.value = row.group ? [...row.group.layerIds] : [row.id]
-  reorder(direction)
 }
 const fonts = ref({ system: [], uploaded: [] })
 const context = ref(null)
@@ -1217,7 +1214,6 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         </label>
         <button data-testid="design-copy" :disabled="busy" @click="save(true)">另存副本</button>
         <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets">素材库</button>
-        <button data-testid="design-toggle-inspector" :class="{ on: showInspector }" :disabled="busy" :title="showInspector ? '隐藏属性面板（画布满宽）' : '显示属性面板（工程与画布、图层属性）'" @click="showInspector = !showInspector">属性</button>
         <button data-testid="design-export-png" :disabled="busy" @click="openExport">导出 PNG</button>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
         <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
@@ -1285,10 +1281,6 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
                   <button v-if="!adoptedIds.has(row.layer.assetId)" class="icon-button" title="加入素材库：收藏这张原图，之后删除图层不会清理它" @click.stop="adoptLayerAsset(row.layer)">＋</button>
                   <span v-else class="adopted-flag" title="已在素材库（受管理，删除图层不会清理）">★</span>
                 </template>
-                <button class="icon-button" :title="hasPartialGroup ? '先选择完整分组再调整层级' : '上移一层'" :aria-label="`上移一层：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'up')">↑</button>
-                <button class="icon-button" :title="hasPartialGroup ? '先选择完整分组再调整层级' : '下移一层'" :aria-label="`下移一层：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'down')">↓</button>
-                <button class="icon-button" title="置顶" :aria-label="`置顶：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'top')">⤒</button>
-                <button class="icon-button" title="置底" :aria-label="`置底：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'bottom')">⤓</button>
               </span>
               <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '锁定图层' : '解锁图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
             </div>
@@ -1298,12 +1290,41 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           <button data-testid="design-group-copy" :disabled="!selected.length" @click="duplicate">{{ selectedGroup ? '复制整组' : '复制所选' }}</button><button data-testid="design-group-delete" :disabled="!editable.length" @click="removeSelected">{{ selectedGroup ? '删除整组' : '删除所选' }}</button>
         </div>
         <p v-if="design.groups?.length" class="muted">点组名或画布选择整组；点列表中的成员可单独编辑属性。</p>
+        <h3>工程与画布</h3>
+        <label>工程名称<input data-testid="design-name" :value="design.name" maxlength="120" @change="setDoc('name', $event.target.value)"></label>
+        <div class="property-grid">
+          <label>宽度 mm<input type="number" min="1" step="0.1" :value="design.artboard.w" :disabled="!!context" @change="setArtboard('w', $event.target.value)"></label>
+          <label>高度 mm<input type="number" min="1" step="0.1" :value="design.artboard.h" :disabled="!!context" @change="setArtboard('h', $event.target.value)"></label>
+        </div>
+        <label class="color-field" @click="openColorPicker"><span>画布背景</span><span class="color-control"><input type="color" :value="design.artboard.background === 'transparent' ? '#ffffff' : design.artboard.background" aria-label="选择画布背景颜色" @input="colorInput('background', $event.target.value, 'artboard')" @change="colorChange('background', $event.target.value, 'artboard')"><code class="color-value">{{ formatColor(design.artboard.background) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
+        <details class="guide-panel" open>
+          <summary>参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
+          <label class="inline"><input v-model="guidesVisible" data-testid="design-guides-visible" type="checkbox"> 显示并吸附参考线</label>
+          <div class="property-grid">
+            <label>方向<select v-model="newGuideAxis" data-testid="design-guide-axis"><option value="x">垂直线（X）</option><option value="y">水平线（Y）</option></select></label>
+            <label>位置 mm<input v-model.number="newGuidePosition" data-testid="design-guide-position" type="number" min="-10000" max="10000" step="0.1"></label>
+          </div>
+          <button data-testid="design-guide-add" :disabled="(design.guides?.length || 0) >= 100" @click="addGuide">添加参考线</button>
+          <div class="guide-list">
+            <div v-for="guide in design.guides || []" :key="`${guide.id}-${inputEpoch}`" :data-guide-id="guide.id" class="guide-row">
+              <span :title="guide.axis === 'x' ? '距左侧的毫米数' : '距顶部的毫米数'">{{ guide.axis.toUpperCase() }}</span>
+              <input data-testid="design-guide-edit-position" type="number" min="-10000" max="10000" step="0.1" :aria-label="`${guide.axis.toUpperCase()}参考线位置，毫米`" :value="guide.position" @change="editGuide(guide.id, $event.target.value)">
+              <small v-if="guideOutside(guide)" class="guide-outside">画布外</small>
+              <button class="icon-button" data-testid="design-guide-delete" aria-label="删除参考线" @click="removeGuide(guide.id)">×</button>
+            </div>
+          </div>
+          <p class="muted">随工程保存；参考线不会出现在打印或 PNG 中。</p>
+        </details>
       </aside>
       <AssetLibrarySidebar v-if="showAssets" @insert="insertLibraryAsset" />
       <div class="canvas-column" :class="{ 'inspector-open': showInspector }">
         <div class="canvas-toolbar">
           <button data-testid="design-undo" :disabled="!history.length" title="Ctrl+Z" @click="undo">撤销</button>
           <button data-testid="design-redo" :disabled="!future.length" title="Ctrl+Shift+Z" @click="redo">重做</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层上移一层'" :aria-label="'上移一层'" @click="reorder('up')">↑</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" :aria-label="'下移一层'" @click="reorder('down')">↓</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" :aria-label="'置顶'" @click="reorder('top')">⤒</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置底'" :aria-label="'置底'" @click="reorder('bottom')">⤓</button>
           <label class="inline"><input v-model="snap" type="checkbox"> 吸附</label>
           <span class="toolbar-spacer"></span>
           <button title="缩小" @click="zoom = Math.max(0.25, round(zoom - 0.25))">−</button>
@@ -1340,31 +1361,6 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
       </div>
       <aside v-if="showInspector" class="designer-panel inspector">
-        <h3>工程与画布</h3>
-        <label>工程名称<input data-testid="design-name" :value="design.name" maxlength="120" @change="setDoc('name', $event.target.value)"></label>
-        <div class="property-grid">
-          <label>宽度 mm<input type="number" min="1" step="0.1" :value="design.artboard.w" :disabled="!!context" @change="setArtboard('w', $event.target.value)"></label>
-          <label>高度 mm<input type="number" min="1" step="0.1" :value="design.artboard.h" :disabled="!!context" @change="setArtboard('h', $event.target.value)"></label>
-        </div>
-        <label class="color-field" @click="openColorPicker"><span>画布背景</span><span class="color-control"><input type="color" :value="design.artboard.background === 'transparent' ? '#ffffff' : design.artboard.background" aria-label="选择画布背景颜色" @input="colorInput('background', $event.target.value, 'artboard')" @change="colorChange('background', $event.target.value, 'artboard')"><code class="color-value">{{ formatColor(design.artboard.background) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
-        <details class="guide-panel" open>
-          <summary>参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
-          <label class="inline"><input v-model="guidesVisible" data-testid="design-guides-visible" type="checkbox"> 显示并吸附参考线</label>
-          <div class="property-grid">
-            <label>方向<select v-model="newGuideAxis" data-testid="design-guide-axis"><option value="x">垂直线（X）</option><option value="y">水平线（Y）</option></select></label>
-            <label>位置 mm<input v-model.number="newGuidePosition" data-testid="design-guide-position" type="number" min="-10000" max="10000" step="0.1"></label>
-          </div>
-          <button data-testid="design-guide-add" :disabled="(design.guides?.length || 0) >= 100" @click="addGuide">添加参考线</button>
-          <div class="guide-list">
-            <div v-for="guide in design.guides || []" :key="`${guide.id}-${inputEpoch}`" :data-guide-id="guide.id" class="guide-row">
-              <span :title="guide.axis === 'x' ? '距左侧的毫米数' : '距顶部的毫米数'">{{ guide.axis.toUpperCase() }}</span>
-              <input data-testid="design-guide-edit-position" type="number" min="-10000" max="10000" step="0.1" :aria-label="`${guide.axis.toUpperCase()}参考线位置，毫米`" :value="guide.position" @change="editGuide(guide.id, $event.target.value)">
-              <small v-if="guideOutside(guide)" class="guide-outside">画布外</small>
-              <button class="icon-button" data-testid="design-guide-delete" aria-label="删除参考线" @click="removeGuide(guide.id)">×</button>
-            </div>
-          </div>
-          <p class="muted">随工程保存；参考线不会出现在打印或 PNG 中。</p>
-        </details>
         <h3>{{ selectedGroup ? '分组属性' : selected.length > 1 ? `多选 ${selected.length} 个图层` : single ? '图层属性' : '排版属性' }}</h3>
         <template v-if="selectedGroup">
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
@@ -1461,7 +1457,7 @@ button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
 .designer-workspace { display: grid; grid-template-columns: 176px minmax(450px, 1fr); gap: 12px; align-items: start; position: relative; }
 /* 素材库抽屉：浮在画布左侧（覆盖而非占列），打开不再挤压画布；内部自行滚动；点外部收起 */
 .designer-panel.asset-library { position: absolute; top: 0; bottom: 0; left: 188px; width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
-/* 属性面板抽屉：浮在画布右侧，只走「属性」开关（点画布选图层不能关它）；
+/* 属性面板抽屉：浮在画布右侧；选中图层自动弹出、点空白画布取消选中自动收起（无手动开关）；
    打开时工具条与状态栏让出其宽度（缩放/保存状态不被盖住） */
 .designer-panel.inspector { position: absolute; top: 0; bottom: 0; right: 0; width: 264px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
 .canvas-column.inspector-open .canvas-toolbar,
@@ -1526,17 +1522,17 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .persistent-guide.horizontal { left: 0; right: 0; border-top: 1px solid #2689c9; }
 .canvas-status { display: flex; justify-content: space-between; gap: 12px; padding: 9px; background: var(--paper-card); border: 1px solid var(--line); border-radius: 0 0 8px 8px; font-size: 11px; color: var(--ink-2); }
 .unsaved { color: var(--cinnabar); } .shortcut-note { font-size: 11px; color: var(--stone); line-height: 1.7; margin: 8px 0; }
-.inspector label { display: flex; flex-direction: column; gap: 5px; color: var(--ink-2); font-size: 11px; margin-bottom: 9px; }
-.inspector input, .inspector select, .inspector textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--ink); border-radius: 4px; padding: 6px; font: inherit; font-size: 12px; }
-.inspector .color-field { gap: 6px; }
-.inspector .color-control { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 4px 10px 4px 5px; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--input-bg); transition: border-color .15s, box-shadow .15s; }
-.inspector .color-control:focus-within { border-color: var(--cinnabar); box-shadow: 0 0 0 2px var(--cinnabar-soft); }
-.inspector .color-control input[type="color"] { flex: 0 0 34px; width: 34px; height: 30px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-card); cursor: pointer; }
-.inspector .color-value { color: var(--ink); font: 11px ui-monospace, Consolas, monospace; letter-spacing: .04em; }
-.inspector .color-open { margin-left: auto; color: var(--stone); font-size: 16px; line-height: 1; }
+.inspector label, .tools-panel label { display: flex; flex-direction: column; gap: 5px; color: var(--ink-2); font-size: 11px; margin-bottom: 9px; }
+.inspector input, .inspector select, .inspector textarea, .tools-panel input, .tools-panel select, .tools-panel textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--ink); border-radius: 4px; padding: 6px; font: inherit; font-size: 12px; }
+.inspector .color-field, .tools-panel .color-field { gap: 6px; }
+.inspector .color-control, .tools-panel .color-control { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 4px 10px 4px 5px; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--input-bg); transition: border-color .15s, box-shadow .15s; }
+.inspector .color-control:focus-within, .tools-panel .color-control:focus-within { border-color: var(--cinnabar); box-shadow: 0 0 0 2px var(--cinnabar-soft); }
+.inspector .color-control input[type="color"], .tools-panel .color-control input[type="color"] { flex: 0 0 34px; width: 34px; height: 30px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-card); cursor: pointer; }
+.inspector .color-value, .tools-panel .color-value { color: var(--ink); font: 11px ui-monospace, Consolas, monospace; letter-spacing: .04em; }
+.inspector .color-open, .tools-panel .color-open { margin-left: auto; color: var(--stone); font-size: 16px; line-height: 1; }
 .inspector textarea { resize: vertical; line-height: 1.6; }
 label.inline { display: flex; flex-direction: row; align-items: center; gap: 4px; font-size: 11px; margin: 0; }
-label.inline input { width: auto; margin: 3px; } .inspector label.inline { margin: 8px 0; }
+label.inline input { width: auto; margin: 3px; } .inspector label.inline, .tools-panel label.inline { margin: 8px 0; }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled { opacity: .55; }
 .guide-panel { padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 14px 0; }
 .guide-panel summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink); }
