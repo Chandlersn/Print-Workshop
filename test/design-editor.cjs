@@ -26,7 +26,56 @@ try {
     assert.equal(groupedDoc.schemaVersion, 2)
     assert.equal(edit.ungroupSelection(groupedDoc, ['b']).schemaVersion, 2)
     assert.equal(normalizeDesign({ ...legacy, guides: [{ id: 'vertical', axis: 'x', position: 20 }] }).schemaVersion, 2)
-    assert.throws(() => normalizeDesign({ ...legacy, schemaVersion: 3 }), /版本/)
+    assert.throws(() => normalizeDesign({ ...legacy, schemaVersion: 4 }), /版本/)
+  })
+  check('版本号取各特性最大值，已是高版本时不被分组倒标成旧格式', () => {
+    const legacy = document()
+    // 旧实现直接 `schemaVersion = 2`，会把「格式 3 + 恰好有分组」倒标成 2，等于给旧读者开静默降级口子。
+    const mixed = normalizeDesign({ ...grouped(), schemaVersion: 3 })
+    assert.equal(mixed.schemaVersion, 3)
+    assert.equal(normalizeDesign({ ...legacy, schemaVersion: 2 }).schemaVersion, 2)
+    assert.equal(normalizeDesign({ ...legacy, schemaVersion: 3 }).schemaVersion, 3)
+  })
+  check('仅编辑可见的图层升级到格式 3，默认关闭且旧工程不受影响', () => {
+    const legacy = document()
+    assert.ok(legacy.layers.every(layer => layer.editorOnly === false))
+    assert.equal(legacy.schemaVersion, 1)
+    const withRef = normalizeDesign({
+      ...legacy,
+      layers: legacy.layers.map((layer, i) => (i === 0 ? { ...layer, editorOnly: true } : layer)),
+    })
+    assert.equal(withRef.layers[0].editorOnly, true)
+    assert.equal(withRef.schemaVersion, 3)
+    assert.throws(() => normalizeDesign({ ...legacy, layers: [{ ...legacy.layers[0], editorOnly: 'yes' }] }), /仅编辑可见/)
+  })
+  check('仅编辑可见的图层默认不渲染，显式要求时才进画布', () => {
+    const doc = normalizeDesign({
+      ...document(),
+      layers: document().layers.map((layer, i) => (i === 0 ? { ...layer, editorOnly: true, name: '参考框' } : layer)),
+    })
+    const printed = renderDesign(doc)
+    assert.ok(!printed.html.includes('data-design-layer="a"'))
+    assert.ok(printed.html.includes('data-design-layer="b"'))
+    const editor = renderDesign(doc, { includeEditorOnly: true })
+    assert.ok(editor.html.includes('data-design-layer="a"'))
+    // 隐藏图层仍然谁都不渲染，两个开关互不越权
+    const hidden = normalizeDesign({ ...doc, layers: doc.layers.map((layer, i) => (i === 1 ? { ...layer, visible: false } : layer)) })
+    assert.ok(!renderDesign(hidden, { includeEditorOnly: true }).html.includes('data-design-layer="b"'))
+  })
+  check('参考框引用的上传字体不参与出片，不会因字体缺失阻断打印', () => {
+    const doc = normalizeDesign({
+      ...document(),
+      layers: [
+        { id: 'ref', type: 'text', name: '参考框', text: '身份证正面', fontFamily: '仅编辑器字体', x: 0, y: 0, w: 40, h: 10, editorOnly: true },
+        { id: 'real', type: 'text', name: '正文', text: '姓名', fontFamily: '打印字体', x: 0, y: 20, w: 40, h: 10 },
+      ],
+    })
+    assert.deepEqual(renderDesign(doc).fontFamilies, ['打印字体'])
+    assert.deepEqual(renderDesign(doc, { includeEditorOnly: true }).fontFamilies, ['仅编辑器字体', '打印字体'])
+    // 「某字体是否仍被工程引用」保持全量口径：编辑器里还在用的字体不能被当成孤儿清掉
+    const { collectFontFamilies } = require('../electron/design-layout.cjs')
+    assert.deepEqual(collectFontFamilies(doc), ['仅编辑器字体', '打印字体'])
+    assert.deepEqual(collectFontFamilies(doc, { includeEditorOnly: false }), ['打印字体'])
   })
   check('非相邻成员连续化保留成员次序及绝对几何，输入保持不变', () => {
     const input = document(), before = JSON.stringify(input)

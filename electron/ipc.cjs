@@ -17,6 +17,7 @@ const { ipcMain, app, dialog, shell, BrowserWindow } = require('electron')
 const { pathToFileURL } = require('url')
 const api = require('./api.cjs')
 const printer = require('./printer.cjs')
+const thumbs = require('./asset-thumbnails.cjs')
 
 /** 对话框统一挂主窗口：无主对话框在 Windows 上可能被主窗口遮挡，用户看似「没反应」 */
 function dialogParent() {
@@ -66,6 +67,9 @@ function hostContext(event) {
     },
 
     printer,
+
+    // 宿主导图解码能力（缩略图）。纯 Node 下 ctx.thumbs 不存在，领域层据此跳过缓存
+    thumbs,
 
     // 进度事件走独立通道推给渲染进程（分阶段 yield，可实时重绘进度条）。
     // 发送前判 isDestroyed：窗口关掉的瞬间进度回调可能还在飞，

@@ -103,6 +103,50 @@ async function main() {
   const model = printer.prepareDesignPng({ design: doc, dpi: 150, transparent: true })
   const viaPrinter = await printer.exportDesignPng(model, path.join(OUTPUT, 'context.png'))
   check(viaPrinter.width === 150, '宿主注入PNG出口可正常调用')
+
+  /*
+   * ---- 导出后「打开所在文件夹 / 用系统程序打开」（I-28）----
+   *
+   * 真调用 shell 会弹出资源管理器 / 看图器，所以把 shell 的方法换成记录器：
+   * printer.cjs 解构拿到的是 shell 这个**对象**的引用，改它的属性对调用方可见，
+   * 于是既能验「到底打开了哪个文件」，又不会真弹窗口。
+   */
+  const shell = require('electron').shell
+  const originalReveal = shell.showItemInFolder
+  const originalOpen = shell.openPath
+  const opened = []
+  shell.showItemInFolder = (p) => { opened.push({ how: 'reveal', path: p }) }
+  shell.openPath = async (p) => { opened.push({ how: 'open', path: p }); return '' }
+  try {
+    const api = require('../electron/api.cjs')
+    const ctx = { allowWrite: true, app: {}, dialog: null, printer }
+    const revealed = api.call('design:revealExport', {}, ctx)
+    check(revealed.filePath === viaPrinter.filePath && opened.at(-1).how === 'reveal' && opened.at(-1).path === viaPrinter.filePath,
+      '「打开所在文件夹」定位到的正是刚导出的那个 PNG')
+    await api.call('design:openExport', {}, ctx)
+    check(opened.at(-1).how === 'open' && opened.at(-1).path === viaPrinter.filePath,
+      '「用系统程序打开」打开的是刚导出的那个 PNG')
+
+    // 安全边界（I-28 的行为面）：就算调用方硬塞一个路径进来，也只会打开主进程记着的那个
+    api.call('design:revealExport', { filePath: path.join(OUTPUT, 'transparent-600.png') }, ctx)
+    check(opened.at(-1).path === viaPrinter.filePath,
+      '调用方塞进来的路径被忽略，只打开主进程记着的文件（渲染进程传不进路径）')
+
+    // CLI / agent 拿不到 ctx.printer ⇒ 一律 GUI_REQUIRED，而不是 TypeError
+    const noGui = await api.invoke('design:openExport', {}, { allowWrite: true })
+    check(noGui.ok === false && noGui.error.code === 'GUI_REQUIRED',
+      '无 GUI 上下文调用「用系统程序打开」得到 GUI_REQUIRED（agent 够不到这条能力）')
+
+    // 文件被用户挪走 / 删掉时要明确报错——静默 no-op 就是「点了没反应」
+    const gone = await printer.exportDesignPng(
+      printer.prepareDesignPng({ design: doc, dpi: 150, transparent: true }), path.join(OUTPUT, 'gone.png'))
+    fs.unlinkSync(gone.filePath)
+    await assert.rejects(async () => printer.revealLastDesignPng(), /移动或删除/)
+    check(true, '刚导出的 PNG 被删掉后「打开」明确报错，而不是静默无反应')
+  } finally {
+    shell.showItemInFolder = originalReveal
+    shell.openPath = originalOpen
+  }
   mainWindow.destroy()
   console.log(`PNG_E2E_OK checks=${count} artifacts=${OUTPUT}`)
   clearTimeout(watchdog)

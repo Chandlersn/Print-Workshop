@@ -191,9 +191,11 @@ function prepareTemplateDesign(template) {
       return `data:${mimeFor(asset.path)};base64,${bytes.toString('base64')}`
     },
   })
-  const dpi = design.layers.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image')
+  // 报告只描述会印出来的东西：参考框既不该计入图层数，也不该拿它的图片去拉低最低 dpi。
+  const printed = design.layers.filter((layer) => !layer.editorOnly)
+  const dpi = printed.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image')
     .map((layer) => imageDpi(layer, design.assets[layer.assetId]))
-  return { ...rendered, info: { name: design.name, revision: design.revision, layerCount: design.layers.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
+  return { ...rendered, info: { name: design.name, revision: design.revision, layerCount: printed.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
 }
 
 // 未知纸张的回退默认显式命名，不依赖数组顺序（顺序只管下拉展示）

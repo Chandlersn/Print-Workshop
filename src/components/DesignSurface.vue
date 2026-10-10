@@ -6,6 +6,14 @@ const props = defineProps({
   design: { type: Object, required: true },
   width: { type: Number, required: true },
   height: { type: Number, default: null },
+  /**
+   * 是否渲染「仅编辑可见」的图层（参考框这类对齐用标注）。
+   *
+   * **默认 false，且必须保持默认**：本组件同时被模板页的成品预览复用，
+   * 那里看到的就该是印出来的样子。只有底图编辑器画布显式传 true。
+   * 默认值就是安全值——漏传的后果是「参考框不显示」，而不是「参考框被当成成品预览」。
+   */
+  showEditorOnly: { type: Boolean, default: false },
 })
 const emit = defineEmits(['error'])
 const prefix = `design-surface-${getCurrentInstance().uid}`
@@ -28,6 +36,7 @@ const content = computed(() => {
       classPrefix: prefix,
       assetUrl,
       fontFamily: normalizeFamily,
+      includeEditorOnly: props.showEditorOnly,
     })
   } catch (err) {
     return { html: '', css: '', error: err.message || String(err) }

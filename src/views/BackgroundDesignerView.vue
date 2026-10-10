@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
 import DesignSurface from '../components/DesignSurface.vue'
+import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
 import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK } from '../../electron/design-layout.cjs'
@@ -30,6 +31,7 @@ const design = ref(normalizeDesign(blank()))
 const savedFingerprint = ref(fingerprint(design.value))
 const dirty = computed(() => fingerprint(design.value) !== savedFingerprint.value)
 const projects = ref([])
+const presets = ref([])
 const selectedIds = ref([])
 const selected = computed(() => design.value.layers.filter((layer) => selectedIds.value.includes(layer.id)))
 const single = computed(() => selected.value.length === 1 ? selected.value[0] : null)
@@ -59,6 +61,22 @@ const future = ref([])
 const error = ref('')
 const message = ref('')
 const busy = ref(false)
+// 素材库侧栏显隐 + 插入会话保护：每次切换/新建/另存工程都换令牌，
+// 异步拉取素材期间若切换了工程，插入请求作废，绝不写进新画板（计划 §3.3）。
+const showAssets = ref(false)
+const sessionToken = ref(0)
+// 当前工程里用到的图片原件（去重），供侧栏「加入素材库」列表
+const imageAssets = computed(() => {
+  const seen = new Set()
+  const out = []
+  for (const layer of design.value.layers || []) {
+    if (layer.type !== 'image' || !layer.assetId) continue
+    if (seen.has(layer.assetId)) continue
+    const asset = design.value.assets[layer.assetId]
+    if (asset) { seen.add(layer.assetId); out.push(asset) }
+  }
+  return out
+})
 const fonts = ref({ system: [], uploaded: [] })
 const context = ref(null)
 const pending = ref(null)
@@ -75,6 +93,13 @@ const showExport = ref(false)
 const exportDpi = ref(300)
 const exportTransparent = ref(false)
 const exportError = ref('')
+/**
+ * 最近一次成功导出的结果（含绝对路径），用来给出「打开所在文件夹 / 用系统程序打开」。
+ *
+ * 存结果、不存路径字符串本身：这两个动作**不接受参数**，真正被打开的路径由主进程
+ * 记着（最近一次写出的 PNG）。渲染层手里这份只用于显示与按钮开关。
+ */
+const lastExport = ref(null)
 const exportSize = computed(() => ({
   width: Math.round(design.value.artboard.w * exportDpi.value / 25.4),
   height: Math.round(design.value.artboard.h * exportDpi.value / 25.4),
@@ -128,6 +153,7 @@ function record(before) {
 function commit(change) {
   endGesture()
   finishKeyboardMove()
+  colorDraft.value = null // 别的编辑一来就让取色快照失效，免得撤销时连带回滚无关改动
   const before = clone(design.value)
   try {
     change(design.value)
@@ -156,6 +182,7 @@ function redo() {
 }
 function restoreHistory(snapshot) {
   const { id, revision } = design.value
+  colorDraft.value = null
   design.value = normalizeDesign({ ...snapshot, ...(id ? { id } : {}), revision })
   if (!id) delete design.value.id
   selectedIds.value = selectedIds.value.filter((id) => design.value.layers.some((layer) => layer.id === id))
@@ -163,6 +190,7 @@ function restoreHistory(snapshot) {
 }
 function replaceDesign(value, source = null, saved = true) {
   endGesture(); finishKeyboardMove()
+  sessionToken.value++ // 切换工程：作废进行中的素材插入
   design.value = normalizeDesign(value)
   savedFingerprint.value = saved ? fingerprint(design.value) : ''
   context.value = source
@@ -198,6 +226,98 @@ function newDesign() {
 async function refreshProjects() {
   projects.value = await window.printpress.listDesigns()
 }
+async function refreshPresets() {
+  presets.value = await window.printpress.listDesignPresets()
+}
+/**
+ * 「常用模板」下拉里的「常用」：**用户自己保存过的**工程，按最近使用倒序，最多 8 个。
+ *
+ * ⚠️ 门槛是「用户保存过」（摘要里有 `lastUsedAt`），不是「存在过」——
+ * 系统按内置预设自动建出来的工程**不进常用**（主进程 `saveDesign(..., { recordUse: false })`），
+ * 否则每点一次「身份证（新建）」就往常用里塞一条，跟「工程库每点一次多一个」
+ * 是同一类病（实测一次会话 18 个、装上 0.4.0 又点了 4 个）。
+ * 打开一份从没保存过的工程也不会把它塞进来（`touchDesign` 只刷新已在常用里的）。
+ *
+ * 排序键优先 `lastUsedAt`，没有它的（本特性之前保存的旧工程）退回 `updatedAt`——
+ * 这样不需要任何数据迁移，老工程照样出现在列表里，只是排在新记录后面。
+ */
+const RECENT_LIMIT = 8
+const recentDesigns = computed(() => {
+  /*
+   * 两道过滤，顺序不能反：
+   *
+   * 1. **门槛**：`lastUsedAt !== null` 才是「用户自己保存过」的工程。
+   *    `null` 表示「系统按内置预设自动建出来的」（主进程 `saveDesign(..., { recordUse: false })`），
+   *    它不该一出生就进常用——否则每点一次「身份证（新建）」就往常用里塞一条。
+   *    老工程没有这个字段（`undefined`），按旧行为照收，靠 `updatedAt` 排序。
+   *
+   * 2. **同名折叠**：工程库里若堆着几份同名工程（「每点一次多一个」堆出来的历史残留），
+   *    下拉里出现一排一模一样的名字，用户根本分不清该点哪个。
+   *    只在「常用」里折叠，工程库仍列全部（那是真实清单，不能替用户藏工程）。
+   */
+  const seen = new Set()
+  return [...projects.value]
+    .filter((item) => item.lastUsedAt !== null)
+    .sort((a, b) => String(b.lastUsedAt || b.updatedAt).localeCompare(String(a.lastUsedAt || a.updatedAt)))
+    .filter((item) => (seen.has(item.name) ? false : (seen.add(item.name), true)))
+    .slice(0, RECENT_LIMIT)
+})
+/**
+ * 记一次「使用」（打开工程时调用），供上面的「最近使用」排序。
+ *
+ * 最佳努力：**使用记录失败不该让「打开工程」本身报错**（工程已经打开了），所以只吞
+ * 这一条 IPC 的失败。保存路径不用调它——`designs.saveDesign` 在主进程里已经把
+ * `lastUsedAt` 刷成保存时刻了（保存本身就是一次使用）。
+ */
+async function markUsed(id) {
+  if (!id) return
+  try { await window.printpress.touchDesign(id) } catch { /* 使用记录失败不影响打开 */ }
+}
+/**
+ * 从内置预设建工程：**工程库里已有同名工程就打开它**，否则才新建一份。
+ *
+ * 每次都复制一份会把工程库堆满（实测一次会话 18 个、装上 0.4.0 又点了 4 个）——
+ * 判据放在主进程的 `design:createFromPreset` 里（**通道层面**堵住，不靠前端自觉），
+ * 前端只负责把「新建了」和「打开了已有的」讲清楚，否则用户会以为「点了没反应」。
+ *
+ * 落库（而不是只放到编辑器里）是为了让它和「新建底图」一样是「一份真实工程」——
+ * 否则用户刷新页面就丢了，而他可能已经往里面放过图片。
+ */
+function newFromPreset(presetId) {
+  if (!presetId || busy.value) return
+  const preset = presets.value.find((item) => item.id === presetId)
+  protectDraft(async () => {
+    busy.value = true
+    try {
+      const result = await window.printpress.createDesignFromPreset(presetId, '')
+      await refreshProjects()
+      replaceDesign(result.design, null, true)
+      message.value = result.reused
+        ? `「${result.design.name}」你已经有一份了，直接打开它——不复制新的（想要第二份用「另存副本」）。`
+        : `已按「${preset?.name || '内置模板'}」新建工程，把图片拖到参考框上对齐即可。`
+    } catch (err) { fail(err) } finally { busy.value = false }
+  })
+}
+/**
+ * 下拉里有两类条目，用值前缀区分（`<optgroup>` 只是视觉分组，值本身必须能自解释）：
+ *
+ * - `preset:<id>`：**内置版面**，选中即「**打开或新建**」——工程库里已有同名工程
+ *   就打开它，没有才新建一份。判据在主进程 `design:createFromPreset`（**通道层面**），
+ *   不是无条件复制：「每点一次多一个同名工程」正是工程库被堆满的根源
+ *   （实测一次会话 18 个、装上 0.4.0 又点了 4 个）。
+ * - `design:<id>`：**最近用过的工程**，选中即**打开它本身**——**绝不复制**。
+ *
+ * 选完一律复位：否则再选同一项不会触发 change，用户会以为「点了没反应」。
+ */
+function pickPreset(event) {
+  const value = event.target.value
+  event.target.value = ''
+  if (value.startsWith('preset:')) { newFromPreset(value.slice('preset:'.length)); return }
+  if (value.startsWith('design:')) {
+    const id = value.slice('design:'.length)
+    loadProject(projects.value.find((item) => item.id === id) || { id })
+  }
+}
 async function refreshFonts() {
   fonts.value = await window.printpress.listFonts()
   for (const font of fonts.value.uploaded) {
@@ -213,9 +333,18 @@ async function refreshFonts() {
   }
 }
 async function loadProject(project) {
+  if (!project?.id) return
+  // 打开的就是当前这份、且没有未保存修改：直接返回。重载会清掉撤销历史，
+  // 用户从「最近使用」里点中当前这一份时不该有这种副作用。
+  if (project.id === design.value.id && !dirty.value) return
   protectDraft(async () => {
     busy.value = true
-    try { replaceDesign(await window.printpress.getDesign(project.id), context.value) }
+    try {
+      replaceDesign(await window.printpress.getDesign(project.id), context.value)
+      // 先记使用、再刷列表：反过来的话下拉里拿到的还是记录前的顺序。
+      await markUsed(project.id)
+      await refreshProjects()
+    }
     catch (err) { fail(err) }
     finally { busy.value = false }
   })
@@ -231,10 +360,11 @@ async function save(copy = false, apply = false) {
     const contentBeforeCopy = fingerprint(design.value)
     const saved = await window.printpress.saveDesign(submitted)
     // Edits made while the write is in flight are retained and remain dirty.
-    if (fingerprint(design.value) === contentBeforeCopy) design.value = normalizeDesign(saved)
+    if (fingerprint(design.value) === contentBeforeCopy) { design.value = normalizeDesign(saved); sessionToken.value++ }
     else {
       design.value.id = saved.id
       design.value.revision = saved.revision
+      sessionToken.value++ // 另存副本：身份换成新工程，作废进行中的素材插入
       if (copy && design.value.name === submitted.name.replace(/ 副本$/, '')) design.value.name = submitted.name
     }
     // 落点就是主进程规范化后的文档本身：它的指纹永远非空，比较基准只能是它。
@@ -353,10 +483,27 @@ async function exportPng() {
     if (result.canceled) return
     showExport.value = false
     clearFeedback()
-    message.value = `PNG 已导出：${result.width} × ${result.height} px · ${result.dpi} DPI · ${result.filePath}`
+    // 不再走通用 message：导出成功要带「打开所在文件夹 / 用系统程序打开」两个动作，
+    // 那条提示条承载不了按钮，所以单独渲染一个带按钮的完成条。
+    lastExport.value = result
   } catch (err) { exportError.value = err?.message || String(err) }
   finally { busy.value = false }
 }
+/**
+ * 打开刚导出的 PNG。
+ *
+ * 两个动作都不传参数——路径由主进程记着。这是安全边界，不是省事：
+ * 渲染进程若能指定路径，`shell.openPath` 就等于「以当前用户身份打开任意本地文件」。
+ */
+async function runExportAction(action) {
+  if (busy.value) return
+  busy.value = true
+  try { await action() }
+  catch (err) { fail(err) }
+  finally { busy.value = false }
+}
+const revealExport = () => runExportAction(() => window.printpress.revealDesignExport())
+const openExportedFile = () => runExportAction(() => window.printpress.openDesignExport())
 function add(type, asset = null) {
   const w = design.value.artboard.w, h = design.value.artboard.h
   const layer = { id: uid(), type, name: { text: '固定文字', image: (asset?.name || '图片').slice(0, 120), rect: '矩形', ellipse: '椭圆', line: '直线' }[type], x: round(w * 0.15), y: round(h * 0.15), w: Math.min(80, w * 0.7), h: Math.min(35, h * 0.5), rotation: 0, opacity: 1, visible: true, locked: false }
@@ -374,6 +521,23 @@ async function addImage() {
   try { const asset = await window.printpress.uploadDesignImageDialog(); if (!asset?.canceled) add('image', asset) }
   catch (err) { fail(err) }
   finally { busy.value = false }
+}
+
+/**
+ * 从素材库插入：先抓会话令牌，异步拉取原件描述；期间若切换了工程
+ * （sessionToken 变化），作废本次插入，绝不写进新画板（计划 §3.3）。
+ * 入画板与新增图层合并进同一条撤销记录由 add() 内的 commit 保证。
+ */
+async function insertLibraryAsset(assetId) {
+  const token = sessionToken.value
+  let asset
+  try {
+    const res = await window.printpress.getAsset(assetId)
+    asset = res && res.asset
+  } catch (err) { fail(err); return }
+  if (token !== sessionToken.value) return
+  if (!asset || !asset.width || !asset.height) { fail(new Error('素材原件不可用')); return }
+  add('image', asset)
 }
 
 // ---- 粘贴 / 拖拽直接加图片图层 ----
@@ -496,6 +660,60 @@ function setLayer(key, value, numeric = false) {
       layer[other] = round(layer[other] * layer[key] / previous)
     }
   })
+}
+/*
+ * ---- 颜色控件：拖动即时生效，一次取色只记一条撤销 ----
+ *
+ * 过去只绑了 @change，而原生 <input type="color"> 只保证发 input（拖动过程中连续发），
+ * change 是「取色器关掉」才发、且不同环境行为并不一致——一旦 change 不来，
+ * 表现就是「点了色块、选了颜色，画布上的字一点没变」，属于看不见的失败。
+ * 所以 input 就即时把颜色写进模型（所见即所得），change 再收尾记一条撤销。
+ * 中间过程不进撤销栈，否则拖一次取色器能塞进上百条历史。
+ */
+const colorDraft = ref(null)
+function colorInput(key, value, scope = 'layer') {
+  if (scope === 'artboard') {
+    if (!colorDraft.value) colorDraft.value = { before: clone(design.value) }
+    design.value.artboard[key] = value
+    return
+  }
+  if (!single.value || singleBlocked.value) return
+  if (!colorDraft.value) colorDraft.value = { before: clone(design.value) }
+  const layer = design.value.layers.find((item) => item.id === single.value.id)
+  if (layer) layer[key] = value
+}
+function colorChange(key, value, scope = 'layer') {
+  colorInput(key, value, scope) // change 携带的是最终值；没收到 input 时靠这里补上
+  const draft = colorDraft.value
+  colorDraft.value = null
+  if (!draft) return
+  try {
+    design.value = normalizeDesign(design.value)
+    record(draft.before)
+    clearFeedback()
+  } catch (err) {
+    design.value = draft.before
+    inputEpoch.value++
+    fail(err)
+  }
+}
+/**
+ * 整块颜色控件都能唤起取色器。
+ *
+ * 只靠 <label> 转发不够稳：Chromium 对「label 转发的 click 能不能唤起 color chooser」
+ * 并没有保证（实测点击事件确实转发到了 input，但取色器弹不弹不受控），
+ * 而色块本体只有 34px 宽，用户点的往往是整块盒子 → 看起来「点了没反应」。
+ * 自己调 showPicker()：在真实点击里算用户手势，允许调用；失败再退回 click()。
+ */
+function openColorPicker(event) {
+  const input = event.currentTarget?.querySelector?.('input[type="color"]')
+  if (!input || input.disabled) return
+  if (event.target === input) return // 点色块本体：交给原生，别重复开
+  event.preventDefault() // 掐掉 label 的默认转发，避免开两次
+  if (typeof input.showPicker === 'function') {
+    try { input.showPicker(); return } catch (err) { /* 不支持/不允许则退回 click() */ }
+  }
+  input.click()
 }
 function setCrop(key, percent) {
   if (!single.value || singleBlocked.value) return
@@ -862,7 +1080,7 @@ function activate() {
   // 粘贴挂在 window 上（而不是画布上）：截图粘贴时焦点可能在任意地方，
   // 挂画布会漏掉大多数情况。用 active 门控，切走标签页后不再响应。
   window.addEventListener('paste', onPaste)
-  if (initialized) Promise.allSettled([refreshProjects(), refreshFonts()]).then((results) => {
+  if (initialized) Promise.allSettled([refreshProjects(), refreshFonts(), refreshPresets()]).then((results) => {
     for (const result of results) if (result.status === 'rejected') fail(result.reason)
   })
 }
@@ -890,9 +1108,15 @@ onMounted(async () => {
     }
   } catch (err) { fail(`恢复草稿失败：${err.message || err}`) }
   try {
-    const results = await Promise.allSettled([refreshProjects(), refreshFonts()])
+    // 内置预设必须**在这里**也刷一次，不能只靠 activate()：首次进入本页时
+    // onActivated 早于 onMounted 的这轮 await 跑完（那时 initialized 还是 false），
+    // activate() 里那句被 initialized 门控的 refreshPresets 会被整个跳过——
+    // 结果是「常用模板」下拉一直空着且禁用，用户以为没有这个功能，
+    // 得先切到别的页再切回来才出现。属于「看不见的失败」。
+    const results = await Promise.allSettled([refreshProjects(), refreshFonts(), refreshPresets()])
     if (results[0].status === 'rejected') fail(results[0].reason)
     if (results[1].status === 'rejected') fail(results[1].reason)
+    if (results[2].status === 'rejected') fail(results[2].reason)
   } catch (err) { fail(err) }
   initialized = true
   if (designerNav.request) consumeRequest(designerNav.request)
@@ -908,7 +1132,20 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
       <div><h2>底图制作</h2><p>图片、固定文字与形状分别编辑，保存后用于打印模板。</p></div>
       <div class="heading-actions">
         <button data-testid="design-new" :disabled="busy" @click="newDesign">新建底图</button>
+        <label class="preset-picker" title="内置版面与常用工程：选「内置模板」是「已有就打开、没有才新建」——不会每点一次就多一个同名工程；「常用」里只列你自己保存过的工程，选中直接打开那份（也不会复制）">
+          <span>常用模板</span>
+          <select data-testid="design-preset" :disabled="busy || (!presets.length && !recentDesigns.length)" @change="pickPreset">
+            <option value="">选择…</option>
+            <optgroup label="内置模板">
+              <option v-for="preset in presets" :key="preset.id" :value="`preset:${preset.id}`" :title="preset.summary">{{ preset.name }}（打开或新建）</option>
+            </optgroup>
+            <optgroup v-if="recentDesigns.length" label="常用">
+              <option v-for="project in recentDesigns" :key="project.id" :value="`design:${project.id}`" :title="`打开「${project.name}」（不会新建副本）`">{{ project.name }} · v{{ project.revision }}</option>
+            </optgroup>
+          </select>
+        </label>
         <button data-testid="design-copy" :disabled="busy" @click="save(true)">另存副本</button>
+        <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets">素材库</button>
         <button data-testid="design-export-png" :disabled="busy" @click="openExport">导出 PNG</button>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
         <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
@@ -916,13 +1153,24 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
     </div>
     <div v-if="error" class="notice error" role="alert">{{ error }}<button @click="error = ''">关闭</button></div>
     <div v-else-if="message" class="notice success" role="status">{{ message }}</div>
+    <!--
+      导出完成条：刻意排在通用提示条**之后**——`.notice.success` 的选择器要优先命中
+      通用提示（既有验收就是这么取文案的），抢在前面会把那些断言指错元素。
+      它说的是「磁盘上那个文件」，所以不跟编辑状态走：改了工程也不消失，直到下次导出或手动关掉。
+    -->
+    <div v-if="lastExport" class="notice success export-done" role="status">
+      <span class="export-done-text">PNG 已导出：{{ lastExport.width }} × {{ lastExport.height }} px · {{ lastExport.dpi }} DPI<code class="export-done-path" :title="lastExport.filePath">{{ lastExport.filePath }}</code></span>
+      <button data-testid="design-reveal-export" :disabled="busy" title="在文件管理器里选中这个文件，双击就能用系统看图器打印" @click="revealExport">打开所在文件夹</button>
+      <button data-testid="design-open-export" :disabled="busy" title="用系统默认程序（看图器）打开" @click="openExportedFile">用系统程序打开</button>
+      <button data-testid="design-export-done-close" title="只关掉这条提示，不影响已导出的文件" @click="lastExport = null">关闭</button>
+    </div>
     <div v-if="context" class="notice context-note">
       正在编辑模板“{{ context.name || '当前模板' }}”的底图 · 成品 {{ context.artboard.w }} × {{ context.artboard.h }} mm
       <button :disabled="busy" @click="returnToTemplate()">返回模板（不应用）</button>
       <button @click="context = null">转为独立制作</button>
     </div>
     <div v-if="dimensionMismatch" class="notice error">当前画布尺寸与模板不同，应用前请调整。<button @click="adoptTemplateSize">采用模板尺寸（图层不缩放）</button></div>
-    <div class="designer-workspace">
+    <div class="designer-workspace" :class="{ 'with-assets': showAssets }">
       <aside class="designer-panel tools-panel">
         <h3>添加内容</h3>
         <div class="tool-grid">
@@ -963,6 +1211,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
             <div v-else :data-layer-id="row.id" class="layer-row" :class="{ selected: selectedIds.includes(row.id), hidden: !row.layer.visible, 'group-member': !!row.group }" @click="selectLayer(row.layer, $event, true)">
               <button class="icon-button" :title="row.layer.visible ? '隐藏图层' : '显示图层'" :aria-label="row.layer.visible ? '隐藏图层' : '显示图层'" @click.stop="toggleLayer(row.layer, 'visible')">{{ row.layer.visible ? '◉' : '○' }}</button>
               <span class="layer-name" :title="row.layer.name">{{ row.layer.name }}</span>
+              <span v-if="row.layer.editorOnly" class="layer-flag" title="仅编辑可见：打印、PDF 与 PNG 导出里都不会出现">仅编辑</span>
               <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '解锁图层' : '锁定图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
             </div>
           </template>
@@ -972,6 +1221,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         </div>
         <p v-if="design.groups?.length" class="muted">点组名或画布选择整组；点列表中的成员可单独编辑属性。</p>
       </aside>
+      <AssetLibrarySidebar v-if="showAssets" :project-assets="imageAssets" @insert="insertLibraryAsset" />
       <div class="canvas-column">
         <div class="canvas-toolbar">
           <button data-testid="design-undo" :disabled="!history.length" title="Ctrl+Z" @click="undo">撤销</button>
@@ -984,7 +1234,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         </div>
         <div class="canvas-scroll" :class="{ 'drop-active': dropActive }" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
           <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
-            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" @error="fail" />
+            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :show-editor-only="true" @error="fail" />
             <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
               <textarea
                 ref="inlineTextEditor"
@@ -1018,7 +1268,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           <label>宽度 mm<input type="number" min="1" step="0.1" :value="design.artboard.w" :disabled="!!context" @change="setArtboard('w', $event.target.value)"></label>
           <label>高度 mm<input type="number" min="1" step="0.1" :value="design.artboard.h" :disabled="!!context" @change="setArtboard('h', $event.target.value)"></label>
         </div>
-        <label class="color-field"><span>画布背景</span><span class="color-control"><input type="color" :value="design.artboard.background === 'transparent' ? '#ffffff' : design.artboard.background" aria-label="选择画布背景颜色" @change="setArtboard('background', $event.target.value)"><code class="color-value">{{ formatColor(design.artboard.background) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
+        <label class="color-field" @click="openColorPicker"><span>画布背景</span><span class="color-control"><input type="color" :value="design.artboard.background === 'transparent' ? '#ffffff' : design.artboard.background" aria-label="选择画布背景颜色" @input="colorInput('background', $event.target.value, 'artboard')" @change="colorChange('background', $event.target.value, 'artboard')"><code class="color-value">{{ formatColor(design.artboard.background) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
         <details class="guide-panel" open>
           <summary>参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
           <label class="inline"><input v-model="guidesVisible" data-testid="design-guides-visible" type="checkbox"> 显示并吸附参考线</label>
@@ -1052,6 +1302,8 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           <p v-if="singleBlocked" class="locked-note">该图层或同组成员已锁定，请在图层列表解锁后编辑。</p>
           <fieldset :key="`${single.id}-${inputEpoch}`" :disabled="singleBlocked">
             <label>图层名称<input :value="single.name" maxlength="120" @change="setLayer('name', $event.target.value)"></label>
+            <label class="inline"><input data-testid="design-layer-editor-only" type="checkbox" :checked="single.editorOnly" @change="setLayer('editorOnly', $event.target.checked)"> 仅编辑可见（不打印）</label>
+            <p v-if="single.editorOnly" class="muted">对齐用的参考框勾上它：编辑时看得见、能选中能拖动，打印、导出 PDF 和 PNG 里都不会出现。</p>
             <div class="property-grid">
               <label v-for="[key, label] in [['x','X mm'],['y','Y mm'],['w','宽度 mm'],['h','高度 mm']]" :key="key">{{ label }}<input type="number" step="0.1" :value="single[key]" :data-testid="`design-layer-${key}`" @change="setLayer(key, $event.target.value, true)"></label>
               <label>旋转 °<input type="number" step="1" :value="single.rotation" @change="setLayer('rotation', $event.target.value, true)"></label>
@@ -1062,7 +1314,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
               <label>字体<select :value="single.fontFamily" @change="setLayer('fontFamily', $event.target.value)"><option value="">默认字体</option><option v-for="name in fontNames" :key="name" :value="name">{{ name }}</option><option v-if="single.fontFamily && !fontNames.includes(single.fontFamily)" :value="single.fontFamily">{{ single.fontFamily }}（当前未找到）</option></select></label>
               <div class="property-grid">
                 <label>字号 pt<input type="number" min="1" step="1" :value="single.fontSize" @change="setLayer('fontSize', $event.target.value, true)"></label>
-                <label class="color-field"><span>文字颜色</span><span class="color-control"><input type="color" :value="single.color === 'transparent' ? '#ffffff' : single.color" aria-label="选择文字颜色" @change="setLayer('color', $event.target.value)"><code class="color-value">{{ formatColor(single.color) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
+                <label class="color-field" @click="openColorPicker"><span>文字颜色</span><span class="color-control"><input type="color" :value="single.color === 'transparent' ? '#ffffff' : single.color" aria-label="选择文字颜色" @input="colorInput('color', $event.target.value)" @change="colorChange('color', $event.target.value)"><code class="color-value">{{ formatColor(single.color) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
                 <label>行距倍数<input type="number" min="0.5" step="0.1" :value="single.lineHeight" @change="setLayer('lineHeight', $event.target.value, true)"></label>
                 <label>字距 pt<input type="number" step="0.1" :value="single.letterSpacing" @change="setLayer('letterSpacing', $event.target.value, true)"></label>
               </div>
@@ -1078,9 +1330,9 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
               <p class="muted">原图 {{ design.assets[single.assetId]?.width }} × {{ design.assets[single.assetId]?.height }} px · 当前约 {{ dpiText }} DPI</p>
             </template>
             <template v-else>
-              <label v-if="single.type !== 'line'" class="color-field"><span>填充颜色</span><span class="color-control"><input type="color" :value="single.fill === 'transparent' ? '#ffffff' : single.fill" aria-label="选择填充颜色" @change="setLayer('fill', $event.target.value)"><code class="color-value">{{ formatColor(single.fill) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
+              <label v-if="single.type !== 'line'" class="color-field" @click="openColorPicker"><span>填充颜色</span><span class="color-control"><input type="color" :value="single.fill === 'transparent' ? '#ffffff' : single.fill" aria-label="选择填充颜色" @input="colorInput('fill', $event.target.value)" @change="colorChange('fill', $event.target.value)"><code class="color-value">{{ formatColor(single.fill) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
               <label v-if="single.type !== 'line'" class="inline"><input type="checkbox" :checked="single.fill === 'transparent'" @change="setLayer('fill', $event.target.checked ? 'transparent' : '#ead9bf')"> 无填充</label>
-              <div class="property-grid"><label class="color-field"><span>描边颜色</span><span class="color-control"><input type="color" :value="single.stroke === 'transparent' ? '#000000' : single.stroke" aria-label="选择描边颜色" @change="setLayer('stroke', $event.target.value)"><code class="color-value">{{ formatColor(single.stroke) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label><label>描边 mm<input type="number" min="0" step="0.1" :value="single.strokeWidth" @change="setLayer('strokeWidth', $event.target.value, true)"></label></div>
+              <div class="property-grid"><label class="color-field" @click="openColorPicker"><span>描边颜色</span><span class="color-control"><input type="color" :value="single.stroke === 'transparent' ? '#000000' : single.stroke" aria-label="选择描边颜色" @input="colorInput('stroke', $event.target.value)" @change="colorChange('stroke', $event.target.value)"><code class="color-value">{{ formatColor(single.stroke) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label><label>描边 mm<input type="number" min="0" step="0.1" :value="single.strokeWidth" @change="setLayer('strokeWidth', $event.target.value, true)"></label></div>
               <label v-if="single.type === 'rect'">圆角 mm<input type="number" min="0" step="0.5" :value="single.radius" @change="setLayer('radius', $event.target.value, true)"></label>
             </template>
           </fieldset>
@@ -1090,7 +1342,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
     <div v-if="showExport" class="export-mask" @click.self="!busy && (showExport = false)">
       <section data-testid="design-export-dialog" class="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-heading">
         <h3 id="export-heading">导出 PNG 底图</h3>
-        <p>导出当前编辑内容，包含所有可见图层。</p>
+        <p>导出当前编辑内容，包含所有可见图层（「仅编辑可见」的参考框不会导出，和打印保持一致）。</p>
         <label>输出分辨率<select v-model.number="exportDpi" data-testid="design-export-dpi" :disabled="busy"><option :value="150">150 DPI</option><option :value="300">300 DPI</option><option :value="600">600 DPI</option></select></label>
         <label class="inline"><input v-model="exportTransparent" data-testid="design-export-transparent" type="checkbox" :disabled="busy"> 透明背景（不绘制画布背景色）</label>
         <p class="export-dimensions" data-testid="design-export-size">{{ exportSize.width.toLocaleString() }} × {{ exportSize.height.toLocaleString() }} 像素 · {{ (exportSize.width * exportSize.height / 1000000).toFixed(1) }} 百万像素</p>
@@ -1113,12 +1365,23 @@ button:disabled { opacity: .42; cursor: default; }
 button.primary { color: #fff; background: var(--cinnabar); border-color: var(--cinnabar); }
 button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
 .heading-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 下拉里塞了「名称 — 说明」，收起来时按固定宽度截断；展开的列表仍是完整文案 */
+.preset-picker { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); }
+.preset-picker select { max-width: 230px; border: 1px solid var(--line-strong); background: var(--paper-card); color: var(--ink); border-radius: 5px; padding: 6px 6px; font-size: 12px; }
 .notice { padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 6px; display: flex; align-items: center; gap: 12px; font-size: 12px; }
 .notice button { margin-left: auto; flex-shrink: 0; }
 .notice.error { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
 .notice.success { background: var(--ok-soft); color: var(--ok); }
 .context-note { background: var(--paper-card); color: var(--ink-2); }
+/* 导出完成条：文字占满一行（路径可能很长），按钮在第二行靠右 */
+.export-done { flex-wrap: wrap; }
+.export-done-text { flex: 1 1 100%; }
+.export-done-path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; color: var(--ink-2); background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; margin-left: 6px; overflow-wrap: anywhere; }
+.export-done button { margin-left: 0; }
+.export-done button:first-of-type { margin-left: auto; }
+.heading-actions button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
 .designer-workspace { display: grid; grid-template-columns: 210px minmax(450px, 1fr) 248px; gap: 12px; align-items: start; }
+.designer-workspace.with-assets { grid-template-columns: 210px 240px minmax(420px, 1fr) 248px; }
 .designer-panel { border: 1px solid var(--line); border-radius: 8px; background: var(--paper-card); padding: 12px; min-width: 0; max-height: calc(100vh - 200px); overflow: auto; }
 h3 { font-size: 13px; margin: 4px 0 10px; display: flex; align-items: center; justify-content: space-between; }
 h3:not(:first-child) { margin-top: 20px; padding-top: 13px; border-top: 1px solid var(--line); }
@@ -1143,6 +1406,9 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .group-row { margin-top: 6px; background: var(--paper); font-weight: 600; }
 .group-member { margin-left: 12px; border-left-color: var(--line-strong); }
 .layer-name { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+/* 徽标一律 nowrap + inline-block：表格/弹性布局按 min-content 分列宽，中文徽标可断字，
+   窄窗口下「仅编辑」会被拆成两行（同 I-14 的 .det-flag）。 */
+.layer-flag { flex: none; display: inline-block; white-space: nowrap; font-size: 11px; line-height: 1.4; padding: 0 5px; border-radius: 999px; color: var(--cinnabar); background: var(--cinnabar-soft); border: 1px solid currentColor; }
 .canvas-column { min-width: 0; }
 .canvas-toolbar { display: flex; align-items: center; gap: 7px; background: var(--paper-card); border: 1px solid var(--line); padding: 8px; border-radius: 8px 8px 0 0; }
 .toolbar-spacer { flex: 1; }
@@ -1199,5 +1465,5 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .export-dialog .export-dimensions { font-size: 14px; font-weight: 600; color: var(--ink); padding: 10px 12px; background: var(--paper); border-radius: 6px; margin: 18px 0 12px; }
 .export-dialog .export-error { color: var(--warn); background: var(--warn-soft); padding: 8px 10px; border-radius: 5px; }
 .export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
-@media (max-width: 1180px) { .designer-workspace { grid-template-columns: 185px minmax(420px, 1fr) 220px; gap: 8px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
+@media (max-width: 1180px) { .designer-workspace { grid-template-columns: 185px minmax(420px, 1fr) 220px; gap: 8px; } .designer-workspace.with-assets { grid-template-columns: 185px 200px minmax(340px, 1fr) 220px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
 </style>

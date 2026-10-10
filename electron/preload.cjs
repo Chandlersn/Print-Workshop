@@ -71,6 +71,9 @@ contextBridge.exposeInMainWorld('printpress', {
 
   // 可编辑底图工程（素材只走受控导入，不暴露文件系统）
   listDesigns: () => ipcRenderer.invoke('design:list'),
+  listDesignPresets: () => ipcRenderer.invoke('design:listPresets'),
+  createDesignFromPreset: (presetId, name) => ipcRenderer.invoke('design:createFromPreset', presetId, name),
+  touchDesign: (id) => ipcRenderer.invoke('design:touch', id),
   getDesign: (id, revision) => ipcRenderer.invoke('design:get', id, revision),
   saveDesign: (design) => ipcRenderer.invoke('design:save', design),
   deleteDesign: (id) => ipcRenderer.invoke('design:delete', id),
@@ -78,11 +81,28 @@ contextBridge.exposeInMainWorld('printpress', {
   uploadDesignImageBytes: (payload) => ipcRenderer.invoke('design:importBytes', payload),
   importDesignBackground: (payload) => ipcRenderer.invoke('design:importBackground', payload),
   exportDesignPng: (payload) => ipcRenderer.invoke('design:exportPng', payload),
+  // 无参：路径由主进程记着（最近一次成功导出的 PNG），渲染层传不了路径进来
+  revealDesignExport: () => ipcRenderer.invoke('design:revealExport'),
+  openDesignExport: () => ipcRenderer.invoke('design:openExport'),
 
   // 字体
   listFonts: () => ipcRenderer.invoke('font:list'),
   uploadFontDialog: () => ipcRenderer.invoke('font:uploadDialog'),
   deleteFont: (file) => ipcRenderer.invoke('font:delete', file),
+
+  // 本地素材库（v0.5.0 M1）
+  listAssets: (opts) => ipcRenderer.invoke('asset:list', opts || {}),
+  listAssetTags: () => ipcRenderer.invoke('asset:listTags'),
+  getAsset: (id) => ipcRenderer.invoke('asset:get', id),
+  importAssetBytes: (payload) => ipcRenderer.invoke('asset:importBytes', payload),
+  importAssetDialog: () => ipcRenderer.invoke('asset:importDialog'),
+  updateAsset: (id, patch) => ipcRenderer.invoke('asset:update', id, patch),
+  archiveAsset: (id) => ipcRenderer.invoke('asset:archive', id),
+  restoreAsset: (id) => ipcRenderer.invoke('asset:restore', id),
+  adoptAsset: (id, meta) => ipcRenderer.invoke('asset:adopt', id, meta),
+  rebuildAssetThumb: (id) => ipcRenderer.invoke('asset:rebuildThumb', id),
+  listAssetOrphans: () => ipcRenderer.invoke('asset:listOrphans'),
+  purgeAssetOrphans: (hashes) => ipcRenderer.invoke('asset:purgeOrphans', hashes),
 
   // 打印
   printValidate: (payload) => ipcRenderer.invoke('print:validate', payload),

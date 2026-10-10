@@ -60,7 +60,7 @@ const DEFAULT_FONT_STACK = '"Microsoft YaHei","PingFang SC",sans-serif'
 
 function normalizeDesign(input) {
   const doc = object(input, '底图工程')
-  if (doc.schemaVersion !== undefined && doc.schemaVersion !== 1 && doc.schemaVersion !== 2) throw new Error('不支持的底图工程版本')
+  if (doc.schemaVersion !== undefined && ![1, 2, 3].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
   const board = object(doc.artboard, '画布')
   const layers = doc.layers === undefined ? [] : doc.layers
   if (!Array.isArray(layers) || layers.length > LIMITS.layers) throw new Error(`最多支持 ${LIMITS.layers} 个图层`)
@@ -95,6 +95,9 @@ function normalizeDesign(input) {
         w: number(l.w, 30, 0.01, 10000, '图层宽度'), h: number(l.h, 20, 0.01, 10000, '图层高度'),
         rotation: number(l.rotation, 0, -36000, 36000, '旋转'), opacity: number(l.opacity, 1, 0, 1, '透明度'),
         visible: bool(l.visible, true, '可见性'), locked: bool(l.locked, false, '锁定'),
+        // 仅编辑器可见：参考框这类「给用户对齐用、绝不能印出去」的图层。默认 false，
+        // 旧工程与所有不传新选项的调用方行为完全不变。渲染侧见 renderDesign。
+        editorOnly: bool(l.editorOnly, false, '仅编辑可见'),
       }
       if (l.type === 'image') {
         out.assetId = token(l.assetId, '图层素材标识')
@@ -153,7 +156,14 @@ function normalizeDesign(input) {
     return { id, axis: guide.axis, position: number(guide.position, 0, -10000, 10000, '参考线位置') }
   })
   // Older readers must refuse the new metadata instead of stripping it during a save.
-  if (result.groups.length || result.guides.length) result.schemaVersion = 2
+  // 版本号只能升不能降，且必须取各特性的最大值：早先直接赋值 2，会让「已是更高
+  // 版本 + 恰好有分组」的工程被倒标成旧格式，等于给旧读者开了静默降级的口子。
+  // 版本 3 = 图层级 editorOnly（参考框）；旧应用会明确报「不支持的底图工程版本」，
+  // 而不是把参考框当普通图层印出去。
+  let version = doc.schemaVersion || 1
+  if (result.groups.length || result.guides.length) version = Math.max(version, 2)
+  if (result.layers.some(layer => layer.editorOnly)) version = Math.max(version, 3)
+  result.schemaVersion = version
   // Record uploaded fonts so a missing file cannot silently become a system fallback.
   const fontAssets = object(doc.fontAssets === undefined ? {} : doc.fontAssets, '字体素材表')
   if (Object.keys(fontAssets).length > LIMITS.layers) throw new Error('字体素材数量超限')
@@ -177,8 +187,18 @@ function escapeHtml(value) {
 function cssString(value) {
   return '"' + String(value).replace(/[\\"<>\r\n\f]/g, c => '\\' + c.charCodeAt(0).toString(16) + ' ') + '"'
 }
-function collectFontFamilies(doc) {
-  return [...new Set((doc.layers || []).filter(l => l.type === 'text' && l.fontFamily).map(l => l.fontFamily))]
+/**
+ * 工程里用到的字体族。
+ *
+ * 默认**全量**口径（包含 `editorOnly` 图层）：`designs.cjs` 靠它判断「这个字体还有
+ * 没有工程在用」，收窄了就会把编辑器里仍在用的字体当孤儿清掉。
+ * 只有渲染器传 `includeEditorOnly: false` 时才收窄成「本次真的会印出来的字体」——
+ * 否则参考框引用的上传字体一旦被删，会以「字体加载失败」阻断整批出片，而它根本
+ * 不会出现在成品上。
+ */
+function collectFontFamilies(doc, options = {}) {
+  const includeEditorOnly = options.includeEditorOnly !== false
+  return [...new Set((doc.layers || []).filter(l => l.type === 'text' && l.fontFamily && (includeEditorOnly || !l.editorOnly)).map(l => l.fontFamily))]
 }
 function imageDpi(layer, asset) {
   if (!asset || !layer || !(layer.w > 0) || !(layer.h > 0)) return 0
@@ -186,14 +206,22 @@ function imageDpi(layer, asset) {
   return Math.min(asset.width * crop.w / layer.w, asset.height * crop.h / layer.h) * 25.4
 }
 
+/**
+ * 渲染底图工程。
+ *
+ * `includeEditorOnly` 默认 false ⇒ 出片（打印 / PDF）、PNG 导出、归档快照一律不含
+ * `editorOnly` 图层。只有编辑器画布显式传 true，才能看见并对齐参考框。默认值就是
+ * 安全值：漏传选项的后果是「参考框不显示」，而不是「参考框被印出去」。
+ */
 function renderDesign(input, options = {}) {
   const doc = normalizeDesign(input)
   const prefix = token(options.classPrefix || 'design', '样式前缀')
+  const includeEditorOnly = options.includeEditorOnly === true
   const assetUrl = options.assetUrl || (asset => `pp://media/${asset.path}`)
   const family = options.fontFamily || (name => name)
   const css = [`.${prefix}-root{position:relative;box-sizing:border-box;overflow:hidden;width:${doc.artboard.w}mm;height:${doc.artboard.h}mm;background:${doc.artboard.background};isolation:isolate}`, `.${prefix}-layer{position:absolute;box-sizing:border-box;margin:0;padding:0;transform-origin:center center}`, `.${prefix}-image{position:absolute;background-size:100% 100%;background-repeat:no-repeat}`]
   const assetClasses = new Map()
-  const fragments = doc.layers.filter(l => l.visible).map(l => {
+  const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly)).map(l => {
     let body = ''
     const style = [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${l.opacity}`]
     if (l.type === 'image') {
@@ -222,7 +250,7 @@ function renderDesign(input, options = {}) {
     }
     return `<div class="${prefix}-layer" data-design-layer="${escapeHtml(l.id)}" style="${escapeHtml(style.join(';'))}">${body}</div>`
   })
-  return { html: `<div class="${prefix}-root">${fragments.join('')}</div>`, css: css.join('\n'), fontFamilies: collectFontFamilies(doc) }
+  return { html: `<div class="${prefix}-root">${fragments.join('')}</div>`, css: css.join('\n'), fontFamilies: collectFontFamilies(doc, { includeEditorOnly }) }
 }
 
 module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, LIMITS }

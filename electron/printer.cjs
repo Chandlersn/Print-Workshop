@@ -9,7 +9,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const { pathToFileURL } = require('url')
-const { BrowserWindow } = require('electron')
+const { BrowserWindow, shell } = require('electron')
 
 /** 隐藏窗口（不出现在任务栏，不抢焦点） */
 function offscreenWindow(capture = false) {
@@ -152,8 +152,55 @@ async function sendToPrinter(html, { silent = false } = {}) {
   }
 }
 
+/**
+ * 最近一次**成功**导出的 PNG 绝对路径。
+ *
+ * 为什么记在主进程、而不是让渲染进程把路径传进来：`shell.openPath` /
+ * `shell.showItemInFolder` 会拿这个字符串去**启动系统程序**，渲染进程若能传任意
+ * 路径，就等于拿到了「以当前用户身份打开任意本地文件 / 可执行文件」的能力。
+ * 所以路径只由本模块在真正写出文件之后自己记下，注册表那两条操作
+ * （design:revealExport / design:openExport）**不接受任何参数**。
+ */
+let lastDesignPng = null
+
+async function exportDesignPng(prepared, filePath) {
+  const result = await require('./design-export.cjs').exportPng(prepared, filePath)
+  // 只在真写出文件之后才更新：渲染失败 / 用户取消都不能让「打开」指向上一次的文件。
+  if (result && !result.canceled && result.filePath) lastDesignPng = result.filePath
+  return result
+}
+
+/**
+ * 「打开」类操作的统一前置检查。
+ *
+ * 不做静默兜底：没导出过、或文件已被用户挪走/删掉时，`showItemInFolder` 什么都不做、
+ * `openPath` 只回一句英文系统错误——用户看到的是「点了没反应」。这里一律抛出中文原因。
+ */
+function requireLastDesignPng() {
+  if (!lastDesignPng) throw new Error('还没有导出过 PNG，请先导出一次。')
+  if (!fs.existsSync(lastDesignPng)) throw new Error('刚导出的 PNG 已被移动或删除，请重新导出。')
+  return lastDesignPng
+}
+
+/** 在系统文件管理器里定位刚导出的 PNG（选中它），用户双击就能用系统看图器打印。 */
+function revealLastDesignPng() {
+  const filePath = requireLastDesignPng()
+  shell.showItemInFolder(filePath)
+  return { ok: true, filePath }
+}
+
+/** 用系统默认程序打开刚导出的 PNG。 */
+async function openLastDesignPng() {
+  const filePath = requireLastDesignPng()
+  const failure = await shell.openPath(filePath)
+  if (failure) throw new Error(`系统未能打开该文件：${failure}`)
+  return { ok: true, filePath }
+}
+
 module.exports = {
   exportPdf, sendToPrinter, loadHtml, waitPrintResources,
   prepareDesignPng: (payload) => require('./design-export.cjs').prepareExport(payload),
-  exportDesignPng: (prepared, filePath) => require('./design-export.cjs').exportPng(prepared, filePath),
+  exportDesignPng,
+  revealLastDesignPng,
+  openLastDesignPng,
 }

@@ -158,6 +158,25 @@ function readAsset(id, claimedPath) {
   if (asset.width !== measured.width || asset.height !== measured.height || asset.mime !== measured.mime) throw new Error('底图素材尺寸记录不一致')
   return { asset: { id, path: expected, name: String(asset.name || '图片').slice(0, 200), width: measured.width, height: measured.height, mime: measured.mime }, bytes: size }
 }
+/**
+ * 对外只读出口：给素材库（asset-library.cjs）用，避免那边再造一份原件解析。
+ *
+ * 一律走 `readAsset`，也就是**照样做哈希核对**——素材库要缩略的必须是那个
+ * 未被改动的原件，绝不能缩略一个已被外部替换的文件。
+ */
+function assetInfo(id) {
+  return readAsset(assetIdOfExport(id)).asset
+}
+function assetBytes(id) {
+  const assetId = assetIdOfExport(id)
+  const { asset } = readAsset(assetId)
+  return { asset, buffer: fs.readFileSync(guardedFile(asset.path, 'design-assets')) }
+}
+function assetIdOfExport(id) {
+  if (typeof id !== 'string' || !/^asset_[a-f0-9]{64}$/.test(id)) throw new Error('素材标识无效')
+  return id
+}
+
 function canonicalAssets(doc) {
   let total = 0
   for (const [id, asset] of Object.entries(doc.assets)) {
@@ -189,6 +208,40 @@ function canonicalFonts(doc, previous = {}) {
 function listDesigns() {
   return index().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
 }
+/**
+ * 记一次「使用」（打开工程、按预设新建后落库等），只更新摘要里的 `lastUsedAt`。
+ *
+ * ⚠️ **绝不能碰 `revision`，也不能重写工程内容**：使用记录是界面元数据，不是工程版本。
+ * 一旦顺手 `revision + 1`（或把 doc 重存一遍），用户下一次保存就会撞 `DESIGN_CONFLICT`
+ * （「底图已更新至版本 N，当前版本 M 不能覆盖」），而他根本没改过任何东西——
+ * 属于最难排查的一类故障。契约登记为 **I-29**。
+ *
+ * 实现上只在 `designs.json` 的摘要里写一个时间戳，不碰 `designs/<id>/<rev>.json`，
+ * 所以「记录使用」在物理上就不可能改变任何一份已提交版本的内容。
+ */
+function touchDesign(id) {
+  projectId(id)
+  return withLock(() => {
+    const all = index()
+    const found = all.find((d) => d.id === id)
+    if (!found) throw new Error('底图工程不存在或已删除')
+    /*
+     * ⚠️ 只刷新**已经在「常用」里**的工程（有 `lastUsedAt` 才说明用户保存过）。
+     *
+     * 「常用」的门槛是**用户自己保存过**：系统按预设自动建出来的工程不算
+     * （`saveDesign(..., { recordUse: false })`）。所以打开一份**从未保存过**的
+     * 工程不会把它塞进常用——只是原地不动（返回 `touched: false`）。
+     * 已经在常用里的，打开会把它顶到最前（这才是「常用」该有的行为）。
+     *
+     * 顺带：这里**绝不碰 `revision`**（I-29）——动了它用户下次保存就撞
+     * `DESIGN_CONFLICT`，而报错完全指不到真凶。
+     */
+    if (!found.lastUsedAt) return { ok: true, id, lastUsedAt: found.lastUsedAt || null, touched: false }
+    const now = new Date().toISOString()
+    saveJson('designs', all.map((d) => (d.id === id ? { ...d, lastUsedAt: now } : d)))
+    return { ok: true, id, lastUsedAt: now, touched: true }
+  })
+}
 function getDesign(id, revision) {
   projectId(id)
   const head = index().find(d => d.id === id)
@@ -216,8 +269,17 @@ function resolveDraft(input) {
   if (doc.id && doc.revision > 0) previousFonts = readRevision(doc.id, doc.revision).fontAssets || {}
   return canonicalFonts(canonicalAssets(doc), previousFonts)
 }
-function saveDesign(input) {
+function saveDesign(input, options) {
   const doc = canonicalAssets(normalizeDesign(input))
+  /*
+   * ⚠️ `recordUse: false` 只给「系统按预设自动建工程」用（`design:createFromPreset`）。
+   *
+   * 「常用」列表的门槛是**用户自己保存过**——预设刚生成出来的工程不该一出生就
+   * 出现在常用里，否则每点一次「身份证（新建）」就往常用里塞一条，跟「工程库
+   * 每点一次多一个」是同一类病（实测一次会话 18 个、装上 0.4.0 又点了 4 个）。
+   * 用户真正保存（`design:save` / 另存副本 / 保存并应用）时才记这一次使用。
+   */
+  const recordUse = !options || options.recordUse !== false
   return withLock(() => {
     const all = index()
     const head = doc.id ? all.find(d => d.id === projectId(doc.id)) : null
@@ -235,7 +297,9 @@ function saveDesign(input) {
     const target = revisionPath(saved.id, saved.revision)
     // An uncommitted orphan from a terminated write may be replaced; committed files never are.
     atomicFile(target, JSON.stringify(saved, null, 2))
-    const summary = { id: saved.id, revision: saved.revision, name: saved.name, artboard: saved.artboard, layerCount: saved.layers.length, createdAt: saved.createdAt, updatedAt: now }
+    // lastUsedAt = 「用户最近一次用它的时间」，供界面上的「常用」列表排序。
+    // 用户主动保存本身就是一次使用 ⇒ 刷成 now；系统按预设自动建的工程不记（见函数头注）。
+    const summary = { id: saved.id, revision: saved.revision, name: saved.name, artboard: saved.artboard, layerCount: saved.layers.length, createdAt: saved.createdAt, updatedAt: now, lastUsedAt: recordUse ? now : null }
     const updated = all.filter(d => d.id !== saved.id).concat(summary)
     try { saveJson('designs', updated) } catch (err) {
       try { fs.unlinkSync(target) } catch { /* Orphan is unreachable until a successful retry. */ }
@@ -397,4 +461,4 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes }

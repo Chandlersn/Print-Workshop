@@ -72,6 +72,9 @@ const LEGACY_CHANNELS = [
  * - dataset:deleteBatch：导入会话整批删除
  * - template:uploadBackgroundBytes：拖拽 / 剪贴板粘贴上传底图（图片只有字节、没有路径）
  * - template:discardBackground：换图 / 移除底图时当场删掉旧图文件
+ * - design:listPresets / design:createFromPreset：内置常用版面（身份证复印件），
+ *   选中即复制成一份用户自己的新工程
+ * - design:touch：记一次「使用」（只刷摘要里的 lastUsedAt，供「最近使用」排序；不动版本号，见 I-29）
  */
 const ADDED_CHANNELS = [
   'dataset:importFile',
@@ -80,7 +83,10 @@ const ADDED_CHANNELS = [
   'template:uploadBackgroundBytes',
   'template:discardBackground',
   'font:upload',
+  'design:listPresets',
+  'design:createFromPreset',
   'design:list',
+  'design:touch',
   'design:get',
   'design:save',
   'design:delete',
@@ -88,6 +94,21 @@ const ADDED_CHANNELS = [
   'design:importBytes',
   'design:importBackground',
   'design:exportPng',
+  'design:revealExport',
+  'design:openExport',
+  // 本地素材库（v0.5.0 M1）：元数据层 + 缩略图经由 ctx.thumbs 注入
+  'asset:list',
+  'asset:listTags',
+  'asset:get',
+  'asset:importBytes',
+  'asset:importDialog',
+  'asset:update',
+  'asset:archive',
+  'asset:restore',
+  'asset:adopt',
+  'asset:rebuildThumb',
+  'asset:listOrphans',
+  'asset:purgeOrphans',
 ]
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }
@@ -143,7 +164,7 @@ async function run() {
 
     const added = names.filter((n) => !LEGACY_CHANNELS.includes(n))
     ok(added.length === ADDED_CHANNELS.length && ADDED_CHANNELS.every((n) => added.includes(n)),
-      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径、批次、素材与图层工程）`, added)
+      `新增通道恰好是预期的 ${ADDED_CHANNELS.length} 个（路径、批次、素材、图层工程、内置预设、使用记录与打开导出）`, added)
 
     // ipc.cjs 必须从注册表派生，不能回退成手写
     const ipcSrc = stripComments(src('electron/ipc.cjs'))
@@ -371,6 +392,46 @@ async function run() {
     ok(readme.includes(`%APPDATA%\\${pkg.name}\\data`) || readme.includes(`%APPDATA%/${pkg.name}/data`),
       'README 里的默认目录路径正确')
     ok(!readme.includes('批印坊\\data'), 'README 不再写错目录名')
+  }
+
+  /*
+   * I-28：打开导出文件的两条操作**不接受路径参数**（源码级契约）。
+   *
+   * 为什么必须钉：`shell.openPath` / `shell.showItemInFolder` 会拿字符串去**启动系统程序**，
+   * 渲染进程若能指定路径，就等于拿到「以当前用户身份打开任意本地文件 / 可执行文件」的能力。
+   * 所以路径只由主进程在真正写出 PNG 之后自己记着，注册表这两条只暴露动作本身。
+   * 一旦有人「顺手」给它们加个 filePath 参数（哪怕只是为了让测试好写），这个守卫要立刻红。
+   */
+  console.log('== 10. 打开导出文件不接受路径参数（I-28） ==')
+  {
+    const ops = api.describe().filter((o) => o.name === 'design:revealExport' || o.name === 'design:openExport')
+    ok(ops.length === 2, 'design:revealExport / design:openExport 都已注册')
+    ok(ops.every((o) => o.gui === 'printer'),
+      '两条都标 gui: printer —— CLI / agent 拿不到 ctx.printer，一律 GUI_REQUIRED')
+    ok(ops.every((o) => Object.keys(o.params).length === 0),
+      '两条都不声明任何参数（参数表为空，别处也就无从传路径进来）')
+
+    // 注册表实现必须是「只调 printer 上那两个零参函数」，且 run 不吃参数
+    const apiSrc = stripComments(src('electron/api.cjs'))
+    for (const [name, fn] of [['design:revealExport', 'revealLastDesignPng'], ['design:openExport', 'openLastDesignPng']]) {
+      const block = apiSrc.slice(apiSrc.indexOf(`'${name}'`), apiSrc.indexOf(`'${name}'`) + 400)
+      ok(new RegExp(`run:\\s*\\(_p,\\s*ctx\\)\\s*=>\\s*ctx\\.printer\\.${fn}\\(\\)`).test(block),
+        `${name} 的实现只调 ctx.printer.${fn}()，不读任何参数`)
+    }
+
+    // 渲染层同样不给参数：contextBridge 上暴露的必须是零参函数
+    const preloadSrc = stripComments(src('electron/preload.cjs'))
+    ok(/revealDesignExport:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('design:revealExport'\)/.test(preloadSrc),
+      'preload 暴露的 revealDesignExport 是零参函数（渲染层无处传路径）')
+    ok(/openDesignExport:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('design:openExport'\)/.test(preloadSrc),
+      'preload 暴露的 openDesignExport 是零参函数（渲染层无处传路径）')
+
+    // printer.cjs 里记路径的只有一个模块级变量，且只在导出成功后写入
+    const printerSrc = stripComments(src('electron/printer.cjs'))
+    ok(/lastDesignPng\s*=\s*result\.filePath/.test(printerSrc),
+      'printer.cjs 只在导出成功后记下路径（失败 / 取消都不更新）')
+    ok(!/function\s+\w*[Ll]astDesignPng\s*\(\s*\w/.test(printerSrc),
+      'printer.cjs 的「打开最近导出」不接受传入路径')
   }
 }
 

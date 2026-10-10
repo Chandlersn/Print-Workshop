@@ -33,7 +33,9 @@ const { loadJson, saveJson } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
 const designs = require('./designs.cjs')
+const designPresets = require('./design-presets.cjs')
 const fonts = require('./fonts.cjs')
+const assetLibrary = require('./asset-library.cjs')
 const printDomain = require('./print.cjs')
 const dataDirModule = require('./data-dir.cjs')
 const cache = require('./cache.cjs')
@@ -479,9 +481,66 @@ const OPS = {
 
   // ==================== 可编辑底图 ====================
 
+  'design:listPresets': {
+    params: {},
+    run: () => designPresets.listPresets(),
+  },
+
+  /**
+   * 从内置预设造一份**新工程**（复制，不改动预设本身）。
+   * 预设是内置常量，落库前一律过 normalizeDesign（见 design-presets.cjs）。
+   */
+  'design:createFromPreset': {
+    write: true,
+    params: { presetId: { required: true, desc: '内置预设标识，见 design:listPresets' }, name: { required: false, desc: '新工程名称；省略或留空用预设名' } },
+    fromIpc: (presetId, name) => ({ presetId, name }),
+    /*
+     * ⚠️ 语义是「**打开或新建**」，不是「新建」。
+     *
+     * 无条件落库 ⇒ 每点一次下拉就多一份同名工程：实测一次会话堆出 18 个，
+     * 装上 0.4.0 又点了 4 个。这个坑**不在逻辑里，在交互后果里**——逻辑断言全绿
+     * 也照样发生。所以必须在这里（**通道层面**）堵住，像 I-28 那样靠通道形状，
+     * 而不是靠调用方自觉：
+     *
+     *   工程库里已有同名工程 ⇒ 打开那份并记一次使用，**不再复制**。
+     *   用户确实想要第二份，用「另存副本」。
+     *
+     * 返回 `{ design, reused }`：`design` 一律是**完整工程**（新建时也回读，
+     * 因为 `saveDesign` 只给摘要，前端要 layers 才能渲染）。
+     */
+    run: (p) => {
+      const preset = designPresets.listPresets().find((item) => item.id === p.presetId)
+      if (!preset) throw new Error(`没有这个内置模板：${p.presetId}`)
+      const title = String(p.name == null ? '' : p.name).trim() || preset.name
+      const existing = designs.listDesigns().find((item) => item.name === title)
+      if (existing) {
+        designs.touchDesign(existing.id)
+        return { design: designs.getDesign(existing.id), reused: true }
+      }
+      // `{ recordUse: false }`：系统自动建的工程不该一出生就进「常用」——
+      // 常用的门槛是**用户自己保存过**（见 designs.touchDesign 的注释）。
+      const saved = designs.saveDesign(designPresets.buildPreset(p.presetId, p.name), { recordUse: false })
+      return { design: designs.getDesign(saved.id, saved.revision), reused: false }
+    },
+  },
+
   'design:list': {
     params: {},
     run: () => designs.listDesigns(),
+  },
+
+  /**
+   * 记一次「使用」：把摘要里的 `lastUsedAt` 刷成当前时间，供界面上的「最近使用」排序。
+   *
+   * 单独开一条通道、而不是顺手塞进 `design:get`：`design:get` 同时服务于出片
+   * （`designs.resolveDesign` 走的就是它），在那条路径上写盘会让「读」带上副作用。
+   * 实现见 `designs.touchDesign`——只写摘要时间戳，**不动版本号**（I-29）。
+   */
+  'design:touch': {
+    write: true,
+    params: { id: { required: true, desc: '底图工程 id' } },
+    fromIpc: (id) => ({ id }),
+    run: (p) => designs.touchDesign(p.id),
   },
 
   'design:get': {
@@ -554,6 +613,171 @@ const OPS = {
       }
       return ctx.printer.exportDesignPng(prepared, filePath)
     },
+  },
+
+  /*
+   * 导出后「打开所在文件夹 / 用系统程序打开」——两条都**不接受任何参数**。
+   *
+   * 参数化路径在这里是明确的安全红线：`shell.openPath` / `showItemInFolder` 会拿
+   * 字符串去启动系统程序，渲染进程若能传路径，等于拿到「以当前用户身份打开任意
+   * 本地文件」的能力。所以路径由 printer.cjs 在真正写出 PNG 之后自己记下
+   * （见 lastDesignPng），这里只暴露「打开刚导出的那一个」这个动作本身。
+   *
+   * 不标 write：它们不改应用数据；但也**不是**只读能力（会启动外部程序），
+   * 故标 gui: 'printer'——CLI / agent 拿不到 ctx.printer，一律 GUI_REQUIRED。
+   */
+  'design:revealExport': {
+    gui: 'printer',
+    params: {},
+    run: (_p, ctx) => ctx.printer.revealLastDesignPng(),
+  },
+
+  'design:openExport': {
+    gui: 'printer',
+    params: {},
+    run: (_p, ctx) => ctx.printer.openLastDesignPng(),
+  },
+
+  // ==================== 本地素材库（v0.5.0 M1）====================
+  // 元数据层（asset-library.cjs）零 electron 依赖、与原件解耦；缩略图解码是宿主能力，
+  // 经 ctx.thumbs 注入——纯 Node / CLI 不传也能跑（只是不出缩略图）。
+
+  'asset:list': {
+    params: {
+      query: { required: false, desc: '按展示名或标签模糊搜' },
+      tags: { required: false, desc: '标签数组；多标签是收窄（AND）' },
+      favoriteOnly: { required: false, desc: 'true 只列收藏' },
+      includeArchived: { required: false, desc: 'true 把已归档的也列出来' },
+      page: { required: false, desc: '分页页码，从 1 开始' },
+      pageSize: { required: false, desc: '每页条数，有硬上限' },
+    },
+    run: (p) => assetLibrary.listLibrary(p),
+  },
+
+  'asset:listTags': {
+    params: {},
+    run: () => assetLibrary.listTags(),
+  },
+
+  'asset:get': {
+    params: { id: { required: true, desc: '素材标识 asset_<sha256>' } },
+    fromIpc: (id) => ({ id }),
+    // 入画板要按原件尺寸等比适配（add('image', asset) 读 width/height/name），
+    // 而 getEntry 只返回展示元数据——所以这里把原件描述一并带出（原件缺失会报错）。
+    run: (p) => {
+      const entry = assetLibrary.getEntry(p.id)
+      const asset = designs.assetInfo(p.id)
+      return { entry, asset }
+    },
+  },
+
+  /**
+   * 从字节入库：原件先走 designs 的内容寻址校验（哈希核对），再补展示元数据。
+   * 同名不同字节会被当成不同素材——内容才是身份，名字只是给人看的。
+   */
+  'asset:importBytes': {
+    write: true,
+    params: {
+      base64: { required: true, desc: '原始 PNG/JPEG base64，不含 data: 前缀' },
+      name: { required: false, desc: '显示文件名（存进原件记录，不影响素材库叫法）' },
+      displayName: { required: false, desc: '素材库里的展示名' },
+      tags: { required: false, desc: '标签数组' },
+      favorite: { required: false, desc: '是否收藏' },
+    },
+    run: (p, ctx) => {
+      const asset = designs.importImageBytes({ name: p.name, base64: p.base64 })
+      return assetLibrary.upsert(asset, { displayName: p.displayName, tags: p.tags, favorite: p.favorite }, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail })
+    },
+  },
+
+  /**
+   * 弹窗选文件导入：路径只由主进程经对话框拿到（不开放任意文件读取），
+   * 与 design:importDialog 同构。多选时逐张入库，重复内容自动合并。
+   */
+  'asset:importDialog': {
+    write: true,
+    gui: 'dialog',
+    params: {},
+    run: async (_p, ctx) => {
+      if (!ctx.dialog) throw guiRequired('asset:importDialog', '文件选择对话框')
+      const result = await ctx.dialog.openFile({ title: '导入素材', properties: ['openFile', 'multiSelections'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }] })
+      if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true, imported: [] }
+      const imported = []
+      for (const filePath of result.filePaths) {
+        const asset = designs.importImageFile(filePath)
+        imported.push(assetLibrary.upsert(asset, {}, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }))
+      }
+      return { canceled: false, imported }
+    },
+  },
+
+  'asset:update': {
+    write: true,
+    params: {
+      id: { required: true, desc: '素材标识' },
+      displayName: { required: false, desc: '新展示名' },
+      tags: { required: false, desc: '新标签数组（整体替换）' },
+      favorite: { required: false, desc: '是否收藏' },
+    },
+    fromIpc: (id, patch) => ({ id, ...(patch || {}) }),
+    run: (p) => assetLibrary.updateMetadata(p.id, { displayName: p.displayName, tags: p.tags, favorite: p.favorite }),
+  },
+
+  'asset:archive': {
+    write: true,
+    params: { id: { required: true, desc: '素材标识' } },
+    fromIpc: (id) => ({ id }),
+    run: (p) => assetLibrary.archive(p.id),
+  },
+
+  'asset:restore': {
+    write: true,
+    params: { id: { required: true, desc: '素材标识' } },
+    fromIpc: (id) => ({ id }),
+    run: (p) => assetLibrary.restore(p.id),
+  },
+
+  /**
+   * 把「已有工程里的图片」建成素材库条目：不导入任何新字节，只补展示元数据。
+   * 原件缺失会报错——不会给用户建一条点开就丢图的条目。
+   */
+  'asset:adopt': {
+    write: true,
+    params: {
+      id: { required: true, desc: '工程里图片的素材标识' },
+      displayName: { required: false, desc: '素材库展示名' },
+      tags: { required: false, desc: '标签数组' },
+    },
+    fromIpc: (id, meta) => ({ id, ...(meta || {}) }),
+    run: (p, ctx) => assetLibrary.adopt(p.id, { displayName: p.displayName, tags: p.tags }, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }),
+  },
+
+  /** 缩略图缓存被清掉后重建；原件不在会明确报错，不会静默留下坏缓存。 */
+  'asset:rebuildThumb': {
+    write: true,
+    params: { id: { required: true, desc: '素材标识' } },
+    fromIpc: (id) => ({ id }),
+    run: (p, ctx) => assetLibrary.rebuildThumbnail(p.id, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }),
+  },
+
+  /**
+   * 列出「既不在任何工程、也不在素材库」的孤立原件（I-32 清理未引用原件的预览）。
+   * 只读、纯展示，不入任何库。
+   */
+  'asset:listOrphans': {
+    params: {},
+    run: () => assetLibrary.findOrphanOriginals(),
+  },
+
+  /**
+   * 删除孤立原件；删除前**再次**核对仍孤儿，期间被引用的（竞态）一律跳过（I-32）。
+   * 入参是 64 位十六进制 hash 列表，路径只由本函数按 hash 拼 `design-assets/` 与
+   * `design-thumbnails/`，绝不接受任意文件路径，避免越界删文件。
+   */
+  'asset:purgeOrphans': {
+    write: true,
+    params: { hashes: { required: true, desc: '要清理的孤立原件 hash 列表（64 位十六进制）' } },
+    run: (p) => assetLibrary.purgeOrphanOriginals(p.hashes),
   },
 
   // ==================== 字体 ====================

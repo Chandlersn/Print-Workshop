@@ -57,6 +57,14 @@ const CONTRACT = [
   { id: 'I-22', file: 'test/design-render.cjs', anchor: '旧图转工程后删除旧文件或模板不影响工程原素材' },
   { id: 'I-23', file: 'test/design-render.cjs', anchor: '打印等待CSS背景实际解码完成，共用URL只解码一次' },
   { id: 'I-24', file: 'test/canvas-align.cjs', anchor: '== 6. 上传字体在画布与 PDF 使用同一字体名 ==' },
+  { id: 'I-25', file: 'test/design-render.cjs', anchor: '== 仅编辑可见的图层绝不出片（静态守卫）==' },
+  { id: 'I-26', file: 'test/e2e-harness.cjs', anchor: '== 6. 打包必须显式关闭 electron-builder 自身的发布（v0.2.13 空包真凶） ==' },
+  { id: 'I-27', file: 'test/design-presets.cjs', anchor: '== 内置预设：参考框一律「仅编辑可见」，出片时一个图层都不印 ==' },
+  { id: 'I-28', file: 'test/api-cli.cjs', anchor: '== 10. 打开导出文件不接受路径参数（I-28） ==' },
+  { id: 'I-29', file: 'test/designs.cjs', anchor: '使用记录（design:touch）绝不动版本号，否则下次保存会撞 DESIGN_CONFLICT' },
+  { id: 'I-30', file: 'test/designs.cjs', anchor: '门槛是用户保存过' },
+  { id: 'I-31', file: 'test/asset-library.cjs', anchor: '**同一字节内容只存一份原件**' },
+  { id: 'I-32', file: 'test/asset-library.cjs', anchor: 'I-32 清理未引用原件：删除前必须复核仍孤儿，绝不静默删被引用的图' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

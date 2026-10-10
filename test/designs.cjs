@@ -122,6 +122,47 @@ try {
     second = designs.saveDesign({ ...second, name: '重试成功' })
     assert.equal(second.revision, 3)
   })
+  check('使用记录（design:touch）绝不动版本号，否则下次保存会撞 DESIGN_CONFLICT', () => {
+    // 「最近使用」靠摘要里的 lastUsedAt 排序（界面上的「常用模板」下拉）。若记录使用
+    // 顺手把 revision +1（或把工程内容重存一遍），用户下一次保存就会撞 DESIGN_CONFLICT
+    // ——而他根本没改过任何东西，这类故障极难排查。所以这里把「只动 lastUsedAt」钉死。
+    const head = designs.listDesigns().find((item) => item.id === first.id)
+    assert.equal(head.revision, 3)
+    const contentBefore = designs.getDesign(first.id)
+    const touched = designs.touchDesign(first.id)
+    assert.equal(touched.ok, true)
+    assert.ok(touched.lastUsedAt, '要返回刷新后的时间戳')
+    const after = designs.listDesigns().find((item) => item.id === first.id)
+    assert.equal(after.revision, head.revision, '记录使用不能改版本号')
+    assert.deepEqual(after, { ...head, lastUsedAt: touched.lastUsedAt }, '除 lastUsedAt 外摘要不许有任何变化')
+    assert.deepEqual(designs.getDesign(first.id), contentBefore, '记录使用不能改动工程内容')
+    assert.equal(designs.resolveDesign({ id: first.id, revision: 1 }).name, '证书底图', '历史版本照旧可读')
+    assert.throws(() => designs.touchDesign('design_000000000000000000000000'), /不存在/)
+    assert.throws(() => designs.touchDesign('../templates'), /标识/)
+    // 记录完之后仍然能正常保存（没有制造出版本冲突）
+    const saved = designs.saveDesign({ ...contentBefore, name: '记录使用后仍可保存' })
+    assert.equal(saved.revision, head.revision + 1)
+  })
+  check('「常用」的门槛是用户保存过：系统建的不记使用，打开没保存过的也不塞进常用', () => {
+    // 每点一次「身份证（新建）」就往常用里塞一条，跟「工程库每点一次多一个」是同一类病
+    // （实测一次会话 18 个、装上 0.4.0 又点了 4 个）。所以两条一起钉：
+    const auto = designs.saveDesign(draft(), { recordUse: false })
+    const autoHead = designs.listDesigns().find((item) => item.id === auto.id)
+    assert.equal(autoHead.lastUsedAt, null, '系统按预设建出来的工程不该有使用记录')
+    assert.equal(autoHead.revision, 1, '但照旧落库——还是一份真实工程，只是不进「常用」')
+
+    const untouched = designs.touchDesign(auto.id)
+    assert.equal(untouched.touched, false, '打开一份从没保存过的工程不算「使用」')
+    const afterTouch = designs.listDesigns().find((item) => item.id === auto.id)
+    assert.equal(afterTouch.lastUsedAt, null, '打开不该把它塞进「常用」')
+    assert.equal(afterTouch.revision, 1, '这条路径同样不许碰版本号（I-29）')
+
+    // 用户真的保存之后才记一次使用，此后打开才会把它顶到最前
+    designs.saveDesign({ ...designs.getDesign(auto.id), revision: 1 })
+    assert.ok(designs.listDesigns().find((item) => item.id === auto.id).lastUsedAt, '用户自己保存过才进「常用」')
+    assert.equal(designs.touchDesign(auto.id).touched, true, '已在常用里的工程，打开会把它顶到最前')
+    designs.deleteDesign(auto.id)
+  })
   check('路径、缺少素材、伪造素材元信息、无效数值与内容都会被检查', () => {
     assert.throws(() => designs.getDesign('../templates'), /标识/)
     assert.throws(() => designs.saveDesign({ ...draft(), assets: { [asset.id]: { ...asset, path: '../secret.png' } } }), /路径/)

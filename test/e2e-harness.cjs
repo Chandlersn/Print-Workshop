@@ -74,5 +74,23 @@ ok(/appendSwitch\('disable-gpu'\)/.test(e2eSrc), 'm3-e2e 关 GPU')
 ok(/appendSwitch\('in-process-gpu'\)/.test(e2eSrc), 'm3-e2e 用 in-process-gpu')
 ok(/appendSwitch\('disable-breakpad'\)/.test(e2eSrc), 'm3-e2e 关 breakpad（沙箱 crashpad 易损坏）')
 
+console.log('== 6. 打包必须显式关闭 electron-builder 自身的发布（v0.2.13 空包真凶） ==')
+// 这个 flag 被删过一次（accdca7），而后果是「打包明明成功、整步却 exit 1、走不到上传」——
+// 一类只在打 tag 时才会暴露的隐形故障，所以用静态断言钉住。
+const dist = (pkg.scripts && pkg.scripts.dist) || ''
+ok(dist.includes('--publish never'), 'dist 显式 --publish never', dist)
+ok(/electron-builder --win --x64/.test(dist), 'dist 仍按 win x64 打包', dist)
+ok(dist.startsWith('npm run build &&'), 'dist 先构建前端再打包（顺序不能反）', dist)
+// 打包那一步不许拿到 token：electron-builder 默认 publish 策略是 onTagOrDraft，
+// 在 tag 上构建会自动尝试发布到 GitHub 并索要 GH_TOKEN，拿不到就 exit 1。
+// 发布是 release-upload.cjs 的活，两条路不能重叠。
+const releaseYml = src('.github/workflows/release.yml')
+const afterDistStep = releaseYml.split('- name: 构建并打包（NSIS）')[1] || ''
+// 去掉注释行再查，免得「说明文字里提到 GH_TOKEN」被判成真注入
+const distStepBody = (afterDistStep.split('- name:')[0] || '').split('\n').filter((line) => !/^\s*#/.test(line)).join('\n')
+ok(afterDistStep.length > 0, 'release.yml 仍有「构建并打包」步骤')
+ok(!/GH_TOKEN|GITHUB_TOKEN/.test(distStepBody), '打包步骤不给 electron-builder 注入任何 token', distStepBody.trim())
+ok(/release-upload\.cjs/.test(releaseYml), '发布仍由 release-upload.cjs 负责')
+
 console.log(`\ne2e 夹具：${pass} 通过，${fail} 失败`)
 process.exit(fail === 0 ? 0 : 1)

@@ -33,6 +33,10 @@ jobs:
       - name: 领域层测试
         run: npm test
 
+      # 打包走 `npm run dist`，它自带 `--publish never`：electron-builder 的默认策略是
+      # onTagOrDraft，在 tag 上构建会**自动尝试发布**并索要 GH_TOKEN，而这一步没有 token
+      # ⇒ 包明明打好了却 `⨯ GitHub Personal Access Token is not set` exit 1，整步挂掉、
+      # 走不到下面的上传。发布是 release-upload.cjs 的活，两条路不能重叠。
       - name: 构建并打包（NSIS）
         run: npm run dist
 

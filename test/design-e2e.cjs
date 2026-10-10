@@ -34,6 +34,20 @@ async function waitFor(expression, label, timeout = 12000) {
   throw new Error(`等待失败：${label}`)
 }
 const evaluate = (source) => ui.webContents.executeJavaScript(source)
+/**
+ * 轮询**主进程侧**的真实结果（不是页面状态）。
+ *
+ * 导出后的「打开所在文件夹」要在主进程里调 shell，页面状态帮不上忙——
+ * 只能等测试进程里那个记录器收到调用。带超时，避免静默吊死。
+ */
+async function waitNode(predicate, label, timeout = 5000) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error(`等待失败：${label}`)
+}
 const click = (selector) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('找不到控件 '+${JSON.stringify(selector)});el.click()})()`)
 const fill = (selector, value) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('找不到输入 '+${JSON.stringify(selector)});el.focus();el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.blur()})()`)
 const clickText = (selector, text) => evaluate(`(() => {const el=[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>el.textContent.trim()===${JSON.stringify(text)});if(!el)throw new Error('找不到按钮 '+${JSON.stringify(text)});el.click()})()`)
@@ -55,6 +69,20 @@ async function doubleClick(selector) {
     await new Promise(resolve => setTimeout(resolve, 40))
   }
   await new Promise(resolve => setTimeout(resolve, 150))
+}
+
+/**
+ * 真实鼠标点击（带用户手势）。
+ *
+ * 不能用 el.click()：那是合成事件、没有 transient user activation，
+ * showPicker() 这类需要用户手势的 API 会直接抛 NotAllowedError。
+ */
+async function realClickPoint(pointExpression) {
+  const point = await evaluate(pointExpression)
+  ui.webContents.sendInputEvent({ type: 'mouseMove', ...point })
+  ui.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+  ui.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
+  await new Promise((resolve) => setTimeout(resolve, 200))
 }
 
 /**
@@ -163,6 +191,15 @@ async function main() {
   await waitFor(`Boolean([...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')))`, '底图导航')
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')).click()`)
   await waitFor(`Boolean(document.querySelector('[data-testid="design-new"]'))`, '底图编辑器')
+  // 首次进入本页时下拉就必须已就绪：预设只在 activate() 里刷的话，首屏会一直是
+  // 空的且禁用（onActivated 早于 onMounted 的 await 跑完，那句话被 initialized 门控跳过），
+  // 用户会以为没有这个功能——得先切页再切回来才出现。
+  await waitFor(`document.querySelectorAll('[data-testid="design-preset"] option[value="preset:id-card-a4"]').length === 1`, '首次进入即加载内置预设')
+  ok(await evaluate(`!document.querySelector('[data-testid="design-preset"]').disabled`), '首次进入底图制作时「常用模板」下拉就可用，不用先切页再回来')
+  // 「最近使用」那一组依赖 `projects`，而 refreshProjects / refreshPresets 是**并行**发的，
+  // 只等预设就绪就断言会踩竞态（本套件跑之前已有工程，所以这组必定会出现）。等到再断言。
+  await waitFor(`document.querySelectorAll('[data-testid="design-preset"] optgroup').length === 2`, '「常用模板」两组就绪')
+  ok(await evaluate(`[...document.querySelectorAll('[data-testid="design-preset"] optgroup')].map(g=>g.label).join('|') === '内置模板|常用'`), '「常用模板」下拉分成「内置模板」与「常用」两组')
   await click('[data-testid="design-new"]')
   await waitFor(`Boolean(document.querySelector('[data-testid="design-name"]'))`, '新建工程')
   await fill('[data-testid="design-name"]', '真实界面保存验收')
@@ -210,6 +247,47 @@ async function main() {
   ok(await evaluate(`(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text==='失焦提交的字'`), 'Esc 退出时没改过内容就不产生新版本')
   ok(undoDisabledBefore === await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`), 'Esc 空退出不改动撤销栈')
   await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
+  /*
+   * ---- 颜色控件 ----
+   * 过去只绑 @change，而原生 <input type="color"> 只保证发 input（拖动过程中连续发），
+   * change 要等取色器关掉才发、且不同环境行为并不一致——一旦 change 不来，用户看到的
+   * 就是「点了色块、选了颜色，画布上的字一点没变」，属于看不见的失败。
+   * 另外色块本体只有 34px 宽，用户点的往往是整块控件盒子，光靠 <label> 转发不可靠。
+   * 下面三条分别钉住：整块盒子能唤起取色器 / input 即时生效 / change 只记一条撤销。
+   */
+  const colorInput = `document.querySelector('[aria-label="选择文字颜色"]')`
+  const draftTextColor = `(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.type==='text')?.color`
+  await evaluate(`(() => { const el=${colorInput}; window.__pickerCalls=0; el.showPicker=()=>{window.__pickerCalls++} })()`)
+  await realClickPoint(`(() => { const box=${colorInput}.closest('.color-control'); box.scrollIntoView({block:'center'}); const r=box.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)} })()`)
+  ok(await evaluate(`window.__pickerCalls`) >= 1, '真实点击颜色控件整块盒子即可唤起取色器（不依赖 label 转发）')
+  await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('input',{bubbles:true})) })()`)
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, '取色器拖动过程中颜色即时生效')
+  ok(await evaluate(`document.querySelector('[data-design-layer="${firstTextId}"]')?.getAttribute('style')?.includes('color:#0f7a3d')`), '只发 input 事件时画布上的文字颜色也跟着变')
+  await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('change',{bubbles:true})) })()`)
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, 'change 收尾后颜色保持最终值')
+  ok(true, 'change 收尾后颜色保持最终值')
+  await click('[data-testid="design-undo"]')
+  await waitFor(`${draftTextColor}==='#2b2622'`, '撤销回到取色前的颜色')
+  ok(true, '撤销一步即回到取色前的颜色（一次取色只记一条历史）')
+  await click('[data-testid="design-redo"]')
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, '重做恢复取色结果')
+  ok(true, '重做恢复取色结果')
+  /*
+   * 取色快照必须被别的编辑打断：input（实时生效）→ 一次普通编辑 → change。
+   * 若快照没被打断，撤销取色会把中间那次普通编辑一起回滚掉。
+   */
+  const draftTextValue = `(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.type==='text')?.text`
+  await evaluate(`(() => { const el=${colorInput}; el.value='#123456'; el.dispatchEvent(new Event('input',{bubbles:true})) })()`)
+  await fill('[data-testid="design-text"]', '取色打断测试')
+  await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('change',{bubbles:true})) })()`)
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, '打断后取色仍生效')
+  ok(true, '打断后取色仍生效')
+  await click('[data-testid="design-undo"]')
+  await waitFor(`${draftTextColor}==='#123456'`, '撤销只回退取色')
+  ok(await evaluate(`${draftTextValue}==='取色打断测试'`), '撤销取色不连带回滚中间那次普通编辑')
+  await click('[data-testid="design-redo"]')
+  await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, '颜色收尾')
   await click('[data-testid="design-add-rect"]')
   await click('[data-testid="design-undo"]')
   await click('[data-testid="design-redo"]')
@@ -218,6 +296,7 @@ async function main() {
   const saved = designs.listDesigns().find((item) => item.name === '真实界面保存验收')
   const reopened = designs.getDesign(saved.id, saved.revision)
   ok(reopened.layers.some((layer) => layer.type === 'text' && layer.text === '图层编辑测试 TEST'), '界面文字编辑保存后可读取')
+  ok(reopened.layers.some((layer) => layer.type === 'text' && layer.color === '#0f7a3d'), '界面改的文字颜色保存后可读取')
   ok(reopened.layers.some((layer) => layer.type === 'rect'), '界面撤销重做保留矩形')
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('数据')).click()`)
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')).click()`)
@@ -424,7 +503,36 @@ async function main() {
   const phaseTwo = designs.getDesign(saved.id)
   ok(phaseTwo.groups[0].name === '标题与边框' && phaseTwo.guides.some(g => g.axis === 'x' && g.position === 80) && phaseTwo.guides.some(g => g.axis === 'y' && g.position === 40), '工程落盘保留分组和参考线毫米位置')
 
+  // 参考框（仅编辑可见）：编辑器画布必须看得见，导出 PNG 必须完全不出现。
+  // 探针用一个铺满整张画布的不透明矩形——它只要漏进导出，PNG 就不剩任何透明像素，
+  // 后面那条「空白角落透明」的断言会立刻变红。这就是「看不见的失败」的克星。
+  // 注意：保存成功后草稿会被清掉，这一段只能读界面上的真实状态，不能读 localStorage。
+  const idsBeforeRefBox = await evaluate(`[...document.querySelectorAll('[data-layer-id]')].map(el=>el.getAttribute('data-layer-id'))`)
+  await click('[data-testid="design-add-rect"]')
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${idsBeforeRefBox.length + 1}`, '新增矩形参考框')
+  const refBoxId = await evaluate(`(() => { const before=${JSON.stringify(idsBeforeRefBox)}; return [...document.querySelectorAll('[data-layer-id]')].map(el=>el.getAttribute('data-layer-id')).find(id=>!before.includes(id))||'' })()`)
+  ok(Boolean(refBoxId), '新增的矩形出现在图层列表里')
+  ok(await evaluate(`(() => { const el=document.querySelector('[data-testid="design-layer-editor-only"]'); return Boolean(el) && el.checked===false })()`), '图层属性面板有「仅编辑可见（不打印）」开关，默认关闭')
+  for (const [key, value] of [['x', 0], ['y', 0], ['w', 210], ['h', 148.5]]) await fill(`[data-testid="design-layer-${key}"]`, String(value))
+  await click('[data-testid="design-layer-editor-only"]')
+  await waitFor(`document.querySelector('[data-testid="design-layer-editor-only"]')?.checked===true`, '勾选仅编辑可见')
+  ok(await evaluate(`Boolean(document.querySelector('[data-design-layer="${refBoxId}"]'))`), '编辑器画布仍然渲染参考框（否则没法照着对齐）')
+  ok(await evaluate(`document.querySelector('[data-layer-id="${refBoxId}"] .layer-flag')?.textContent.trim()==='仅编辑'`), '图层列表给参考框标注「仅编辑」')
+  await click('[data-testid="design-save"]')
+  await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存参考框')
+  const savedRefBox = designs.getDesign(saved.id).layers.find(layer => layer.id === refBoxId)
+  ok(savedRefBox?.editorOnly === true, '参考框的「仅编辑可见」落盘')
+  ok(designs.getDesign(saved.id).schemaVersion === 3, '带参考框的工程标记为格式版本3（旧应用明确拒绝，而不是把参考框当普通图层印出去）')
+  // 参考框存在的意义就是「照着它对图片」——所以它必须能选中、能拖动，而不是只能看。
+  const refBoxX = savedRefBox.x
+  await drag(`[data-canvas-layer-id="${refBoxId}"]`, 40, 0)
+  await waitFor(`Math.abs(Number(document.querySelector('[data-testid="design-layer-x"]').value)-${refBoxX})>1`, '参考框可真实拖动')
+  ok(true, '参考框在画布上能选中并拖动，用户照着它对齐图片')
+  await click('[data-testid="design-undo"]')
+
   // Export the current draft through the real context bridge. The OS picker alone is stubbed.
+  // 基准取「导出前那一刻」的版本号：上面参考框的保存已经推进过版本，早先抓的快照会过期。
+  const revisionBeforeExport = designs.getDesign(saved.id).revision
   await click(`[data-layer-id="${titleLayer.id}"]`)
   await fill('[data-testid="design-text"]', 'PNG当前草稿')
   const pngPath = path.join(OUTPUT, 'editor-transparent.png')
@@ -444,8 +552,40 @@ async function main() {
   ok(pngSize.width === Math.round(297 * 150 / 25.4) && pngSize.height === Math.round(210 * 150 / 25.4), '界面导出PNG得到指定DPI的精确像素')
   const pngPixels = exportedPng.toBitmap()
   ok(pngPixels[pngPixels.length - 1] === 0 && pngPixels.some((value, index) => index % 4 === 3 && value > 0), '透明PNG有实际图层像素且空白角落透明')
-  ok(designs.getDesign(saved.id).revision === phaseTwo.revision && await evaluate(`Boolean(document.querySelector('.canvas-status .unsaved'))`), '导出当前草稿不保存新版本也不清除未保存状态')
+  const refBoxAtExport = designs.getDesign(saved.id).layers.find(layer => layer.id === refBoxId)
+  ok(refBoxAtExport?.editorOnly === true && refBoxAtExport.w === 210 && refBoxAtExport.h === 148.5, '导出时画布上确实盖着一个铺满整张画布的不透明参考框')
+  ok(pngPixels[pngPixels.length - 1] === 0, '铺满画布的不透明参考框没有漏进导出 PNG（否则整张图不会再有透明像素）')
+  ok(designs.getDesign(saved.id).revision === revisionBeforeExport && await evaluate(`Boolean(document.querySelector('.canvas-status .unsaved'))`), '导出当前草稿不保存新版本也不清除未保存状态')
   ok(fs.readFileSync(path.join(DATA, phaseTwo.assets[croppedLayer.assetId].path)).equals(jpeg), 'PNG导出后原始图片字节保持不变')
+
+  /*
+   * ---- 导出后「脱离本系统打印」----
+   * 真点这两个按钮会弹出资源管理器 / 看图器，所以把 shell 的方法换成记录器：
+   * printer.cjs 解构拿到的是 shell 这个**对象**的引用，改它的属性对调用方可见。
+   * 另：这两个动作**不接受参数**（I-28）——路径由主进程记着，渲染层传不进路径。
+   */
+  const { shell } = require('electron')
+  const originalReveal = shell.showItemInFolder
+  const originalOpen = shell.openPath
+  const opened = []
+  shell.showItemInFolder = (p) => { opened.push({ how: 'reveal', path: p }) }
+  shell.openPath = async (p) => { opened.push({ how: 'open', path: p }); return '' }
+  try {
+    ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-reveal-export"]')) && Boolean(document.querySelector('[data-testid="design-open-export"]'))`), '导出成功后给出「打开所在文件夹 / 用系统程序打开」两个动作')
+    ok(await evaluate(`document.querySelector('.export-done-path')?.textContent === ${JSON.stringify(pngPath)}`), '完成条里带完整导出路径，用户照着就能找到文件')
+    ok(await evaluate(`window.printpress.revealDesignExport.length === 0 && window.printpress.openDesignExport.length === 0`), '渲染层暴露的这两个方法是零参的（界面上无处传路径）')
+    await click('[data-testid="design-reveal-export"]')
+    await waitNode(() => opened.length >= 1, '主进程收到「打开所在文件夹」')
+    ok(opened.at(-1).how === 'reveal' && opened.at(-1).path === pngPath, '「打开所在文件夹」定位到刚导出的 PNG（按钮真的接到了主进程）')
+    await click('[data-testid="design-open-export"]')
+    await waitNode(() => opened.length >= 2, '主进程收到「用系统程序打开」')
+    ok(opened.at(-1).how === 'open' && opened.at(-1).path === pngPath, '「用系统程序打开」打开的是刚导出的 PNG')
+    await click('[data-testid="design-export-done-close"]')
+    ok(await evaluate(`!document.querySelector('[data-testid="design-reveal-export"]')`) && fs.existsSync(pngPath), '「关闭」只收起完成条，磁盘上的导出文件不受影响')
+  } finally {
+    shell.showItemInFolder = originalReveal
+    shell.openPath = originalOpen
+  }
   await click('[data-testid="design-undo"]')
 
   // Recovery uses the local draft, including a value changed after the last successful save.
@@ -512,6 +652,82 @@ async function main() {
     fs.writeFileSync(path.join(OUTPUT, 'applied-template.pdf'), pdf)
     ok(pdf.includes(jpeg) && /\/Type\s*\/Font\b/.test(pdf.toString('latin1')), '编辑应用后的PDF仍保留原图码流与字体对象')
   } finally { appliedWindow.destroy() }
+
+  /*
+   * ---- 「常用模板」下拉：内置只剩身份证一套 + 「常用」只收**用户保存过**的 ----
+   *
+   * 三件事必须分清，否则会重演「工程库被堆满」：
+   * - 「内置模板」是**打开或新建**：工程库里已有同名工程就打开它，**绝不复制**。
+   *   无条件落库 ⇒ 每点一次多一个同名工程（实测一次会话 18 个、装上 0.4.0 又点了 4 个）；
+   * - 「常用」的门槛是**用户自己保存过**，系统按预设自动建出来的不算——
+   *   否则每点一次「身份证」就往常用里塞一条，是同一类病；
+   * - 「常用」选中是**打开那份工程本身**，绝不复制。
+   *
+   * 另：内置参考框必须 `editorOnly`（绝不能印出去），而它的失败方式只有印出来才看得见。
+   */
+  const presetValues = await evaluate(`[...document.querySelectorAll('[data-testid="design-preset"] option')].map(o=>o.value)`)
+  ok(presetValues[0] === '' && presetValues[1] === 'preset:id-card-a4', `下拉第一项是占位、紧接着就是唯一的内置模板（实得 ${JSON.stringify(presetValues.slice(0, 2))}）`)
+  ok(!presetValues.some((v) => v.startsWith('preset:') && v !== 'preset:id-card-a4'), '内置模板只剩身份证一套')
+  ok(presetValues.filter((v) => v.startsWith('design:')).length > 0, '「常用」里列出了用户自己的工程')
+
+  const projectsBeforePresets = designs.listDesigns().length
+  await fill('[data-testid="design-preset"]', 'preset:id-card-a4')
+  await waitFor(`document.querySelector('[data-testid="design-name"]')?.value==='身份证正反面复印件'`, '按预设新建工程')
+  ok(await evaluate(`document.querySelector('[data-testid="design-preset"]').value===''`), '下拉选完自动复位，再选同一项仍会触发')
+  ok(await evaluate(`document.querySelector('.notice.success')?.textContent.includes('新建工程') === true`), '新建后给出「已按某模板新建工程」的提示')
+  ok(designs.listDesigns().length === projectsBeforePresets + 1, '选「内置模板」确实新建了一份独立工程，不动已有工程')
+
+  const idCard = designs.listDesigns().find((item) => item.name === '身份证正反面复印件')
+  const idCardDoc = designs.getDesign(idCard.id)
+  ok(idCardDoc.schemaVersion === 3 && idCardDoc.layers.length > 0 && idCardDoc.layers.every((layer) => layer.editorOnly === true), '证件预设整份都是「仅编辑可见」的参考框，并标记为格式版本 3')
+  ok(await evaluate(`document.querySelectorAll('[data-canvas-layer-id]').length === ${idCardDoc.layers.length}`), '编辑器画布照样把参考框画出来（否则没法照着它对齐图片）')
+  ok(await evaluate(`document.querySelectorAll('[data-layer-id] .layer-flag').length === ${idCardDoc.layers.length}`), '图层列表把每个参考框都标成「仅编辑」')
+
+  // ⚠️ 系统按预设建出来的工程**不该**自动进「常用」：门槛是用户自己保存过。
+  ok(!idCard.lastUsedAt, '预设刚建出来的工程没有使用记录（不该自动进「常用」）')
+  ok(await evaluate(`document.querySelectorAll('[data-testid="design-preset"] option[value="design:${idCard.id}"]').length === 0`), '刚按预设建出来的工程**没有**出现在「常用」里')
+
+  /*
+   * ⚠️ 连点 N 次「内置模板」只该有一份工程。
+   * 无条件落库时每点一次就多一份同名工程（实测一次会话 18 个、装上 0.4.0 又点了 4 个）——
+   * 这个坑不在逻辑里、在交互后果里，所以正面钉住行为而不是钉实现。
+   */
+  const countBeforeSecondPreset = designs.listDesigns().length
+  await fill('[data-testid="design-preset"]', 'preset:id-card-a4')
+  await waitFor(`document.querySelector('.notice.success')?.textContent.includes('已经有一份') === true`, '再选一次「身份证」时明确告知「已经有一份，直接打开」')
+  ok(designs.listDesigns().length === countBeforeSecondPreset, '再选一次「身份证」不会新增工程——打开已有的那份（「每点一次多一个」的根因就此堵住）')
+  ok(await evaluate(`document.querySelector('[data-testid="design-name"]')?.value==='身份证正反面复印件'`), '复用时打开的确实是那份身份证工程')
+  ok(!designs.listDesigns().find((item) => item.id === idCard.id).lastUsedAt, '复用（打开）一份从没保存过的工程，也不会把它塞进「常用」')
+
+  // 用户**自己保存**之后才进「常用」——这才是门槛。
+  await click('[data-testid="design-add-text"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-text"]'))`, '加一个文字图层，制造出「有改动」')
+  await click('[data-testid="design-save"]')
+  await waitFor(`document.querySelectorAll('[data-testid="design-preset"] option[value="design:${idCard.id}"]').length === 1`, '用户保存后该工程出现在「常用」里')
+  ok(designs.listDesigns().find((item) => item.id === idCard.id).lastUsedAt, '用户保存后工程才有了使用记录')
+
+  // 工程库里若已堆着几份同名工程（历史残留），「常用」要把同名折叠成一条——
+  // 一排一模一样的名字用户根本分不清该点哪个。工程库本身仍列全部（不能替用户藏工程）。
+  const { buildPreset } = require('../electron/design-presets.cjs')
+  designs.saveDesign(buildPreset('id-card-a4'))
+  designs.saveDesign(buildPreset('id-card-a4'))
+  await fill('[data-testid="design-preset"]', 'preset:id-card-a4')
+  await waitFor(`document.querySelector('[data-testid="design-name"]')?.value==='身份证正反面复印件'`)
+  const sameName = designs.listDesigns().filter((item) => item.name === '身份证正反面复印件').length
+  ok(sameName >= 3, `工程库里确实堆着 ${sameName} 份同名工程（人为造的重复）`)
+  const shownSameName = await evaluate(`[...document.querySelectorAll('[data-testid="design-preset"] option')].filter(o=>o.value.startsWith('design:')&&o.textContent.startsWith('身份证正反面复印件')).length`)
+  ok(shownSameName === 1, `同名工程在「常用」里只列一条（实得 ${shownSameName} 条）`)
+
+  // 「常用」= 打开那份工程本身，**不是**再复制一份。
+  const other = designs.listDesigns().find((item) => item.id !== idCard.id && item.lastUsedAt && item.name !== '身份证正反面复印件')
+  const countBeforeOpen = designs.listDesigns().length
+  await fill('[data-testid="design-preset"]', `design:${other.id}`)
+  await waitFor(`document.querySelector('[data-testid="design-name"]')?.value===${JSON.stringify(other.name)}`, '从「常用」打开已有工程')
+  await waitFor(`[...document.querySelectorAll('[data-testid="design-preset"] option')].filter(o=>o.value.startsWith('design:'))[0]?.value==='design:${other.id}'`, '「常用」把刚打开的工程排到第一')
+  ok(designs.listDesigns().length === countBeforeOpen, '从「常用」打开**不会**新增工程（这正是当初堆出 18 个的根因）')
+  ok(designs.listDesigns().find((item) => item.id === other.id).lastUsedAt > other.lastUsedAt, '打开后被记入「常用」（lastUsedAt 刷新，且不碰版本号）')
+  ok(designs.getDesign(idCard.id).layers.some((layer) => layer.editorOnly === true), '打开别的工程不会改动先前那份证件预设工程')
+
   ok(errors.length === 0, `界面无控制台错误：${errors.join('; ')}`)
   console.log(`DESIGN_E2E_OK checks=${checks} artifacts=${OUTPUT}`)
   ui.destroy()

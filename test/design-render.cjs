@@ -158,6 +158,20 @@ check('纯矢量工程没有图片dpi，隐藏图片不拉低报告', () => {
   const info = engine.prepareTemplateDesign({ ...template, backgroundDesign: { id: saved.id, revision: 1 } }).info
   assert.equal(info.minDpi, Math.min(2 / 30, 1 / 15) * 25.4)
 })
+check('仅编辑可见的参考框不进打印，也不计入图层数与最低dpi', () => {
+  const withRef = structuredClone(baseDoc)
+  withRef.layers[0].editorOnly = true // 原图改成「仅编辑可见」，出片必须完全看不到它
+  withRef.layers.push({ id: 'refbox', type: 'rect', name: '参考框：身份证正面', x: 2, y: 2, w: 30, h: 20, editorOnly: true, fill: 'transparent', stroke: '#cc0000', strokeWidth: 0.2 })
+  const saved = designs.saveDesign(withRef)
+  assert.equal(saved.schemaVersion, 3)
+  const prepared = engine.prepareTemplateDesign({ ...template, backgroundDesign: { id: saved.id, revision: 1 } })
+  assert.equal(prepared.info.layerCount, 3)
+  assert.equal(prepared.info.minDpi, Math.min(2 / 30, 1 / 15) * 25.4)
+  assert.ok(!prepared.html.includes('data-design-layer="refbox"'))
+  assert.ok(!prepared.html.includes('data-design-layer="photo"'))
+  assert.ok(!prepared.html.includes('#cc0000'))
+  assert.ok(prepared.html.includes('data-design-layer="repeat"'))
+})
 check('旧单图仍内联原字节，并且没有工程包装', () => {
   fs.mkdirSync(path.join(DATA, 'print-bg'))
   fs.writeFileSync(path.join(DATA, 'print-bg', 'legacy.png'), original)
@@ -178,6 +192,33 @@ check('旧图转工程后删除旧文件或模板不影响工程原素材', () =
   assert.ok(designs.getDesign(copied.id, copied.revision).layers.length)
   assert.equal(templates.discardBackground(asset.path).removed, false)
   assert.equal(fs.existsSync(path.join(DATA, asset.path)), true)
+})
+
+console.log('== 仅编辑可见的图层绝不出片（静态守卫）==')
+check('只有编辑器画布可以要求渲染仅编辑可见的图层', () => {
+  // 参考框（editorOnly）印到身份证复印件上是不可逆的：纸已经进机器了。
+  // renderDesign 的默认值就是安全值，这里钉死「谁可以显式打开它」——只有编辑器画布。
+  for (const file of ['render-engine.cjs', 'design-export.cjs', 'printer.cjs', 'print.cjs', 'templates.cjs', 'designs.cjs']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'electron', file), 'utf-8')
+    assert.ok(!/includeEditorOnly\s*:\s*true/.test(source), `${file} 是出片/导出路径，不得要求渲染仅编辑可见的图层`)
+  }
+  // 默认必须是 false：漏传选项的后果只能是「参考框不显示」，不能是「参考框被印出去」。
+  const layout = fs.readFileSync(path.join(__dirname, '..', 'electron', 'design-layout.cjs'), 'utf-8')
+  assert.ok(/options\.includeEditorOnly === true/.test(layout), 'renderDesign 只在显式传 true 时才渲染仅编辑可见的图层')
+
+  // 前端同理：DesignSurface 同时被模板页的成品预览复用，只有底图编辑器画布能打开它。
+  const surface = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'DesignSurface.vue'), 'utf-8')
+  assert.ok(/showEditorOnly:\s*\{\s*type:\s*Boolean,\s*default:\s*false\s*\}/.test(surface), 'DesignSurface 的 showEditorOnly 必须默认 false')
+  assert.ok(/includeEditorOnly:\s*props\.showEditorOnly/.test(surface), 'DesignSurface 必须把 prop 透传给 renderDesign')
+  const openers = []
+  for (const dir of ['views', 'components']) {
+    for (const name of fs.readdirSync(path.join(__dirname, '..', 'src', dir))) {
+      if (!name.endsWith('.vue')) continue
+      const source = fs.readFileSync(path.join(__dirname, '..', 'src', dir, name), 'utf-8')
+      if (/:show-editor-only="true"/.test(source)) openers.push(`${dir}/${name}`)
+    }
+  }
+  assert.deepEqual(openers, ['views/BackgroundDesignerView.vue'], '只有底图编辑器画布可以要求渲染参考框（模板页预览必须保持成品的样子）')
 })
 
 // Evaluate the same browser function without Electron. Decode completion/failure and
