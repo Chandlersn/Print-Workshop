@@ -708,6 +708,37 @@ console.log('== 10. 「检查更新」必须真能触发更新（前端静态核
     'installUpdate() 只允许在「已下载」后重启安装（否则重启到一个没变的版本）')
 }
 
+console.log('== 11. 应用内说明与 docs/使用说明.md 的章节骨架必须一致（I-36） ==')
+{
+  // I-36。2026-10-10 用户报「应用内使用说明还是旧的，没跟功能迭代更新」——
+  // 这是「两处手工同步」的必然结果：功能改了只更新了 docs/使用说明.md，
+  // 应用内弹窗（GuideDialog.vue）停在 v0.2 时代（说「三步打出第一批」
+  // 「自带 7 套示例模板」「应用不会自动下载更新」，全反了）。
+  //
+  // 这条守卫钉「章节骨架」这一层：两处的二级标题必须逐条相同、顺序一致。
+  // 正文允许按弹窗阅读压缩（这是设计），但**章节的增减必须同步**——
+  // 改功能时漏改一处就会红，逼着两处一起动。
+  const mdSrc = src('docs/使用说明.md')
+  const vueSrc = src('src/components/GuideDialog.vue')
+
+  // md 的二级标题（`### ` 不算：`^##\s` 要求第三个字符是空白，故 `###` 不匹配）
+  const mdTitles = [...mdSrc.matchAll(/^##\s+(.+?)\s*$/gm)].map((m) => m[1])
+  // vue 的 SECTIONS 标题（`title: '...'`，只此一处形态）
+  const vueTitles = [...vueSrc.matchAll(/^\s*title:\s*'([^']+)'/gm)].map((m) => m[1])
+
+  ok(mdTitles.length > 0, `docs/使用说明.md 解析到 ${mdTitles.length} 个章节`)
+  ok(vueTitles.length > 0, `GuideDialog.vue 解析到 ${vueTitles.length} 个章节`)
+  ok(mdTitles.length === vueTitles.length,
+    '两处章节数量一致', { md: mdTitles.length, vue: vueTitles.length })
+
+  const diff = []
+  const n = Math.max(mdTitles.length, vueTitles.length)
+  for (let i = 0; i < n; i++) {
+    if (mdTitles[i] !== vueTitles[i]) diff.push({ i, md: mdTitles[i], vue: vueTitles[i] })
+  }
+  ok(diff.length === 0, '两处章节标题逐条一致（顺序也要一致）', diff)
+}
+
 rmDeep(TMP)
 console.log(`\nIPC 收口与结构：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

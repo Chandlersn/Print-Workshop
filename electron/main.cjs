@@ -146,7 +146,7 @@ function main() {
 
   ensureDataDir()
 
-  // 首启种子：示例名单 + 4 套示例模板（失败不阻塞启动，下次启动重试）
+  // 首启种子：示例名单 + 7 套示例模板（证书文书 3 + 拼版小件 4；失败不阻塞启动，下次启动重试）
   try {
     const seedDir = app.isPackaged
       ? path.join(process.resourcesPath, 'seed')
