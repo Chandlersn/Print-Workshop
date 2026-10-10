@@ -167,34 +167,36 @@ npm run electron:dev  # vite + electron 热更新开发
 ## 目录结构
 
 ```
-electron/                主进程（纯 Node，无 Python），按领域分模块
-  main.cjs               入口：窗口 / 协议 / 通道装配
-  api.cjs                领域能力注册表：71 个操作的唯一权威源（零 electron 依赖）
-  ipc.cjs                IPC 薄壳：把注册表挂到 ipcMain，注入 GUI 能力
-  data-dir.cjs           数据目录决策唯一权威源（默认 / 自定义 / 测试注入）
-  importer/              CSV 多编码 + Excel 解析
-  dataset.cjs            数据集：增删改查、单元格编辑、列元数据（印开关）
-  rows.cjs               行数据通用层：筛选、空值 / 占位值判定
-  templates.cjs          模板：保存、绑定数据集、换绑预检、纸张建议
-  render-engine.cjs      渲染引擎：模板 × 记录 → 毫米排版 HTML
-  print.cjs              出口校验、留痕归档、任务管理
-  printer.cjs            printToPDF 与直打（唯一 require electron 的出口）
-  designs.cjs            底图工程：版本保存、内容寻址原件、并发锁
-  design-layout.cjs      底图工程结构归一（纯函数，可单测）
-  asset-library.cjs      本地素材库：原件之上的元数据（搜索 / 标签 / 收藏 / 归档）
-  asset-thumbnails.cjs   素材缩略图（nativeImage 压到最长边 320）
-  fonts.cjs / keys.cjs   字体管理、键名规范化
-bin/
-  pp.cjs                 命令行入口：给 agent / 脚本 / 批处理的无 GUI 操作接口
-src/                     渲染进程（Vue 3 + Vite，宣纸墨韵主题，全 UI 无 emoji）
-  views/                 数据 / 底图制作 / 模板 / 打印中心四页
-  components/            CustomSelect、ConfirmDialog 等统一组件
-  lib/                   纯函数层（field-layout 布局、cell-nav 跨页导航）
-test/                    领域层测试 + CDP 真机 e2e（含隔离数据目录与共享 helper）
-  helpers/electron-runner.cjs  Electron 启动器：摘除破坏性环境变量后再拉起 Electron
-scripts/                 示例底图 / 应用图标生成、发版上传（release-upload.cjs）
-docs/                    使用说明（面向使用者）、开发方案（权威定义源）、开发计划
-release/                 安装包与免安装目录（构建产物，不进仓库）
+批印坊 PrintPress
+├── electron/                       主进程（纯 Node，零 electron 依赖的领域层）
+│   ├── main.cjs                    入口：窗口 / 协议 / 通道装配
+│   ├── api.cjs                     领域能力注册表：71 个操作的唯一权威源
+│   ├── ipc.cjs                     IPC 薄壳：把注册表挂到 ipcMain，注入 GUI 能力
+│   ├── data-dir.cjs                数据目录决策唯一权威源（默认 / 自定义 / 测试注入）
+│   ├── importer/                   CSV 多编码 + Excel 解析
+│   ├── dataset.cjs                 数据集：增删改查、单元格编辑、列元数据（印开关）
+│   ├── rows.cjs                    行数据通用层：筛选、空值 / 占位值判定
+│   ├── templates.cjs               模板：保存、绑定数据集、换绑预检、纸张建议
+│   ├── render-engine.cjs           渲染引擎：模板 × 记录 → 毫米排版 HTML
+│   ├── print.cjs                   出口校验、留痕归档、任务管理
+│   ├── printer.cjs                 printToPDF 与直打（唯一 require electron 的出口）
+│   ├── designs.cjs                 底图工程：版本保存、内容寻址原件、并发锁
+│   ├── design-layout.cjs           底图工程结构归一（纯函数，可单测）
+│   ├── asset-library.cjs           本地素材库：原件之上的元数据（搜索 / 标签 / 收藏 / 归档）
+│   ├── asset-thumbnails.cjs        素材缩略图（nativeImage 压到最长边 320）
+│   └── fonts.cjs / keys.cjs        字体管理、键名规范化
+├── bin/
+│   └── pp.cjs                      命令行入口：给 agent / 脚本 / 批处理的无 GUI 操作接口
+├── src/                            渲染进程（Vue 3 + Vite，宣纸墨韵主题，全 UI 无 emoji）
+│   ├── views/                      数据 / 底图制作 / 模板 / 打印中心 四页
+│   ├── components/                 CustomSelect、ConfirmDialog 等统一组件
+│   └── lib/                        纯函数层（field-layout 布局、cell-nav 跨页导航）
+├── test/                           领域层测试 + CDP 真机 e2e（含隔离数据目录与共享 helper）
+│   └── helpers/
+│       └── electron-runner.cjs     Electron 启动器：摘除破坏性环境变量后再拉起
+├── scripts/                        示例底图 / 应用图标生成、发版上传（release-upload.cjs）
+├── docs/                           使用说明（面向使用者）、开发方案（权威定义源）、开发计划
+└── release/                        安装包与免安装目录（构建产物，不进仓库）
 ```
 
 ---
