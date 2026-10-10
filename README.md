@@ -4,7 +4,7 @@
 
 |      |                                        |
 | ---- | -------------------------------------- |
-| 当前版本 | v0.4.0                                 |
+| 当前版本 | v0.4.1                                 |
 | 平台   | Windows x64（NSIS 安装包 / 免安装目录）          |
 | 协议   | MIT                                    |
 | 数据存放 | 本机数据目录，默认 `%APPDATA%\printpress\data`  |
@@ -99,7 +99,7 @@
 
 ```bash
 node bin/pp.cjs env                                  # 看当前数据目录与环境
-node bin/pp.cjs ops                                  # 列出全部 71 个操作及其参数
+node bin/pp.cjs ops                                  # 列出全部 73 个操作及其参数
 node bin/pp.cjs dataset list                         # 列数据集
 node bin/pp.cjs --allow-write dataset import 名单.csv --name 秋季班
 node bin/pp.cjs dataset fields <数据集id>              # 字段目录（类型 / 填充率 / 长度提示）
@@ -159,7 +159,7 @@ npm run electron:dev  # vite + electron 热更新开发
 
 四条不变量：
 
-- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（71 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
+- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（73 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
 - **领域层零 electron 依赖**：`api.cjs` 及其下游模块都不 require electron，只有 `ipc.cjs` / `printer.cjs` / `main.cjs` / `preload.cjs` 依赖它。需要 GUI 的能力（弹窗、打印）经 `ctx` 注入，纯 Node 下拿不到就报 `GUI_REQUIRED`，而不是崩在 import 上。
 - **出片产物自包含**：底图与上传字体以 base64 内联进渲染 HTML——导出 PDF、直打窗口、归档快照在任何上下文（包括系统浏览器打开归档件）都完整显示，不依赖应用内协议。
 - **写路径唯一**：元数据写入口只有 `store.cjs` 的 `saveJson` 一条路，避免多套实现并存导致「改一处、另一处不生效」。
@@ -170,7 +170,7 @@ npm run electron:dev  # vite + electron 热更新开发
 批印坊 PrintPress
 ├── electron/                       主进程（纯 Node，零 electron 依赖的领域层）
 │   ├── main.cjs                    入口：窗口 / 协议 / 通道装配
-│   ├── api.cjs                     领域能力注册表：71 个操作的唯一权威源
+│   ├── api.cjs                     领域能力注册表：73 个操作的唯一权威源
 │   ├── ipc.cjs                     IPC 薄壳：把注册表挂到 ipcMain，注入 GUI 能力
 │   ├── data-dir.cjs                数据目录决策唯一权威源（默认 / 自定义 / 测试注入）
 │   ├── importer/                   CSV 多编码 + Excel 解析
@@ -224,6 +224,7 @@ npm run release:check           # 发版体检：版本号三处一致 + tag 在
 GH_TOKEN=<PAT> npm run release:upload   # 建 GitHub Release 并上传安装包（需 Contents 写权限）
 ```
 
+
 > **CI**：推 `main` / 开 PR 会跑 `npm test` 与 `npm run test:e2e`（`.github/workflows/ci.yml`）；  
 > 打 `v*` tag 会自动构建并发布安装包、刷 jsDelivr 缓存（`.github/workflows/release.yml`），  
 > 用的是 Actions 自带的 `GITHUB_TOKEN`——不再需要手工 fine-grained PAT。
@@ -247,14 +248,13 @@ node test/cache.cjs             # 系统缓存：白名单目录、锁定目录�
 node test/print-failure.cjs     # 出片：补打范围、版式回退提示、失败留痕
 node test/robustness.cjs        # 健壮性：越界布局拒存、前端竞态与守卫
 node test/ipc-hardening.cjs     # IPC：存储白名单、外链白名单、文件名消毒
-node test/ipc-wiring.cjs        # 装配：71 个操作全部挂上、参数归一化逐通道正确
+node test/ipc-wiring.cjs        # 装配：73 个操作全部挂上、参数归一化逐通道正确
 node test/api-cli.cjs           # 分层：api.cjs 零 electron 依赖、写权限闸门、CLI 端到端
 node test/e2e-harness.cjs       # e2e 夹具：启动器必须摘掉破坏性环境变量
 node test/invariants.cjs        # 不变量契约：docs/不变量契约.md 的每条守卫都还在、还挂在 npm test 里
 ```
 
 e2e 测试通过 `PRINTPRESS_DATA_DIR` 注入隔离数据目录，不碰真实数据，可重复执行。
-
 
 > **环境变量陷阱**：宿主（IDE / 自动化平台）常设 `ELECTRON_RUN_AS_NODE=1`，会让 Electron 二进制退化成纯 Node——`require('electron')` 返回路径字符串、`app` 为 undefined，主进程**静默退出且退出码 0、零输出**。所有拉起 Electron 的测试都经 `test/helpers/electron-runner.cjs` 启动（摘除该变量与 `NODE_OPTIONS`），`test/e2e-harness.cjs` 负责钉住这个约定。
 >
@@ -312,6 +312,7 @@ e2e 测试通过 `PRINTPRESS_DATA_DIR` 注入隔离数据目录，不碰真实�
 
 ## 版本迭代史
 
+- **v0.4.1（2026-10）**：「关于」里的**「检查更新」现在会真正下载并安装更新**。此前它只做轻量版本提示——命中新版只画一个「发现新版本」徽标，**没有任何路径能开始下载**，真正的自动下载只发生在应用启动那一次；于是「点完按钮、看到有新版本、却什么都不动」看起来就像功能坏了。现在按钮会真的开始后台下载，**进度（N%）与失败原因都显示在界面上**，下载完成后可一键「立即重启安装」；顶栏的新版本横幅也多了「立即更新」。同时把更新器的失败从「只写日志」改成推到界面——打包态没有控制台，日志等于把失败藏起来，而这次排查正是卡在这里。
 - **v0.4.0（2026-10）**：**底图从「一张图」升级为「可编辑的图层工程」**。新增独立的底图图层编辑器——图片 / 固定文字 / 矩形 / 椭圆 / 直线，支持分组、参考线、裁切翻转旋转、撤销重做，以及「仅编辑可见」的参考框（画布上看得见、能对齐，打印与导出都不出现）。同时加了**本地素材库**：常用图片收进库里跨工程复用，同一张图只存一份原件，搜索、标签、收藏、归档一应俱全；模板页上传的底图也并入同一套内容寻址池——删除时连带清理原件，而素材库里的图受保护、不会误删。内置版面收敛为 1 套身份证参考版（此前 7 套预设会随点击不断堆出重复工程）。工程格式版本 2（分组 / 参考线）、3（仅编辑可见参考框）向下兼容，旧工程与已固定版本的模板照常使用。
 - **v0.3.0（2026-10）**：新增独立底图图层编辑器，支持图片、固定文字、基础形状、裁切翻转、层级、对齐、撤销重做和恢复草稿。底图按版本保存并应用到模板，单页、多联和对折共用图层渲染，保留原始图片素材。打印前等待图片解码和字体加载，缺少资源明确报错。
 - **v0.2.13（2026-10）**：**画布看到的，就是打出来的**。有用户反馈「模板预览里字段的位置，和导出的 PDF 对不上，导出会往右漂移一点点」——查下来是画布上的字段框比文字多了一圈内边距与虚线边框（导出时没有），而且长文本会被 `max-width` 截住，导致居中/右对齐字段的位移量算错。A4 上实测偏差最大到 **41.96mm**（长奖项名 + 右对齐），修完是 **0.00mm**。同一轮还查了「导出吃底图清晰度」：实测导出链路对底图是**逐像素无损**的（PDF 里内嵌的就是你那张图的原始数据，20 种格式 × 36 组合 × 300 页负载全测过）；真正决定印出来清不清的是**底图像素 ÷ 成品尺寸**，所以现在模板页和出片预览都会直接告诉你「输出约 N dpi」，底图比例跟成品不符时会额外提醒「会被拉伸」。
