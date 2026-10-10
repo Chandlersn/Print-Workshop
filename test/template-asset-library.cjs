@@ -7,7 +7,9 @@
  *   3. referencedAssetIds 接过来扫描模板背景 → 清理未引用不误杀；
  *   4. 去重升级：template → library 后 discard 不再即时删；
  *   5. 列表只来源于 library（source==='template' 过滤）；
- *   6. 存量 print-bg 背景 migrateBackgrounds 迁为 assetId。
+ *   6. 存量 print-bg 背景 migrateBackgrounds 迁为 assetId；
+ *   7. 底图制作页直接加图（粘贴/拖入/对话框）= template 临时件：通道层强制 source，
+ *      删图层后 exceptDesignId 跳过未保存的当前工程再同步清理；领域层缺省 library。
  *
  * 缩略图不注入（纯 Node），领域层只在有 makeThumbnail 回调时才缩，没有就降级——与本文件无关。
  */
@@ -167,6 +169,45 @@ check('migrateBackgrounds：旧 print-bg 背景迁为 assetId', () => {
   const migrated = templates.getTemplate(tpl.id)
   assert.match(migrated.background, /^asset_[a-f0-9]{64}$/, '背景应转成 assetId')
   assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(migrated.background)}.png`)), '迁移后原件在 design-assets')
+})
+
+console.log('== I-33 扩展：底图制作页直接加图 = 临时件（与模板页同逻辑） ==')
+
+// 9. 通道语义：design:importBytes 强制 template（调用方传 library 也不行）；领域层缺省仍是 library（安全默认）
+check('design:importBytes 通道强制 source=template；领域层缺省 library（漏传只能是「不删」）', () => {
+  const api = require('../electron/api.cjs')
+  const pngC1 = makePng(8, 8, [1, 2, 3])
+  const viaChannel = api.call('design:importBytes', { name: 'paste.png', base64: pngC1.toString('base64'), source: 'library' }, { allowWrite: true })
+  assert.equal(designs.assetInfo(viaChannel.id).source, 'template', '通道层强制 template，调用方传什么都不行')
+  const pngC2 = makePng(8, 8, [3, 2, 1])
+  const direct = designs.importImageBytes({ name: 'direct.png', base64: pngC2.toString('base64') })
+  assert.equal(designs.assetInfo(direct.id).source, 'library', '领域层缺省 library：漏传的后果只能是「不删」，不能是「误删」')
+})
+
+// 10. 工程文档引用保护 + exceptDesignId（正在编辑未保存的工程，磁盘是旧版，内存态才是权威）
+check('工程引用保护：磁盘引用不删；exceptDesignId 跳过当前工程后同步删；adopt 后保留', () => {
+  // 粘贴图 A：登记进工程文档（图层 + assets），磁盘上「仍被引用」
+  const pngP = makePng(8, 8, [88, 8, 188])
+  const pasted = designs.importImageBytes({ name: 'paste-a.png', base64: pngP.toString('base64'), source: 'template' })
+  const saved = designs.saveDesign({
+    schemaVersion: 1, revision: 0, name: '粘贴工程',
+    artboard: { w: 297, h: 210, background: '#ffffff' },
+    assets: { [pasted.id]: pasted },
+    layers: [{ id: 'img1', type: 'image', assetId: pasted.id, x: 5, y: 5, w: 20, h: 20 }],
+  })
+  assert.equal(library.discardIfEphemeral(pasted.id).removed, false, '磁盘工程仍引用 → 不删（不传 exceptDesignId 的保守口径）')
+  // 视图删图层后：撤引用 + exceptDesignId 跳过当前工程 → 同步删
+  const res = library.discardIfEphemeral(pasted.id, { exceptDesignId: saved.id })
+  assert.equal(res.removed, true, '当前工程内存态已不引用（视图已撤）→ 同步删')
+  assert.ok(!existsAny(shaOf(pasted.id)), '原件应被删除')
+
+  // 粘贴图 B：先「加入素材库」（adopt 升 library）再删图层 → 保留
+  const pngQ = makePng(8, 8, [8, 88, 188])
+  const adopted = designs.importImageBytes({ name: 'paste-b.png', base64: pngQ.toString('base64'), source: 'template' })
+  library.adopt(adopted.id, { displayName: 'paste-b' })
+  const res2 = library.discardIfEphemeral(adopted.id, { exceptDesignId: saved.id })
+  assert.equal(res2.removed, false, '已加入素材库 → 保留')
+  assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(adopted.id)}.png`)), 'library 原件应保留')
 })
 
 console.log(`\n通过 ${passed} 项（I-33 模板底图并入素材库）`)

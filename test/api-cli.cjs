@@ -106,6 +106,7 @@ const ADDED_CHANNELS = [
   'asset:archive',
   'asset:restore',
   'asset:adopt',
+  'asset:discardEphemeral',
   'asset:rebuildThumb',
   'asset:listOrphans',
   'asset:purgeOrphans',

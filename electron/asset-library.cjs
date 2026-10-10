@@ -262,12 +262,20 @@ function rebuildThumbnail(assetId, options) {
 // 的孤立原件列出来，用户确认后才删；删除时再算一遍引用，期间被用上的就跳过。
 
 const HASH_RE = /^[a-f0-9]{64}$/
-function referencedAssetIds() {
+/**
+ * 收集「当前仍持有这份原件」的一切引用。
+ * `options.exceptDesignId`：跳过指定工程（I-33 扩展）。底图制作页删除图层的瞬间，
+ * 内存里的工程文档才是权威状态，磁盘上还是上次保存的旧版——若照算就会误判
+ * 「仍被引用」而拒绝同步删除。其余工程 / 素材库 / 模板背景照常保护。
+ */
+function referencedAssetIds(options = {}) {
+  const exceptDesignId = options && options.exceptDesignId ? options.exceptDesignId : null
   const refs = new Set()
   // 素材库（含已归档）：在库里就可能被恢复，算引用
   for (const entry of index()) if (entry.assetId) refs.add(entry.assetId)
   // 所有工程的图层引用的原件
   for (const head of designs.listDesigns()) {
+    if (exceptDesignId && head.id === exceptDesignId) continue
     try {
       const doc = designs.getDesign(head.id)
       for (const assetId of Object.keys(doc.assets || {})) refs.add(assetId)
@@ -331,19 +339,22 @@ function purgeOrphanOriginals(hashes) {
 /**
  * 即时删除分流入口（I-33）。
  *
- * 仅当原件 `source === 'template'`（模板页上传）**且**已无任何引用时才删原件；
- * 其余情况（`library` / 已归档 / 仍被引用）一律不删，只由调用方撤引用。
- * 原件生死归素材库，模板层只持引用。
+ * 仅当原件 `source === 'template'`（模板页上传 / 底图制作页粘贴拖入对话框直接加入）
+ * **且**已无任何引用时才删原件；其余情况（`library` / 已归档 / 仍被引用）一律不删，
+ * 只由调用方撤引用。原件生死归素材库，模板层与工程文档只持引用。
+ *
+ * `options.exceptDesignId`：引用扫描跳过指定工程（正在编辑、尚未保存的那个——
+ * 内存态才是权威，磁盘是旧版）。其他工程的引用照常核对，绝不误删。
  *
  * 删除走 dataDir 守卫（`resolveInsideDataDir` 已越界拦截），绝不删到目录外。
  */
-function discardIfEphemeral(assetId) {
+function discardIfEphemeral(assetId, options = {}) {
   const id = assetIdOf(assetId)
   let info
   try { info = designs.assetInfo(id) } catch { return { removed: false } }
   const source = info.source === 'template' ? 'template' : 'library'
   if (source !== 'template') return { removed: false } // 受管理原件不即时删
-  const refs = referencedAssetIds()
+  const refs = referencedAssetIds(options)
   if (refs.has(id)) return { removed: false } // 仍被引用 → 不删
   const hash = hashOf(id)
   let removed = false

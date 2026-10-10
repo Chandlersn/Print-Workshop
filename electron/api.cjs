@@ -574,14 +574,17 @@ const OPS = {
         filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }],
       })
       if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true }
-      return designs.importImageFile(result.filePaths[0])
+      // 底图制作页直接加图（对话框 / 粘贴 / 拖入）一律 template 语义：删图层即同步删原件，
+      // 只有显式「加入素材库」（asset:adopt）才升级为 library（I-33，与模板页上传一致）
+      return designs.importImageFile(result.filePaths[0], 'template')
     },
   },
 
   'design:importBytes': {
     write: true,
     params: { base64: { required: true, desc: '原始 PNG/JPEG 图片 base64，不含 data: 前缀' }, name: { required: false, desc: '显示文件名' } },
-    run: (p) => designs.importImageBytes(p),
+    // source 强制 template（临时件）：调用方传什么都不行——升级 library 的唯一出口是 asset:adopt
+    run: (p) => designs.importImageBytes({ ...p, source: 'template' }),
   },
 
   'design:importBackground': {
@@ -759,6 +762,21 @@ const OPS = {
     params: { id: { required: true, desc: '素材标识' } },
     fromIpc: (id) => ({ id }),
     run: (p, ctx) => assetLibrary.rebuildThumbnail(p.id, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }),
+  },
+
+  /**
+   * 即时删除临时原件（I-33 分流）：仅 `source === 'template'` 且再无引用时删，
+   * `library`（已加入素材库）一律保留。`exceptDesignId` 用于底图制作页删除图层：
+   * 正在编辑的工程磁盘上还是旧版，引用扫描要跳过它，以内存文档为准。
+   * 路径只由 hash 推导，绝不接受任意路径（同 I-32 守卫口径）。
+   */
+  'asset:discardEphemeral': {
+    write: true,
+    params: {
+      assetId: { required: true, desc: 'asset_<sha256> 或 64 位十六进制 hash' },
+      exceptDesignId: { required: false, desc: '引用扫描时跳过的工程 id（正在编辑未保存的当前工程）' },
+    },
+    run: (p) => assetLibrary.discardIfEphemeral(p.assetId, { exceptDesignId: p.exceptDesignId }),
   },
 
   /**

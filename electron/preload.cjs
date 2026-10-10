@@ -100,6 +100,7 @@ contextBridge.exposeInMainWorld('printpress', {
   archiveAsset: (id) => ipcRenderer.invoke('asset:archive', id),
   restoreAsset: (id) => ipcRenderer.invoke('asset:restore', id),
   adoptAsset: (id, meta) => ipcRenderer.invoke('asset:adopt', id, meta),
+  discardEphemeralAsset: (assetId, exceptDesignId) => ipcRenderer.invoke('asset:discardEphemeral', { assetId, exceptDesignId }),
   rebuildAssetThumb: (id) => ipcRenderer.invoke('asset:rebuildThumb', id),
   listAssetOrphans: () => ipcRenderer.invoke('asset:listOrphans'),
   purgeAssetOrphans: (hashes) => ipcRenderer.invoke('asset:purgeOrphans', hashes),

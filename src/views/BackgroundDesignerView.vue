@@ -745,7 +745,45 @@ function toggleLayer(layer, key) { commit((doc) => { const target = doc.layers.f
 function removeSelected() {
   if (!editable.value.length) return
   let result
-  if (commit(doc => { result = removeSelection(doc, selectedIds.value, { expandGroups: false }); Object.assign(doc, result.design) })) selectedIds.value = result.selectedIds
+  let orphanedIds = []
+  if (commit(doc => {
+    result = removeSelection(doc, selectedIds.value, { expandGroups: false })
+    Object.assign(doc, result.design)
+    // 删图层后不再被任何图层引用的图片原件，从文档里一并撤引用（I-33）：
+    // 不撤的话磁盘扫描永远判「仍被引用」，临时件永远删不掉。
+    // library 来源的原件撤引用后仍留在素材库，不受影响。
+    const used = new Set(doc.layers.filter((layer) => layer.type === 'image' && layer.assetId).map((layer) => layer.assetId))
+    orphanedIds = Object.keys(doc.assets).filter((id) => !used.has(id))
+    for (const id of orphanedIds) delete doc.assets[id]
+  })) {
+    selectedIds.value = result.selectedIds
+    if (orphanedIds.length) discardOrphanedEphemeral(orphanedIds)
+  }
+}
+
+/**
+ * 图层删除后的后台同步清理（I-33，与模板页上传同一逻辑）：
+ * template 来源（粘贴 / 拖入 / 「＋ 图片」对话框直接加入）且再无任何引用的原件
+ * 当场删文件；library 来源（已点「加入素材库」）保留。
+ * 真删了文件就清空撤销 / 重做栈——撤销快照会把图层复活，可文件已经没了（碎图）；
+ * 「文件生死不进撤销栈」，此步不可撤销，界面会明说。
+ */
+async function discardOrphanedEphemeral(ids) {
+  // 双保险：撤完引用后再核对一遍序列化文档里确实再无任何引用形状（未知字段也不怕）
+  const serialized = JSON.stringify(design.value)
+  const safeIds = ids.filter((id) => !serialized.includes(id))
+  let removedAny = false
+  for (const id of safeIds) {
+    try {
+      const res = await window.printpress.discardEphemeralAsset(id, design.value.id || undefined)
+      if (res && res.removed) removedAny = true
+    } catch { /* 单个失败不阻塞界面：原件留在磁盘，后续 I-32 孤儿清理兜底 */ }
+  }
+  if (removedAny) {
+    history.value = []
+    future.value = []
+    message.value = '已删除所选图层，未加入素材库的原图已同步清理（此步不可撤销）'
+  }
 }
 function duplicate() {
   if (!selected.value.length) return

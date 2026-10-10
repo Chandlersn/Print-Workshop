@@ -51,7 +51,40 @@ html, body {
   font-size: 14px;
 }
 
+/* ── 原生控件统一基座 ─────────────────────────────────────────────
+   全项目统一下拉框与按钮的默认观感，对齐 CustomSelect 的视觉语言
+   （淡墨描线 / 卡片面 / 朱砂悬停）。作用域仅限「没有任何本地样式的
+   裸控件」：类选择器与组件 scoped 样式优先级更高，各视图既有样式
+   不受影响——这条基座兜住的正是散落的漏网控件。 */
 button {
   font-family: inherit;
+  font-size: inherit;
+  color: var(--ink);
+  background: var(--paper-card);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 5px 12px;
   cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
+button:hover:not(:disabled) { border-color: var(--cinnabar); }
+button:active:not(:disabled) { background: var(--cinnabar-soft); }
+button:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 1px; }
+button:disabled { color: var(--stone); background: var(--paper); cursor: not-allowed; }
+
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+select:hover:not(:disabled) { border-color: var(--cinnabar); }
+select:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 1px; }
+select:disabled { color: var(--stone); cursor: not-allowed; }
+/* 暗色模式下拉弹层跟随主题，避免系统白底弹层刺眼 / 白底白字 */
+select option { background: var(--input-bg); color: var(--ink); }

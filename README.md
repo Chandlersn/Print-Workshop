@@ -94,7 +94,7 @@
 
 ```bash
 node bin/pp.cjs env                                  # 看当前数据目录与环境
-node bin/pp.cjs ops                                  # 列出全部 70 个操作及其参数
+node bin/pp.cjs ops                                  # 列出全部 71 个操作及其参数
 node bin/pp.cjs dataset list                         # 列数据集
 node bin/pp.cjs --allow-write dataset import 名单.csv --name 秋季班
 node bin/pp.cjs dataset fields <数据集id>              # 字段目录（类型 / 填充率 / 长度提示）
@@ -154,7 +154,7 @@ npm run electron:dev  # vite + electron 热更新开发
 
 四条不变量：
 
-- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（70 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
+- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（71 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
 - **领域层零 electron 依赖**：`api.cjs` 及其下游模块都不 require electron，只有 `ipc.cjs` / `printer.cjs` / `main.cjs` / `preload.cjs` 依赖它。需要 GUI 的能力（弹窗、打印）经 `ctx` 注入，纯 Node 下拿不到就报 `GUI_REQUIRED`，而不是崩在 import 上。
 - **出片产物自包含**：底图与上传字体以 base64 内联进渲染 HTML——导出 PDF、直打窗口、归档快照在任何上下文（包括系统浏览器打开归档件）都完整显示，不依赖应用内协议。
 - **写路径唯一**：元数据写入口只有 `store.cjs` 的 `saveJson` 一条路，避免多套实现并存导致「改一处、另一处不生效」。
@@ -164,7 +164,7 @@ npm run electron:dev  # vite + electron 热更新开发
 ```
 electron/                主进程（纯 Node，无 Python），按领域分模块
   main.cjs               入口：窗口 / 协议 / 通道装配
-  api.cjs                领域能力注册表：70 个操作的唯一权威源（零 electron 依赖）
+  api.cjs                领域能力注册表：71 个操作的唯一权威源（零 electron 依赖）
   ipc.cjs                IPC 薄壳：把注册表挂到 ipcMain，注入 GUI 能力
   data-dir.cjs           数据目录决策唯一权威源（默认 / 自定义 / 测试注入）
   importer/              CSV 多编码 + Excel 解析
@@ -236,7 +236,7 @@ node test/cache.cjs             # 系统缓存：白名单目录、锁定目录�
 node test/print-failure.cjs     # 出片：补打范围、版式回退提示、失败留痕
 node test/robustness.cjs        # 健壮性：越界布局拒存、前端竞态与守卫
 node test/ipc-hardening.cjs     # IPC：存储白名单、外链白名单、文件名消毒
-node test/ipc-wiring.cjs        # 装配：70 个操作全部挂上、参数归一化逐通道正确
+node test/ipc-wiring.cjs        # 装配：71 个操作全部挂上、参数归一化逐通道正确
 node test/api-cli.cjs           # 分层：api.cjs 零 electron 依赖、写权限闸门、CLI 端到端
 node test/e2e-harness.cjs       # e2e 夹具：启动器必须摘掉破坏性环境变量
 node test/invariants.cjs        # 不变量契约：docs/不变量契约.md 的每条守卫都还在、还挂在 npm test 里
