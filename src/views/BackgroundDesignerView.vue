@@ -64,12 +64,13 @@ const busy = ref(false)
 // 素材库侧栏显隐 + 插入会话保护：每次切换/新建/另存工程都换令牌，
 // 异步拉取素材期间若切换了工程，插入请求作废，绝不写进新画板（计划 §3.3）。
 const showAssets = ref(false)
-// 属性面板（工程与画布/检查器）也是浮层：不占网格列，画布始终满宽；
-// 默认展开保持原有工作流，收起后给画布让出整个右侧。
-// 注意它**不做事 关闭**——点画布选图层是主工作流，只走开关按钮。
-// 属性面板不再有手动开关：选中图层即自动弹出（右侧浮层），点空白画布取消选中即自动收起。
-// 工程级设置（名称/画布/参考线）在左侧工具面板常驻——它们是「文档」属性，不该依赖选中态。
-const showInspector = computed(() => selectedIds.length > 0)
+// 属性面板（工程与画布 / 检查器）是右侧常驻浮层：不占网格列，画布满宽。
+// 工程级设置（名称/画布/参考线）是「文档」属性，不随选中态消失；
+// 图层属性部分随选中自动出现/收起（见模板 selected.length 门控）。
+// 左栏宽度可拖拽调节，记忆在 localStorage（150–420px）。
+const TOOLS_W_KEY = 'printpress-designer-tools-width'
+const toolsWidth = ref(clampNumber(Number((() => { try { return localStorage.getItem(TOOLS_W_KEY) } catch { return null } })()) || 176, 150, 420))
+const resizingTools = ref(false)
 const sessionToken = ref(0)
 // 已加入素材库的原图 id 集合：图层行的 ★/＋ 状态以此为准（getAsset 有 entry = 已收藏）
 const adoptedIds = ref(new Set())
@@ -978,7 +979,31 @@ watch(editingTextId, async (id) => {
   el.select() // 整段选中：想重写就直接打字，想微调点一下取消选择
 })
 
-function pointerDown(event, layer, resize = false) {
+function clampNumber(value, min, max) { return Math.min(max, Math.max(min, value)) }
+let toolsResizeStart = null
+/** 拖动左栏右缘调节宽度；pointer capture 保证拖出元素范围也不丢事件 */
+function startToolsResize(event) {
+  if (event.button !== 0 || pending.value) return
+  event.preventDefault()
+  toolsResizeStart = { x: event.clientX, w: toolsWidth.value }
+  resizingTools.value = true
+  event.target.setPointerCapture?.(event.pointerId)
+  window.addEventListener('pointermove', onToolsResizeMove)
+  window.addEventListener('pointerup', endToolsResize, { once: true })
+  window.addEventListener('pointercancel', endToolsResize, { once: true })
+}
+function onToolsResizeMove(event) {
+  if (!toolsResizeStart) return
+  toolsWidth.value = clampNumber(toolsResizeStart.w + (event.clientX - toolsResizeStart.x), 150, 420)
+}
+function endToolsResize() {
+  if (!toolsResizeStart) return
+  toolsResizeStart = null
+  resizingTools.value = false
+  window.removeEventListener('pointermove', onToolsResizeMove)
+  try { localStorage.setItem(TOOLS_W_KEY, String(toolsWidth.value)) } catch { /* 存不了就算了，下次回默认宽 */ }
+}
+function pointerDown(event, layer, corner = null) {
   if (event.button !== 0 || pending.value) return
   event.preventDefault(); event.stopPropagation()
   /*
@@ -1004,12 +1029,13 @@ function pointerDown(event, layer, resize = false) {
       return
     }
   }
-  if (!resize && (event.shiftKey || event.ctrlKey || event.metaKey)) { selectLayer(layer, event); return }
+  if (!corner && (event.shiftKey || event.ctrlKey || event.metaKey)) { selectLayer(layer, event); return }
   if (!selectedIds.value.includes(layer.id)) selectLayer(layer)
-  if (!resize) selectedIds.value = expandSelection(design.value, selectedIds.value)
+  if (!corner) selectedIds.value = expandSelection(design.value, selectedIds.value)
   if (layer.locked || !editable.value.some(item => item.id === layer.id)) return
   finishKeyboardMove(); endGesture()
-  gesture = { before: clone(design.value), type: resize ? 'resize' : 'move', startX: event.clientX, startY: event.clientY, layerId: layer.id, ids: new Set(editable.value.map((item) => item.id)), ratio: keepRatio.value && layer.type === 'image' }
+  // corner：被拖的角点手柄（se/sw/ne/nw；直线只拖右端点也记 'se'）。null = 移动。
+  gesture = { before: clone(design.value), type: corner ? 'resize' : 'move', corner: layer.type === 'line' ? 'se' : corner, startX: event.clientX, startY: event.clientY, layerId: layer.id, ids: new Set(editable.value.map((item) => item.id)), ratio: keepRatio.value && layer.type === 'image' }
   window.addEventListener('pointermove', pointerMove)
   window.addEventListener('pointerup', endGesture, { once: true })
   window.addEventListener('pointercancel', cancelGesture, { once: true })
@@ -1053,15 +1079,31 @@ function pointerMove(event) {
     const original = gesture.before.layers.find((layer) => layer.id === gesture.layerId)
     const layer = design.value.layers.find((item) => item.id === original.id)
     const angle = original.rotation * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle)
-    let w = Math.max(0.2, original.w + dx * cos + dy * sin)
-    let h = original.type === 'line' ? original.h : Math.max(0.2, original.h - dx * sin + dy * cos)
+    /*
+     * 四角拉伸手柄：拖哪角、**对角固定**。
+     * 拖动向量先投到图层本地轴：u = 沿宽度方向、v = 沿高度方向（旋转感知），
+     * 再按角点符号放大/缩小（se/ne 加宽，sw/nw 反向；ne/nw 反向高度），
+     * 最后把「固定角的本地坐标」从旧尺寸映射到新尺寸反推左上角——
+     * 对任意旋转角都是精确锚定（不再是早年近似半 dw 的写法）。
+     */
+    const corner = gesture.corner || 'se'
+    const su = corner === 'sw' || corner === 'nw' ? -1 : 1
+    const sv = corner === 'ne' || corner === 'nw' ? -1 : 1
+    const u = dx * cos + dy * sin
+    const v = -dx * sin + dy * cos
+    let w = Math.max(0.2, original.w + su * u)
+    let h = original.type === 'line' ? original.h : Math.max(0.2, original.h + sv * v)
     if (original.type !== 'line' && (gesture.ratio || event.shiftKey)) {
       const factor = Math.max(w / original.w, h / original.h)
       w = original.w * factor; h = original.h * factor
     }
     const dw = w - original.w, dh = h - original.h
-    layer.x = round(original.x + (dw * cos - dh * sin - dw) / 2)
-    layer.y = round(original.y + (dw * sin + dh * cos - dh) / 2)
+    // 固定角在旧/新本地坐标里的位置：se 固定左上 (0,0)；sw 固定右上；ne 固定左下；nw 固定右下
+    const a0x = su === 1 ? 0 : original.w, a0y = sv === 1 ? 0 : original.h
+    const a1x = su === 1 ? 0 : w, a1y = sv === 1 ? 0 : h
+    const ddx = a0x - a1x, ddy = a0y - a1y
+    layer.x = round(original.x + ddx * cos - ddy * sin)
+    layer.y = round(original.y + ddx * sin + ddy * cos)
     layer.w = round(w); layer.h = round(h)
   }
 }
@@ -1238,7 +1280,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
       <button @click="context = null">转为独立制作</button>
     </div>
     <div v-if="dimensionMismatch" class="notice error">当前画布尺寸与模板不同，应用前请调整。<button @click="adoptTemplateSize">采用模板尺寸（图层不缩放）</button></div>
-    <div class="designer-workspace">
+    <div class="designer-workspace" :class="{ 'tools-resizing': resizingTools }" :style="{ '--tools-w': `${toolsWidth}px` }">
       <aside class="designer-panel tools-panel">
         <h3>添加内容</h3>
         <div class="tool-grid">
@@ -1290,6 +1332,61 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           <button data-testid="design-group-copy" :disabled="!selected.length" @click="duplicate">{{ selectedGroup ? '复制整组' : '复制所选' }}</button><button data-testid="design-group-delete" :disabled="!editable.length" @click="removeSelected">{{ selectedGroup ? '删除整组' : '删除所选' }}</button>
         </div>
         <p v-if="design.groups?.length" class="muted">点组名或画布选择整组；点列表中的成员可单独编辑属性。</p>
+      </aside>
+      <div class="workspace-resizer" title="拖动调节左栏宽度" aria-label="调节左侧面板宽度" @pointerdown="startToolsResize"></div>
+      <AssetLibrarySidebar v-if="showAssets" @insert="insertLibraryAsset" />
+      <div class="canvas-column inspector-open">
+        <div class="canvas-toolbar">
+          <button data-testid="design-undo" :disabled="!history.length" title="Ctrl+Z" @click="undo">撤销</button>
+          <button data-testid="design-redo" :disabled="!future.length" title="Ctrl+Shift+Z" @click="redo">重做</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层上移一层'" @click="reorder('up')">上移 ↑</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" @click="reorder('down')">下移 ↓</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" @click="reorder('top')">置顶 ⤒</button>
+          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置底'" @click="reorder('bottom')">置底 ⤓</button>
+          <label class="inline"><input v-model="snap" type="checkbox"> 吸附</label>
+          <span class="toolbar-spacer"></span>
+          <button title="缩小" @click="zoom = Math.max(0.25, round(zoom - 0.25))">−</button>
+          <button title="恢复预览大小" @click="zoom = 1">{{ Math.round(zoom * 100) }}%</button>
+          <button title="放大" @click="zoom = Math.min(3, round(zoom + 0.25))">＋</button>
+        </div>
+        <div class="canvas-scroll" :class="{ 'drop-active': dropActive }" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
+          <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
+            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :show-editor-only="true" @error="fail" />
+            <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
+              <textarea
+                ref="inlineTextEditor"
+                data-testid="design-inline-text"
+                class="inline-text-editor"
+                :style="inlineTextStyle"
+                :value="editingValue"
+                spellcheck="false"
+                @input="editingValue = $event.target.value"
+                @pointerdown.stop
+                @keydown.esc.prevent="finishTextEdit"
+                @blur="finishTextEdit"
+              ></textarea>
+            </div>
+            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)">
+              <template v-if="single?.id === layer.id && editable.some(item => item.id === layer.id)">
+                <button v-if="layer.type === 'line'" class="resize-handle line-resize-handle" :aria-label="'调整直线长度'" :title="'拖动线段末端调整长度'" @pointerdown.stop="pointerDown($event, layer, 'se')"></button>
+                <template v-else>
+                  <button class="resize-handle corner-se" data-corner="se" :aria-label="'从右下角调整图层大小'" :title="'拖动调整大小；Shift 保持比例'" @pointerdown.stop="pointerDown($event, layer, 'se')"></button>
+                  <button class="resize-handle corner-sw" data-corner="sw" :aria-label="'从左下角调整图层大小'" :title="'拖动调整大小；Shift 保持比例'" @pointerdown.stop="pointerDown($event, layer, 'sw')"></button>
+                  <button class="resize-handle corner-ne" data-corner="ne" :aria-label="'从右上角调整图层大小'" :title="'拖动调整大小；Shift 保持比例'" @pointerdown.stop="pointerDown($event, layer, 'ne')"></button>
+                  <button class="resize-handle corner-nw" data-corner="nw" :aria-label="'从左上角调整图层大小'" :title="'拖动调整大小；Shift 保持比例'" @pointerdown.stop="pointerDown($event, layer, 'nw')"></button>
+                </template>
+              </template>
+            </div>
+            <div v-for="guide in visibleGuides" :key="guide.id" :data-guide-line="guide.id" class="persistent-guide" :class="guide.axis === 'x' ? 'vertical' : 'horizontal'" :style="guide.axis === 'x' ? { left: `${guide.position * pxPerMm}px` } : { top: `${guide.position * pxPerMm}px` }"></div>
+            <div v-if="guides.x !== null" class="snap-guide vertical" :style="{ left: `${guides.x * pxPerMm}px` }"></div>
+            <div v-if="guides.y !== null" class="snap-guide horizontal" :style="{ top: `${guides.y * pxPerMm}px` }"></div>
+            <div v-if="dropActive" class="drop-hint" aria-hidden="true">松开鼠标，把图片加为图层</div>
+          </div>
+        </div>
+        <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
+        <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
+      </div>
+      <aside class="designer-panel inspector">
         <h3>工程与画布</h3>
         <label>工程名称<input data-testid="design-name" :value="design.name" maxlength="120" @change="setDoc('name', $event.target.value)"></label>
         <div class="property-grid">
@@ -1315,52 +1412,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           </div>
           <p class="muted">随工程保存；参考线不会出现在打印或 PNG 中。</p>
         </details>
-      </aside>
-      <AssetLibrarySidebar v-if="showAssets" @insert="insertLibraryAsset" />
-      <div class="canvas-column" :class="{ 'inspector-open': showInspector }">
-        <div class="canvas-toolbar">
-          <button data-testid="design-undo" :disabled="!history.length" title="Ctrl+Z" @click="undo">撤销</button>
-          <button data-testid="design-redo" :disabled="!future.length" title="Ctrl+Shift+Z" @click="redo">重做</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层上移一层'" :aria-label="'上移一层'" @click="reorder('up')">↑</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" :aria-label="'下移一层'" @click="reorder('down')">↓</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" :aria-label="'置顶'" @click="reorder('top')">⤒</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置底'" :aria-label="'置底'" @click="reorder('bottom')">⤓</button>
-          <label class="inline"><input v-model="snap" type="checkbox"> 吸附</label>
-          <span class="toolbar-spacer"></span>
-          <button title="缩小" @click="zoom = Math.max(0.25, round(zoom - 0.25))">−</button>
-          <button title="恢复预览大小" @click="zoom = 1">{{ Math.round(zoom * 100) }}%</button>
-          <button title="放大" @click="zoom = Math.min(3, round(zoom + 0.25))">＋</button>
-        </div>
-        <div class="canvas-scroll" :class="{ 'drop-active': dropActive }" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
-          <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
-            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :show-editor-only="true" @error="fail" />
-            <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
-              <textarea
-                ref="inlineTextEditor"
-                data-testid="design-inline-text"
-                class="inline-text-editor"
-                :style="inlineTextStyle"
-                :value="editingValue"
-                spellcheck="false"
-                @input="editingValue = $event.target.value"
-                @pointerdown.stop
-                @keydown.esc.prevent="finishTextEdit"
-                @blur="finishTextEdit"
-              ></textarea>
-            </div>
-            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)">
-              <button v-if="single?.id === layer.id && editable.some(item => item.id === layer.id)" class="resize-handle" :class="{ 'line-resize-handle': layer.type === 'line' }" :aria-label="layer.type === 'line' ? '调整直线长度' : '调整图层大小'" :title="layer.type === 'line' ? '拖动线段末端调整长度' : '拖动调整大小；Shift 保持比例'" @pointerdown.stop="pointerDown($event, layer, true)"></button>
-            </div>
-            <div v-for="guide in visibleGuides" :key="guide.id" :data-guide-line="guide.id" class="persistent-guide" :class="guide.axis === 'x' ? 'vertical' : 'horizontal'" :style="guide.axis === 'x' ? { left: `${guide.position * pxPerMm}px` } : { top: `${guide.position * pxPerMm}px` }"></div>
-            <div v-if="guides.x !== null" class="snap-guide vertical" :style="{ left: `${guides.x * pxPerMm}px` }"></div>
-            <div v-if="guides.y !== null" class="snap-guide horizontal" :style="{ top: `${guides.y * pxPerMm}px` }"></div>
-            <div v-if="dropActive" class="drop-hint" aria-hidden="true">松开鼠标，把图片加为图层</div>
-          </div>
-        </div>
-        <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
-        <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
-      </div>
-      <aside v-if="showInspector" class="designer-panel inspector">
+        <template v-if="selected.length">
         <h3>{{ selectedGroup ? '分组属性' : selected.length > 1 ? `多选 ${selected.length} 个图层` : single ? '图层属性' : '排版属性' }}</h3>
         <template v-if="selectedGroup">
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
@@ -1411,6 +1463,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
             </template>
           </fieldset>
         </template>
+        </template>
       </aside>
     </div>
     <div v-if="showExport" class="export-mask" @click.self="!busy && (showExport = false)">
@@ -1454,9 +1507,14 @@ button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
 .export-done button { margin-left: 0; }
 .export-done button:first-of-type { margin-left: auto; }
 .heading-actions button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
-.designer-workspace { display: grid; grid-template-columns: 176px minmax(450px, 1fr); gap: 12px; align-items: start; position: relative; }
+.designer-workspace { display: grid; grid-template-columns: var(--tools-w, 176px) minmax(450px, 1fr); gap: 12px; align-items: start; position: relative; }
+/* 左栏宽度拖拽柄：骑在两列之间的 gap 上（11px 热区），拖动时全局禁选中防拖出选区 */
+.workspace-resizer { position: absolute; top: 0; bottom: 0; left: calc(var(--tools-w, 176px) + 1px); width: 10px; z-index: 30; cursor: col-resize; touch-action: none; }
+.workspace-resizer::after { content: ''; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px; border-radius: 1px; background: transparent; transition: background .15s; }
+.workspace-resizer:hover::after, .designer-workspace.tools-resizing .workspace-resizer::after { background: var(--cinnabar-soft); }
+.designer-workspace.tools-resizing { user-select: none; cursor: col-resize; }
 /* 素材库抽屉：浮在画布左侧（覆盖而非占列），打开不再挤压画布；内部自行滚动；点外部收起 */
-.designer-panel.asset-library { position: absolute; top: 0; bottom: 0; left: 188px; width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
+.designer-panel.asset-library { position: absolute; top: 0; bottom: 0; left: calc(var(--tools-w, 176px) + 12px); width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
 /* 属性面板抽屉：浮在画布右侧；选中图层自动弹出、点空白画布取消选中自动收起（无手动开关）；
    打开时工具条与状态栏让出其宽度（缩放/保存状态不被盖住） */
 .designer-panel.inspector { position: absolute; top: 0; bottom: 0; right: 0; width: 264px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
@@ -1513,8 +1571,12 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .layer-hit.line-hit::after { content: ''; display: none; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed #b03a2e; transform: translateY(-50%); pointer-events: none; }
 .layer-hit.line-hit:hover::after, .layer-hit.line-hit.chosen::after { display: block; }
 .layer-hit.line-hit.locked::after { border-color: #8c8577; }
-.resize-handle { position: absolute; padding: 0; width: 10px; height: 10px; right: -5px; bottom: -5px; background: #fff; border: 1px solid #b03a2e; border-radius: 1px; cursor: nwse-resize; touch-action: none; }
-.resize-handle.line-resize-handle { top: 50%; right: -5px; bottom: auto; transform: translateY(-50%); cursor: ew-resize; }
+.resize-handle { position: absolute; padding: 0; width: 11px; height: 11px; background: #fff; border: 1px solid #b03a2e; border-radius: 2px; touch-action: none; }
+.resize-handle.corner-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.resize-handle.corner-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.resize-handle.corner-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.resize-handle.corner-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.resize-handle.line-resize-handle { top: 50%; right: -6px; transform: translateY(-50%); cursor: ew-resize; }
 .snap-guide { position: absolute; pointer-events: none; z-index: 10; }
 .snap-guide.vertical { top: 0; bottom: 0; border-left: 1px dashed #d02775; } .snap-guide.horizontal { left: 0; right: 0; border-top: 1px dashed #d02775; }
 .persistent-guide { position: absolute; pointer-events: none; z-index: 9; }
@@ -1550,5 +1612,5 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .export-dialog .export-dimensions { font-size: 14px; font-weight: 600; color: var(--ink); padding: 10px 12px; background: var(--paper); border-radius: 6px; margin: 18px 0 12px; }
 .export-dialog .export-error { color: var(--warn); background: var(--warn-soft); padding: 8px 10px; border-radius: 5px; }
 .export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
-@media (max-width: 1180px) { .designer-workspace { grid-template-columns: 160px minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { left: 168px; width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
+@media (max-width: 1180px) { .designer-workspace { grid-template-columns: min(160px, var(--tools-w, 176px)) minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
 </style>
