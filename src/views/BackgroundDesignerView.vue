@@ -64,19 +64,39 @@ const busy = ref(false)
 // 素材库侧栏显隐 + 插入会话保护：每次切换/新建/另存工程都换令牌，
 // 异步拉取素材期间若切换了工程，插入请求作废，绝不写进新画板（计划 §3.3）。
 const showAssets = ref(false)
+// 属性面板（工程与画布/检查器）也是浮层：不占网格列，画布始终满宽；
+// 默认展开保持原有工作流，收起后给画布让出整个右侧。
+// 注意它**不做事 关闭**——点画布选图层是主工作流，只走开关按钮。
+const showInspector = ref(true)
 const sessionToken = ref(0)
-// 当前工程里用到的图片原件（去重），供侧栏「加入素材库」列表
-const imageAssets = computed(() => {
-  const seen = new Set()
-  const out = []
-  for (const layer of design.value.layers || []) {
-    if (layer.type !== 'image' || !layer.assetId) continue
-    if (seen.has(layer.assetId)) continue
-    const asset = design.value.assets[layer.assetId]
-    if (asset) { seen.add(layer.assetId); out.push(asset) }
+// 已加入素材库的原图 id 集合：图层行的 ★/＋ 状态以此为准（getAsset 有 entry = 已收藏）
+const adoptedIds = ref(new Set())
+async function refreshAdopted() {
+  const ids = new Set()
+  for (const id of Object.keys(design.value.assets || {})) {
+    try {
+      const res = await window.printpress.getAsset(id)
+      if (res && res.entry) ids.add(id)
+    } catch { /* 读不到按未收藏处理 */ }
   }
-  return out
-})
+  adoptedIds.value = ids
+}
+/** 图层行「＋ 加入素材库」：升级为 library 受管理件（I-33 单向升级唯一出口） */
+async function adoptLayerAsset(layer) {
+  if (busy.value) return
+  busy.value = true
+  try {
+    await window.printpress.adoptAsset(layer.assetId, {})
+    adoptedIds.value = new Set([...adoptedIds.value, layer.assetId])
+    message.value = '已加入素材库：这张图受管理，删除图层不会清理原件'
+  } catch (err) { fail(err) }
+  finally { busy.value = false }
+}
+/** 行内排序：让被点的行（或其所在组整体）成为当前选择，再走统一 reorder */
+function reorderRow(row, direction) {
+  selectedIds.value = row.group ? [...row.group.layerIds] : [row.id]
+  reorder(direction)
+}
 const fonts = ref({ system: [], uploaded: [] })
 const context = ref(null)
 const pending = ref(null)
@@ -412,6 +432,8 @@ async function consumeRequest(request) {
 }
 watch(() => designerNav.request, (request) => { if (initialized) consumeRequest(request) })
 watch(busy, (value) => { if (!value && initialized && designerNav.request) consumeRequest(designerNav.request) })
+// 切换 / 新建 / 另存工程后重算「已加入素材库」集合（图层行 ★/＋ 状态）
+watch(() => design.value.id, () => { refreshAdopted() })
 
 function persistDraft() {
   clearTimeout(draftTimer)
@@ -1115,6 +1137,8 @@ function activate() {
   // 捕获阶段：要在 pointerDown 的 preventDefault 之前收尾，也要先于被点控件的 click 处理器，
   // 这样「改完字直接点保存」保存到的就是新文字。
   window.addEventListener('pointerdown', onWindowPointerDown, true)
+  // 素材库抽屉：点外部（画布 / 工具面板 / 检查器）收起；抽屉内部与开关按钮不收
+  document.addEventListener('pointerdown', onDocPointerDown, true)
   // 粘贴挂在 window 上（而不是画布上）：截图粘贴时焦点可能在任意地方，
   // 挂画布会漏掉大多数情况。用 active 门控，切走标签页后不再响应。
   window.addEventListener('paste', onPaste)
@@ -1131,9 +1155,17 @@ function deactivate() {
   window.removeEventListener('blur', endGesture)
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('pointerdown', onWindowPointerDown, true)
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
   window.removeEventListener('paste', onPaste)
   dropDepth = 0
   dropActive.value = false
+}
+/** 素材库抽屉点外部收起：开关按钮与抽屉内部除外（开关自己 toggle，别打架） */
+function onDocPointerDown(event) {
+  if (!showAssets.value) return
+  const t = event.target
+  if (t && (t.closest?.('.asset-library') || t.closest?.('[data-testid="design-toggle-assets"]'))) return
+  showAssets.value = false
 }
 onMounted(async () => {
   try {
@@ -1157,6 +1189,7 @@ onMounted(async () => {
     if (results[2].status === 'rejected') fail(results[2].reason)
   } catch (err) { fail(err) }
   initialized = true
+  refreshAdopted()
   if (designerNav.request) consumeRequest(designerNav.request)
 })
 onActivated(activate)
@@ -1184,6 +1217,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         </label>
         <button data-testid="design-copy" :disabled="busy" @click="save(true)">另存副本</button>
         <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets">素材库</button>
+        <button data-testid="design-toggle-inspector" :class="{ on: showInspector }" :disabled="busy" :title="showInspector ? '隐藏属性面板（画布满宽）' : '显示属性面板（工程与画布、图层属性）'" @click="showInspector = !showInspector">属性</button>
         <button data-testid="design-export-png" :disabled="busy" @click="openExport">导出 PNG</button>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
         <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
@@ -1208,7 +1242,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
       <button @click="context = null">转为独立制作</button>
     </div>
     <div v-if="dimensionMismatch" class="notice error">当前画布尺寸与模板不同，应用前请调整。<button @click="adoptTemplateSize">采用模板尺寸（图层不缩放）</button></div>
-    <div class="designer-workspace" :class="{ 'with-assets': showAssets }">
+    <div class="designer-workspace">
       <aside class="designer-panel tools-panel">
         <h3>添加内容</h3>
         <div class="tool-grid">
@@ -1230,10 +1264,6 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
           </div>
         </div>
         <h3>图层 <span>{{ design.layers.length }} · 上方在前</span></h3>
-        <div class="layer-actions">
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先选择完整分组再调整层级' : '上移一层'" @click="reorder('up')">上移</button><button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先选择完整分组再调整层级' : '下移一层'" @click="reorder('down')">下移</button>
-          <button :disabled="!editable.length || hasPartialGroup" @click="reorder('top')">置顶</button><button :disabled="!editable.length || hasPartialGroup" @click="reorder('bottom')">置底</button>
-        </div>
         <div class="tool-grid group-actions">
           <button data-testid="design-group" :disabled="selected.length < 2 || editable.length < selected.length" title="Ctrl+G；合并已有组时会展开其全部成员" @click="makeGroup">组合所选</button>
           <button data-testid="design-ungroup" :disabled="!hasSelectedGroup" title="Ctrl+Shift+G" @click="ungroup">解除分组</button>
@@ -1250,7 +1280,17 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
               <button class="icon-button" :title="row.layer.visible ? '隐藏图层' : '显示图层'" :aria-label="row.layer.visible ? '隐藏图层' : '显示图层'" @click.stop="toggleLayer(row.layer, 'visible')">{{ row.layer.visible ? '◉' : '○' }}</button>
               <span class="layer-name" :title="row.layer.name">{{ row.layer.name }}</span>
               <span v-if="row.layer.editorOnly" class="layer-flag" title="仅编辑可见：打印、PDF 与 PNG 导出里都不会出现">仅编辑</span>
-              <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '解锁图层' : '锁定图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
+              <span class="layer-row-actions" @click.stop>
+                <template v-if="row.layer.type === 'image' && row.layer.assetId">
+                  <button v-if="!adoptedIds.has(row.layer.assetId)" class="icon-button" title="加入素材库：收藏这张原图，之后删除图层不会清理它" @click.stop="adoptLayerAsset(row.layer)">＋</button>
+                  <span v-else class="adopted-flag" title="已在素材库（受管理，删除图层不会清理）">★</span>
+                </template>
+                <button class="icon-button" :title="hasPartialGroup ? '先选择完整分组再调整层级' : '上移一层'" :aria-label="`上移一层：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'up')">↑</button>
+                <button class="icon-button" :title="hasPartialGroup ? '先选择完整分组再调整层级' : '下移一层'" :aria-label="`下移一层：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'down')">↓</button>
+                <button class="icon-button" title="置顶" :aria-label="`置顶：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'top')">⤒</button>
+                <button class="icon-button" title="置底" :aria-label="`置底：${row.layer.name}`" :disabled="!editable.length || hasPartialGroup" @click.stop="reorderRow(row, 'bottom')">⤓</button>
+              </span>
+              <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '锁定图层' : '解锁图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
             </div>
           </template>
         </div>
@@ -1259,8 +1299,8 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         </div>
         <p v-if="design.groups?.length" class="muted">点组名或画布选择整组；点列表中的成员可单独编辑属性。</p>
       </aside>
-      <AssetLibrarySidebar v-if="showAssets" :project-assets="imageAssets" @insert="insertLibraryAsset" />
-      <div class="canvas-column">
+      <AssetLibrarySidebar v-if="showAssets" @insert="insertLibraryAsset" />
+      <div class="canvas-column" :class="{ 'inspector-open': showInspector }">
         <div class="canvas-toolbar">
           <button data-testid="design-undo" :disabled="!history.length" title="Ctrl+Z" @click="undo">撤销</button>
           <button data-testid="design-redo" :disabled="!future.length" title="Ctrl+Shift+Z" @click="redo">重做</button>
@@ -1299,7 +1339,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
         <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
         <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
       </div>
-      <aside class="designer-panel inspector">
+      <aside v-if="showInspector" class="designer-panel inspector">
         <h3>工程与画布</h3>
         <label>工程名称<input data-testid="design-name" :value="design.name" maxlength="120" @change="setDoc('name', $event.target.value)"></label>
         <div class="property-grid">
@@ -1418,8 +1458,14 @@ button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
 .export-done button { margin-left: 0; }
 .export-done button:first-of-type { margin-left: auto; }
 .heading-actions button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
-.designer-workspace { display: grid; grid-template-columns: 210px minmax(450px, 1fr) 248px; gap: 12px; align-items: start; }
-.designer-workspace.with-assets { grid-template-columns: 210px 240px minmax(420px, 1fr) 248px; }
+.designer-workspace { display: grid; grid-template-columns: 176px minmax(450px, 1fr); gap: 12px; align-items: start; position: relative; }
+/* 素材库抽屉：浮在画布左侧（覆盖而非占列），打开不再挤压画布；内部自行滚动；点外部收起 */
+.designer-panel.asset-library { position: absolute; top: 0; bottom: 0; left: 188px; width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
+/* 属性面板抽屉：浮在画布右侧，只走「属性」开关（点画布选图层不能关它）；
+   打开时工具条与状态栏让出其宽度（缩放/保存状态不被盖住） */
+.designer-panel.inspector { position: absolute; top: 0; bottom: 0; right: 0; width: 264px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
+.canvas-column.inspector-open .canvas-toolbar,
+.canvas-column.inspector-open .canvas-status { padding-right: 276px; }
 .designer-panel { border: 1px solid var(--line); border-radius: 8px; background: var(--paper-card); padding: 12px; min-width: 0; max-height: calc(100vh - 200px); overflow: auto; }
 h3 { font-size: 13px; margin: 4px 0 10px; display: flex; align-items: center; justify-content: space-between; }
 h3:not(:first-child) { margin-top: 20px; padding-top: 13px; border-top: 1px solid var(--line); }
@@ -1436,14 +1482,19 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .project-open b, .project-open small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-open b { font-weight: 500; } .project-open small { font-size: 10px; color: var(--stone); margin-top: 4px; }
 .icon-button { padding: 4px 5px; border: 0; background: transparent; font-size: 12px; }
-.layer-actions { display: flex; gap: 3px; margin-bottom: 8px; } .layer-actions button { flex: 1; font-size: 11px; padding: 5px 1px; }
 .group-actions { margin-bottom: 8px; }
 .layer-list { max-height: 290px; overflow: auto; margin-bottom: 8px; }
-.layer-row { display: flex; align-items: center; min-height: 32px; border: 1px solid transparent; border-bottom-color: var(--line); border-radius: 4px; cursor: pointer; }
+.layer-row { display: flex; align-items: center; min-height: 32px; border: 1px solid transparent; border-bottom-color: var(--line); border-radius: 4px; cursor: pointer; position: relative; }
 .layer-row.selected { border-color: var(--cinnabar); background: var(--cinnabar-soft); } .layer-row.hidden .layer-name { opacity: .45; }
 .group-row { margin-top: 6px; background: var(--paper); font-weight: 600; }
 .group-member { margin-left: 12px; border-left-color: var(--line-strong); }
 .layer-name { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
+/* 行内操作层：hover 覆盖在名称上方（实底、不挤压布局），锁/开仍常显在行尾 */
+.layer-row-actions { position: absolute; right: 24px; top: 0; bottom: 0; display: none; align-items: center; gap: 1px; padding: 0 2px; background: var(--paper-card); border-radius: 4px; }
+.layer-row.group-member .layer-row-actions, .layer-row.selected .layer-row-actions { background: var(--paper); }
+.layer-row:hover .layer-row-actions, .layer-row:focus-within .layer-row-actions { display: inline-flex; }
+.layer-row-actions .icon-button { font-size: 11px; padding: 2px 3px; min-width: 17px; }
+.adopted-flag { font-size: 11px; color: var(--warn); line-height: 1; }
 /* 徽标一律 nowrap + inline-block：表格/弹性布局按 min-content 分列宽，中文徽标可断字，
    窄窗口下「仅编辑」会被拆成两行（同 I-14 的 .det-flag）。 */
 .layer-flag { flex: none; display: inline-block; white-space: nowrap; font-size: 11px; line-height: 1.4; padding: 0 5px; border-radius: 999px; color: var(--cinnabar); background: var(--cinnabar-soft); border: 1px solid currentColor; }
@@ -1503,5 +1554,5 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .export-dialog .export-dimensions { font-size: 14px; font-weight: 600; color: var(--ink); padding: 10px 12px; background: var(--paper); border-radius: 6px; margin: 18px 0 12px; }
 .export-dialog .export-error { color: var(--warn); background: var(--warn-soft); padding: 8px 10px; border-radius: 5px; }
 .export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
-@media (max-width: 1180px) { .designer-workspace { grid-template-columns: 185px minmax(420px, 1fr) 220px; gap: 8px; } .designer-workspace.with-assets { grid-template-columns: 185px 200px minmax(340px, 1fr) 220px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
+@media (max-width: 1180px) { .designer-workspace { grid-template-columns: 160px minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { left: 168px; width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
 </style>

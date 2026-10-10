@@ -2,18 +2,16 @@
 /**
  * 本地素材库侧栏（v0.5.0 M1）。
  *
- * 只做「给人看的元数据」：搜索、标签、收藏、归档/恢复、把已有工程图片收进库。
+ * 只做「给人看的元数据」：搜索、标签、收藏、归档/恢复。列表只展示已收藏的
+ * library 原件；工程内未收藏图片的「加入素材库」入口在父组件的图层行上
+ * （2026-10 去重：同一张图不再同时出现在「图层」「当前工程的图」「素材库」三处）。
  * 原件永远从 design-assets 读，缩略图只是列表缓存（缺了也能用原件兜底）。
  * 点击素材时把 assetId 交给父组件，由它做「会话保护 + 一次性撤销」的入画板，
  * 本组件不碰 design / commit，避免两边撤销栈打架。
  */
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 
-const props = defineProps({
-  // 当前工程里已经用到的图片原件，用来做「加入素材库」
-  projectAssets: { type: Array, default: () => [] },
-})
-const emit = defineEmits(['insert', 'adopt-done', 'error'])
+const emit = defineEmits(['insert', 'error'])
 
 const pp = window.printpress
 const mediaUrl = (relative) =>
@@ -31,7 +29,6 @@ const includeArchived = ref(false)
 const loading = ref(false)
 const error = ref('')
 const editing = reactive({ id: null, name: '', tags: '' })
-const justAdopted = ref(new Set())
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 const hasFilters = computed(
@@ -191,19 +188,6 @@ async function saveEdit(item) {
   }
 }
 
-async function adopt(assetId) {
-  error.value = ''
-  try {
-    await pp.adoptAsset(assetId, {})
-    justAdopted.value = new Set(justAdopted.value).add(assetId)
-    await refreshTags()
-    await refresh()
-    emit('adopt-done', assetId)
-  } catch (err) {
-    error.value = err?.message || String(err)
-  }
-}
-
 // 清理未引用原件（I-32）：先列出既不在工程、也不在素材库的孤立原件，确认后才删
 const orphans = ref(null) // null=未扫描；{ items:[{hash,bytes}], bytes }=扫描结果
 const purgePending = ref(false)
@@ -244,9 +228,6 @@ onMounted(() => {
   refreshTags()
   refresh()
 })
-
-// 父组件切到别的工程时，projectAssets 会变，但列表是全局库、不随工程变；无需重拉
-watch(() => props.projectAssets, () => {}, { deep: true })
 </script>
 
 <template>
@@ -291,7 +272,7 @@ watch(() => props.projectAssets, () => {}, { deep: true })
       </div>
     </div>
     <p v-if="loading" class="muted">读取素材库中…</p>
-    <p v-else-if="!items.length" class="muted">还没有素材。点「导入图片」把常用图收进来；当前工程里的图也可以逐个加入。</p>
+    <p v-else-if="!items.length" class="muted">还没有素材。点「导入图片」收常用图；工程里粘贴的图在图层行上点「＋」即可加入。</p>
 
     <div class="asset-list" v-else>
       <div
@@ -336,21 +317,6 @@ watch(() => props.projectAssets, () => {}, { deep: true })
       <button :disabled="page >= totalPages" data-testid="asset-next" @click="nextPage">下一页</button>
     </div>
 
-    <h3 v-if="projectAssets.length">当前工程的图 <span>{{ projectAssets.length }}</span></h3>
-    <div class="asset-adopt-list" v-if="projectAssets.length">
-      <div v-for="asset in projectAssets" :key="asset.id" class="asset-adopt-row">
-        <img v-if="asset.path" class="asset-adopt-thumb" :src="mediaUrl(asset.path)" :alt="asset.name" loading="lazy" />
-        <span class="asset-adopt-name" :title="asset.name">{{ asset.name || asset.id }}</span>
-        <button
-          v-if="!justAdopted.has(asset.id)"
-          class="icon-button"
-          :data-testid="`asset-adopt-${asset.id}`"
-          title="把这张图收进素材库（不导入新字节）"
-          @click="adopt(asset.id)"
-        >＋ 加入</button>
-        <span v-else class="asset-adopt-done">已加入</span>
-      </div>
-    </div>
   </aside>
 </template>
 
@@ -378,7 +344,11 @@ watch(() => props.projectAssets, () => {}, { deep: true })
 .asset-name { display: block; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-tags { display: block; font-size: 10px; color: var(--stone); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-sub { display: block; font-size: 10px; color: var(--warn); }
-.asset-card-actions { grid-area: actions; display: flex; gap: 2px; }
+/* 行内操作按钮 hover 才显示：平时只留缩略图 + 名称，降噪；归档件常显（要能看到「恢复」） */
+.asset-card-actions { grid-area: actions; display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
+.asset-card:hover .asset-card-actions,
+.asset-card:focus-within .asset-card-actions,
+.asset-card.archived .asset-card-actions { opacity: 1; }
 .asset-card-actions .icon-button.on { color: var(--cinnabar); }
 .asset-edit { grid-area: edit; display: flex; flex-direction: column; gap: 5px; border-top: 1px solid var(--line); padding-top: 7px; }
 .asset-edit label { display: flex; flex-direction: column; font-size: 10px; color: var(--stone); gap: 2px; }
@@ -387,9 +357,4 @@ watch(() => props.projectAssets, () => {}, { deep: true })
 .asset-edit-actions button { flex: 1; font-size: 11px; padding: 5px; }
 .asset-pager { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .asset-pager button { font-size: 11px; padding: 5px 9px; }
-.asset-adopt-list { display: flex; flex-direction: column; gap: 5px; }
-.asset-adopt-row { display: flex; align-items: center; gap: 7px; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
-.asset-adopt-thumb { width: 30px; height: 30px; border-radius: 4px; object-fit: cover; }
-.asset-adopt-name { flex: 1; min-width: 0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.asset-adopt-done { font-size: 11px; color: var(--ok); }
 </style>
