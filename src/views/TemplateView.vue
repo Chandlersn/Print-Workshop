@@ -539,7 +539,7 @@ function onPageDim(which, val) {
 async function discardBackgroundFile(bgPath) {
   if (!bgPath) return
   try {
-    await window.printpress.discardBackground({ path: bgPath })
+    await window.printpress.discardBackground({ assetId: bgPath })
   } catch (err) {
     // 清理失败不该挡住正在做的事（元数据已经改好了），留个痕即可
     console.warn('[bg] 旧底图清理失败', err)

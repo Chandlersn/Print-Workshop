@@ -29,3 +29,5 @@ data/designs.write.lock/
 data/archive/
 .workbuddy-ai/
 *.exe
+# WorkBuddy 本地会话数据（agent 会话数据，不入仓库）
+.workbuddy-i/

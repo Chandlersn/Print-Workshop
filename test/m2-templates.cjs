@@ -54,9 +54,9 @@ async function main() {
 
   console.log('== 3. 底图上传 ==')
   const bg = templates.uploadBackground(pngPath)
-  assert(bg.background.startsWith('print-bg/'), '底图入 print-bg 目录', bg.background)
+  assert(/^asset_[a-f0-9]{64}$/.test(bg.background), '底图入素材库原件池（assetId）', bg.background)
   assert(bg.width === 1 && bg.height === 1, '尺寸读取正确', bg)
-  assert(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, bg.background)), '文件真实落盘')
+  assert(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets', `${bg.background.slice('asset_'.length)}.png`)), '原件真实落盘')
   throws(() => templates.uploadBackground(path.join(process.env.PRINTPRESS_DATA_DIR, 'unsupported.webp')),
     'WebP 尚不支持时上传入口明确拒绝')
 
@@ -175,7 +175,7 @@ async function main() {
   throws(() => templates.matchDataset(tpl.id, 'ds_none'), '对不存在数据集匹配抛错')
 
   console.log('== 6.5 模板删除连带清理底图文件 ==')
-  const bgAbs = path.join(process.env.PRINTPRESS_DATA_DIR, tpl.background || bg.background)
+  const bgAbs = path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets', `${(tpl.background || bg.background).slice('asset_'.length)}.png`)
   assert(fs.existsSync(bgAbs), '删除前底图文件真实在盘')
   templates.deleteTemplate(tpl.id)
   templates.deleteTemplate(later.id)

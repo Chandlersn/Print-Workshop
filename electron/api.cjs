@@ -466,17 +466,18 @@ const OPS = {
   },
 
   /**
-   * 丢弃一张底图文件：换底图 / 移除底图时当场删掉。
+   * 丢弃一张底图：换底图 / 移除底图时当场处理。
    *
-   * 底图文件与模板记录是两回事——文件的生死由「用户还要不要它」决定，
-   * 不等保存。上传时文件名带时间戳前缀，一个文件只归一条模板用，不存在共用。
+   * `assetId`（新）走素材库分流删除（I-33）；`path`（旧 print-bg 路径）直接删副本。
+   * 兼容未迁移数据：CLI / agent 仍可传旧 path。
    */
   'template:discardBackground': {
     write: true,
     params: {
-      path: { required: true, desc: '要丢弃的底图存储路径（如 print-bg/xxx.png）' },
+      assetId: { required: false, desc: '要丢弃的底图原件标识（asset_<sha256>）' },
+      path: { required: false, desc: '兼容旧数据：print-bg/ 路径副本' },
     },
-    run: (p) => templates.discardBackground(String(p.path)),
+    run: (p) => templates.discardBackground(p.assetId || p.path),
   },
 
   // ==================== 可编辑底图 ====================

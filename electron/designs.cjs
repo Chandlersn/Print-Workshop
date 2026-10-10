@@ -156,7 +156,7 @@ function readAsset(id, claimedPath) {
   const measured = VERIFIED_IMAGES.get(match[1]) || validateImage(bytes)
   VERIFIED_IMAGES.set(match[1], measured)
   if (asset.width !== measured.width || asset.height !== measured.height || asset.mime !== measured.mime) throw new Error('底图素材尺寸记录不一致')
-  return { asset: { id, path: expected, name: String(asset.name || '图片').slice(0, 200), width: measured.width, height: measured.height, mime: measured.mime }, bytes: size }
+  return { asset: { id, path: expected, name: String(asset.name || '图片').slice(0, 200), width: measured.width, height: measured.height, mime: measured.mime, source: asset.source === 'template' ? 'template' : 'library' }, bytes: size }
 }
 /**
  * 对外只读出口：给素材库（asset-library.cjs）用，避免那边再造一份原件解析。
@@ -421,13 +421,13 @@ function jpegOrientation(buf) {
   }
   return 1
 }
-function importBuffer(buf, name) {
+function importBuffer(buf, name, source) {
   const size = validateImage(buf)
   const hash = crypto.createHash('sha256').update(buf).digest('hex')
   VERIFIED_IMAGES.set(hash, size)
   const id = `asset_${hash}`
   const relative = `design-assets/${hash}${size.ext}`
-  const asset = { id, path: relative, width: size.width, height: size.height, mime: size.mime, name: path.basename(String(name || '图片')).replace(/[\x00-\x1f]/g, '').slice(0, 200) || '图片' }
+  const asset = { id, path: relative, width: size.width, height: size.height, mime: size.mime, name: path.basename(String(name || '图片')).replace(/[\x00-\x1f]/g, '').slice(0, 200) || '图片', source: source === 'template' ? 'template' : 'library' }
   const target = resolveInsideDataDir(relative)
   const metadata = resolveInsideDataDir(`design-assets/${hash}.json`)
   if (fs.existsSync(metadata)) return readAsset(id).asset
@@ -435,19 +435,33 @@ function importBuffer(buf, name) {
   atomicFile(metadata, JSON.stringify(asset, null, 2))
   return asset
 }
-function importImageBytes({ name, base64 } = {}) {
+function importImageBytes({ name, base64, source } = {}) {
   if (typeof base64 !== 'string' || !base64 || base64.length > Math.ceil(MAX_BYTES / 3) * 4 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw new Error('图片 base64 内容无效或超过 64 MB')
-  return importBuffer(Buffer.from(base64, 'base64'), name)
+  return importBuffer(Buffer.from(base64, 'base64'), name, source)
 }
-function importImageFile(filePath) {
+function importImageFile(filePath, source) {
   const stat = fs.statSync(filePath)
   if (!stat.isFile() || stat.size > MAX_BYTES) throw new Error('图片文件无效或超过 64 MB')
-  return importBuffer(fs.readFileSync(filePath), path.basename(filePath))
+  return importBuffer(fs.readFileSync(filePath), path.basename(filePath), source)
+}
+/**
+ * 翻转原件元数据里的 `source`（供「加入素材库」时把模板上传件升为受管理）。
+ * 单向升级：只允许 template → library，绝不允许回退成 template。
+ */
+function setAssetSource(id, source) {
+  const aid = assetIdOfExport(id)
+  const match = ASSET_ID.exec(aid)
+  const metaPath = resolveInsideDataDir(`design-assets/${match[1]}.json`)
+  const asset = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+  if (asset.source === 'library' && source !== 'library') throw new Error('受管理原件不能降级为模板件')
+  asset.source = source === 'template' ? 'template' : 'library'
+  atomicFile(metaPath, JSON.stringify(asset, null, 2))
+  return asset
 }
 function importLegacyBackground({ background, w, h, name } = {}) {
   if (typeof background !== 'string' || !/^print-bg\/[^/\\]+\.(png|jpe?g)$/i.test(background)) throw new Error('旧底图路径无效')
   const board = normalizeDesign({ name: name || '导入底图', artboard: { w, h }, layers: [], assets: {} })
-  const asset = importImageFile(guardedFile(background, 'print-bg'))
+  const asset = importImageFile(guardedFile(background, 'print-bg'), 'library')
   return normalizeDesign({ ...board, assets: { [asset.id]: asset }, layers: [{ id: `layer_${crypto.randomBytes(6).toString('hex')}`, type: 'image', name: '原有底图', assetId: asset.id, x: 0, y: 0, w: board.artboard.w, h: board.artboard.h, locked: true }] })
 }
 function fontUsedBy(family) {
@@ -461,4 +475,4 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource }

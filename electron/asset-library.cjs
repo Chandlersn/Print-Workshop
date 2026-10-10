@@ -130,6 +130,10 @@ function listLibrary(opts = {}) {
 
   const matched = index().filter((entry) => {
     if (!includeArchived && entry.archivedAt) return false
+    // 分流切口：list 只展示「受管理」原件（source !== 'template'）。
+    // 模板页上传的底图虽也存进 design-assets/ 池子、受引用扫描保护，
+    // 但不进素材库列表（用户明确：列表只来源于 library）。
+    if (entry.source === 'template') return false
     if (favoriteOnly && !entry.favorite) return false
     if (tags.length && !tags.every((tag) => (entry.tags || []).some((t) => t.toLowerCase() === tag))) return false
     if (!query) return true
@@ -180,6 +184,9 @@ function upsert(asset, metadata = {}, options = {}) {
     displayName: cleanText(metadata.displayName, LIMITS.displayName, existing ? existing.displayName : cleanText(asset.name, LIMITS.displayName, '图片')),
     tags: metadata.tags === undefined ? (existing ? existing.tags : []) : cleanTags(metadata.tags, []),
     favorite: metadata.favorite === undefined ? Boolean(existing && existing.favorite) : metadata.favorite === true,
+    // source 分流：缺省视为 'library'（受管理，绝不误删既有图）；
+    // 单向升级——已是 library 绝不降级回 template（一旦进过素材库即受管理）。
+    source: existing && existing.source === 'library' ? 'library' : (metadata.source === 'template' ? 'template' : 'library'),
     archivedAt: null,
     createdAt: existing ? existing.createdAt : now,
     updatedAt: now,
@@ -199,7 +206,10 @@ function upsert(asset, metadata = {}, options = {}) {
 function adopt(assetId, metadata = {}, options = {}) {
   const id = assetIdOf(assetId)
   const info = designs.assetInfo(id) // 原件不存在会在这里抛错
-  return upsert(info, metadata, options)
+  // 单向升级：把原件 source 从可能的 'template' 升为 'library'，
+  // 这样模板即便仍引用它，discard 也不再即时删除（受管理）。
+  designs.setAssetSource(id, 'library')
+  return upsert(info, { ...metadata, source: 'library' }, options)
 }
 
 /** 改展示信息：只动 displayName / tags / favorite 三项，其余字段调用方说了不算。 */
@@ -263,6 +273,11 @@ function referencedAssetIds() {
       for (const assetId of Object.keys(doc.assets || {})) refs.add(assetId)
     } catch { /* 工程读不出不影响其余统计 */ }
   }
+  // 模板背景（assetId）也算引用：否则清理未引用会误删正在用的模板底图
+  try {
+    const templates = require('./templates.cjs')
+    for (const assetId of templates.listBackgroundAssetIds()) refs.add(assetId)
+  } catch { /* 模板模块读不出不影响其余统计 */ }
   return refs
 }
 
@@ -313,8 +328,36 @@ function purgeOrphanOriginals(hashes) {
   return { removed, kept }
 }
 
+/**
+ * 即时删除分流入口（I-33）。
+ *
+ * 仅当原件 `source === 'template'`（模板页上传）**且**已无任何引用时才删原件；
+ * 其余情况（`library` / 已归档 / 仍被引用）一律不删，只由调用方撤引用。
+ * 原件生死归素材库，模板层只持引用。
+ *
+ * 删除走 dataDir 守卫（`resolveInsideDataDir` 已越界拦截），绝不删到目录外。
+ */
+function discardIfEphemeral(assetId) {
+  const id = assetIdOf(assetId)
+  let info
+  try { info = designs.assetInfo(id) } catch { return { removed: false } }
+  const source = info.source === 'template' ? 'template' : 'library'
+  if (source !== 'template') return { removed: false } // 受管理原件不即时删
+  const refs = referencedAssetIds()
+  if (refs.has(id)) return { removed: false } // 仍被引用 → 不删
+  const hash = hashOf(id)
+  let removed = false
+  for (const ext of ['png', 'jpg', 'jpeg', 'json']) {
+    const fp = resolveInsideDataDir(`design-assets/${hash}.${ext}`)
+    try { if (fs.existsSync(fp)) { fs.unlinkSync(fp); removed = true } } catch { /* 已不存在 */ }
+  }
+  const thumb = resolveInsideDataDir(`design-thumbnails/${hash}.png`)
+  try { if (fs.existsSync(thumb)) fs.unlinkSync(thumb) } catch { /* 缩略图可有可无 */ }
+  return { removed }
+}
+
 module.exports = {
   listLibrary, getEntry, listTags, upsert, adopt, updateMetadata, archive, restore, rebuildThumbnail,
-  findOrphanOriginals, purgeOrphanOriginals,
+  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, discardIfEphemeral,
   THUMB_MAX_SIDE, LIMITS,
 }

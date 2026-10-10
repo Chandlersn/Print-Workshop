@@ -11,6 +11,7 @@ const crypto = require('crypto')
 const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
 const { imageSize, imageSizeFromBuffer, sniffImageExt } = require('./images.cjs')
 const dataset = require('./dataset.cjs')
+const designs = require('./designs.cjs')
 
 const STORE_NAME = 'templates'
 const BG_DIR = path.join(process.env.PRINTPRESS_DATA_DIR, 'print-bg')
@@ -186,17 +187,60 @@ function saveTemplate(template) {
  * 万一用户换完图没保存就走了，记录里会留下一条指向已删文件的引用，
  * 前端加载失败时会自动清掉（见 TemplateView 的 onBgError）。
  */
-function discardBackground(bgPath) {
-  return { removed: removeBgFile(String(bgPath || '')) }
+function discardBackground(bgPathOrId) {
+  const ref = String(bgPathOrId || '')
+  if (/^asset_[a-f0-9]{64}$/.test(ref)) {
+    return require('./asset-library.cjs').discardIfEphemeral(ref)
+  }
+  // legacy：旧数据里 template.background 仍是 print-bg/ 路径 → 直接删副本
+  return { removed: removeBgFile(ref) }
 }
 
 function deleteTemplate(id) {
   const t = getTemplate(id)
   const rest = loadAll().filter((x) => x.id !== id)
   persistAll(rest)
-  // 连带清理底图文件；唯一性由时间戳前缀保证，这里再挡一道手工改 JSON 造成的共用
-  if (!rest.some((x) => x.background === t.background)) removeBgFile(t.background)
+  // 连带清理底图：assetId 走分流（仍被引用则保留），旧 print-bg 路径按原逻辑（其他模板引用则保留）
+  if (t.background) {
+    if (/^asset_[a-f0-9]{64}$/.test(String(t.background))) {
+      require('./asset-library.cjs').discardIfEphemeral(t.background)
+    } else if (!rest.some((x) => x.background === t.background)) {
+      removeBgFile(t.background)
+    }
+  }
   return { ok: true }
+}
+
+/** 所有模板引用的背景原件标识（assetId）；供素材库引用扫描，避免清理误删在用模板底图。 */
+function listBackgroundAssetIds() {
+  const ids = []
+  for (const t of loadAll()) {
+    if (t && typeof t.background === 'string' && /^asset_[a-f0-9]{64}$/.test(t.background)) ids.push(t.background)
+  }
+  return ids
+}
+
+/**
+ * 存量迁移：把旧 `print-bg/` 路径背景转为素材库 assetId（幂等，已是 assetId 跳过）。
+ * 迁移后 `print-bg/` 目录留空，不主动删用户数据。损坏/已删文件跳过，前端 onBgError 兜底。
+ */
+function migrateBackgrounds() {
+  if (!fs.existsSync(BG_DIR)) return { migrated: 0 }
+  let migrated = 0
+  const list = loadAll()
+  let changed = false
+  for (const t of list) {
+    if (!t || typeof t.background !== 'string') continue
+    if (!/^print-bg\/[^/\\]+\.(png|jpe?g)$/i.test(t.background)) continue
+    try {
+      const asset = designs.importImageFile(path.join(BG_DIR, path.basename(t.background)), 'template')
+      t.background = asset.id
+      migrated++
+      changed = true
+    } catch { /* 文件损坏/已删：留空，前端 onBgError 兜底 */ }
+  }
+  if (changed) persistAll(list)
+  return { migrated }
 }
 
 /**
@@ -273,25 +317,37 @@ function storeBackground(buf, baseName, ext) {
   }
 }
 
-/** 底图上传（对话框选文件 / CLI 指定路径） */
+/** 底图上传（对话框选文件 / CLI 指定路径）：改路由进素材库原件池，存 assetId 引用 */
 function uploadBackground(srcPath) {
   const base = path.basename(srcPath)
   const ext = path.extname(base).toLowerCase()
   if (!BG_EXTS.has(ext)) throw new Error('仅支持 PNG / JPEG 图片')
-  return storeBackground(fs.readFileSync(srcPath), safeBaseName(base, 'bg'), ext)
+  const asset = designs.importImageFile(srcPath, 'template')
+  return {
+    background: asset.id,
+    width: asset.width,
+    height: asset.height,
+    suggest: suggestPageSize(asset.width, asset.height),
+  }
 }
 
 /**
  * 底图上传（拖拽 / 剪贴板粘贴）：从内存字节写入，不需要源文件路径——
  * 截图粘贴进来的图片本来就只存在于剪贴板里，根本没有路径。
  *
- * 扩展名一律由内容嗅探决定，不采用前端给的文件名后缀。
+ * 扩展名一律由内容嗅探决定，不采用前端给的文件名后缀。原件进素材库池（source 'template'）。
  */
 function uploadBackgroundBytes(buf, rawName) {
   if (!Buffer.isBuffer(buf) || buf.length === 0) throw new Error('图片内容为空')
   const ext = sniffImageExt(buf)
   if (!ext) throw new Error('仅支持 PNG / JPEG 图片')
-  return storeBackground(buf, safeBaseName(rawName, 'pasted'), ext)
+  const asset = designs.importImageBytes({ name: rawName, base64: buf.toString('base64'), source: 'template' })
+  return {
+    background: asset.id,
+    width: asset.width,
+    height: asset.height,
+    suggest: suggestPageSize(asset.width, asset.height),
+  }
 }
 
 /** 字体引用校验：返回引用该 family 的模板名清单 */
@@ -364,4 +420,6 @@ module.exports = {
   matchFields,
   matchDataset,
   rebindDataset,
+  listBackgroundAssetIds,
+  migrateBackgrounds,
 }

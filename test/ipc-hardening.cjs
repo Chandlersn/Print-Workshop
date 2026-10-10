@@ -26,6 +26,7 @@ function ok(cond, label, extra) {
 const printDomain = require('../electron/print.cjs')
 const templates = require('../electron/templates.cjs')
 const dataset = require('../electron/dataset.cjs')
+const designs = require('../electron/designs.cjs')
 const { safeExternalUrl, parseInfo } = require('../electron/version-check.cjs')
 
 const src = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf-8')
@@ -128,13 +129,13 @@ console.log('== 4b. 拖拽 / 粘贴上传底图：格式按内容判定，前端
     'base64')
 
   const good = templates.uploadBackgroundBytes(PNG, '证书底图.png')
-  ok(good.background.startsWith('print-bg/') && good.background.endsWith('.png'),
-    'PNG 正常写入并归到 print-bg/', good.background)
+  ok(/^asset_[a-f0-9]{64}$/.test(good.background),
+    'PNG 正常写入并入素材库原件池（assetId）', good.background)
   ok(good.width === 1 && good.height === 1, '尺寸按内容解析（1x1）', good)
 
-  // 落盘位置必须真的在数据目录内
-  const abs = path.join(TMP, 'print-bg', path.basename(good.background))
-  ok(fs.existsSync(abs), '底图确实落在数据目录内', abs)
+  // 落盘位置必须真的在数据目录内（内容寻址池 design-assets）
+  const absGood = path.join(TMP, designs.assetInfo(good.background).path)
+  ok(fs.existsSync(absGood), '底图原件确实落在数据目录内', absGood)
 
   // 路径穿越：只取文件名，不能按原路径拼
   const evil = templates.uploadBackgroundBytes(PNG, '../../../../Windows/System32/calc.png')
@@ -145,9 +146,10 @@ console.log('== 4b. 拖拽 / 粘贴上传底图：格式按内容判定，前端
   const illegal = templates.uploadBackgroundBytes(PNG, 'a:b*c?d<e>f|g.png')
   ok(!/[:*?"<>|]/.test(illegal.background), 'Windows 非法字符被替换', illegal.background)
 
-  // 后缀撒谎：内容是 PNG 却叫 .jpg —— 扩展名必须按内容判定
+  // 内容寻址：同名不同字节是不同原件；同字节换文件名仍是同一原件（扩展名不再由文件名决定）
   const lying = templates.uploadBackgroundBytes(PNG, 'evil.jpg')
-  ok(lying.background.endsWith('.png'), '扩展名按内容判定（叫 .jpg 的 PNG 仍存成 .png）', lying.background)
+  ok(lying.background === good.background,
+    '相同内容去重为同一原件（叫 .jpg 的 PNG 仍是同一 assetId）', lying.background)
 
   // 内容不是图片：即使名字是 .png 也必须拒绝（这是这条通道最关键的一条）
   const notImage = Buffer.from('<?php system($_GET[0]); ?>')
@@ -220,7 +222,9 @@ console.log('== 4c. 底图的上传入口与删除方式（前端静态核查）
 console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删文件 ==')
 {
   const ICON = path.join(__dirname, '..', 'build', 'icon.png')
-  const abs = (rel) => path.join(TMP, ...rel.split('/'))
+  const JPG = path.join(__dirname, 'fixtures', 'design-portrait.jpg')
+  // 模板底图现在以 assetId 引用素材库原件（design-assets/<hash>.<ext>），按原件真实路径定位
+  const abs = (id) => path.join(TMP, designs.assetInfo(id).path)
 
   const fp = path.join(TMP, '底图名单.csv')
   fs.writeFileSync(fp, '姓名\n张三\n李四\n', 'utf-8')
@@ -228,28 +232,32 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   dataset.setColumnPrint(ds.id, '姓名', true)
 
   const a = templates.uploadBackground(ICON)
-  const b = templates.uploadBackground(ICON)
-  ok(fs.existsSync(abs(a.background)), '上传后图片落盘')
-  ok(a.background !== b.background, '两次上传文件名不同（时间戳+随机前缀，不会互相覆盖）')
-  // 只靠 Date.now() 命名会在**同一毫秒内**撞名（快机器 / CI 抓到过：本机慢，隔了 >1ms 才一直没暴露）
-  const many = Array.from({ length: 8 }, () => templates.uploadBackground(ICON).background)
-  ok(new Set(many).size === many.length, '8 次连续上传文件名两两不同（不靠毫秒精度保证唯一）')
+  const b = templates.uploadBackground(JPG)
+  // abs() 要读原件 json，丢弃后会读不到；先把路径字符串快照下来，删完只用于 existsSync
+  const absA = abs(a.background)
+  const absB = abs(b.background)
+  ok(fs.existsSync(absA), '上传后原件落盘 design-assets')
+  ok(fs.existsSync(absB), '第二张原件落盘')
+  ok(a.background !== b.background, '不同内容去重后仍是不同原件（内容寻址）')
 
   templates.saveTemplate({
     name: '底图解耦测试', datasetId: ds.id, pageSize: { w: 210, h: 297 },
     background: a.background, bgSize: { width: a.width, height: a.height },
     fields: [{ column: '姓名', label: '姓名', x: 50, y: 40, fontSize: 12, align: 'center' }],
   })
-  ok(fs.existsSync(abs(a.background)), '保存模板不碰底图文件（两件事）')
+  ok(fs.existsSync(absA), '保存模板不碰底图原件（两件事）')
 
-  // 换图：前端带着旧路径来丢弃，当场删
+  // 换图：把模板背景改成 b（用户换图并保存），a 不再被引用 → 即时删
+  const tplId = templates.listTemplates().find((t) => t.name === '底图解耦测试').id
+  templates.saveTemplate({ ...templates.getTemplate(tplId), background: b.background })
   templates.discardBackground(a.background)
-  ok(!fs.existsSync(abs(a.background)), '换图后旧图文件当场被删')
-  ok(fs.existsSync(abs(b.background)), '新图不受影响')
+  ok(!fs.existsSync(absA), '换图后旧原件当场被删（不再被引用）')
+  ok(fs.existsSync(absB), '新图原件不受影响')
 
-  // 移除底图走的是同一条：不等保存
+  // 移除底图：先撤引用（背景置空并保存）再 discard → 即时删
+  templates.saveTemplate({ ...templates.getTemplate(tplId), background: '' })
   templates.discardBackground(b.background)
-  ok(!fs.existsSync(abs(b.background)), '移除底图后文件当场被删（不等保存）')
+  ok(!fs.existsSync(absB), '移除底图后原件当场被删（不再被引用）')
 
   // 路径守卫：底图路径来自可手工编辑的 JSON，越界不能删到数据目录外
   const outside = path.join(TMP, '..', 'pp-victim.txt')
@@ -259,15 +267,16 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   ok(fs.existsSync(outside), '数据目录外的文件没被删掉')
   fs.unlinkSync(outside)
 
-  // 删模板仍连带清底图（唯一性由时间戳前缀保证）
+  // 删模板连带清底图（仅当该原件不再被任何模板引用）
   const c = templates.uploadBackground(ICON)
+  const absC = abs(c.background)
   const tpl = templates.saveTemplate({
     name: '待删模板', datasetId: ds.id, pageSize: { w: 210, h: 297 },
     background: c.background, bgSize: { width: c.width, height: c.height },
     fields: [{ column: '姓名', label: '姓名', x: 50, y: 40, fontSize: 12, align: 'center' }],
   })
   templates.deleteTemplate(tpl.id)
-  ok(!fs.existsSync(abs(c.background)), '删模板连带清掉它的底图')
+  ok(!fs.existsSync(absC), '删模板连带清掉它的底图')
 }
 
 console.log('== 4e. 模板列表封顶 + 「列对齐」下线（前端静态核查） ==')

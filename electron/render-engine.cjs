@@ -55,6 +55,24 @@ function inlineUrl(rel) {
   return `data:${mimeFor(rel)};base64,${buf.toString('base64')}`
 }
 
+/**
+ * 模板底图可能是两种形态（向后兼容）：
+ * - `asset_<sha256>`（新）：原件在素材库池 `design-assets/`，取回其相对路径供 inlineUrl 读；
+ * - `print-bg/...`（旧，未迁移）：原样返回，inlineUrl 按数据目录相对路径读。
+ */
+function resolveBackgroundMedia(background) {
+  if (!background) return null
+  if (/^asset_[a-f0-9]{64}$/.test(background)) {
+    try {
+      const asset = require('./designs.cjs').assetInfo(background)
+      return asset.path
+    } catch {
+      return null
+    }
+  }
+  return background
+}
+
 // 扩展名 → @font-face format（与 workbench _FONT_FORMAT 一致，补 ttc）
 const FONT_FORMATS = {
   ttf: 'truetype',
@@ -299,7 +317,8 @@ function buildHtml(template, records, { withToolbar = true, preparedDesign } = {
   const spec = pageSpec(template.pageSize)
   const widthMm = spec.w
   const heightMm = spec.h
-  const bg = template.background ? inlineUrl(template.background) : ''
+  const bgRel = resolveBackgroundMedia(template.background)
+  const bg = bgRel ? inlineUrl(bgRel) : ''
   const fields = (template.fields || [])
     .filter((f) => f.column || f.key) // column 为权威属性，key 是旧版 UI 的存法（兼容读取）
   const layout = resolveLayout(template.layout, spec)

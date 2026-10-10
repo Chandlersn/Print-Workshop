@@ -204,7 +204,7 @@ release/                 安装包与免安装目录（构建产物，不进仓�
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：33 套件，断言统计见运行结果
+npm test                        # 领域层测试：34 套件，断言统计见运行结果
 npm run test:e2e                # 端到端：120 人真实 printToPDF（经启动器摘除破坏性环境变量）
 npm run build && npm run test:design-e2e # 图层：实际 PDF 保真、三种版式及编辑器保存
 npm run test:design-export-e2e   # PNG：真实像素尺寸、透明度、资源加载与系统显示缩放

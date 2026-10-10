@@ -62,6 +62,21 @@ function registerMediaProtocol() {
       if (!rel || rel.split('/').includes('..')) {
         return new Response('bad path', { status: 403 })
       }
+      // 素材库原件标识 asset_<sha256>：解析成 design-assets 内真实文件后再服务，
+      // 这样模板页底图（存 assetId）与旧 print-bg 路径都能用同一协议访问。
+      const assetMatch = /^asset_([a-f0-9]{64})$/.exec(rel)
+      if (assetMatch) {
+        const asset = require('./designs.cjs').assetInfo(`asset_${assetMatch[1]}`)
+        const abs = path.join(dataDir, asset.path)
+        const resp = await net.fetch(pathToFileURL(abs).toString())
+        return new Response(resp.body, {
+          status: resp.status,
+          headers: {
+            'Content-Type': resp.headers.get('content-type') || 'application/octet-stream',
+            'Access-Control-Allow-Origin': '*',
+          },
+        })
+      }
       const abs = path.join(dataDir, rel)
       const resp = await net.fetch(pathToFileURL(abs).toString())
       return new Response(resp.body, {
@@ -142,6 +157,15 @@ function main() {
     else if (seedResult.reason && seedResult.reason !== 'already') console.error('种子失败:', seedResult.reason)
   } catch (err) {
     console.error('种子异常:', err)
+  }
+
+  // 存量迁移：旧 print-bg 背景转素材库 assetId（幂等；失败不阻塞启动）
+  try {
+    const templates = require('./templates.cjs')
+    const r = templates.migrateBackgrounds()
+    if (r.migrated) console.log(`模板底图迁移 ${r.migrated} 条`)
+  } catch (err) {
+    console.error('模板底图迁移异常:', err)
   }
 
   // 产品化接口位（M5 预留，不提前实现）：

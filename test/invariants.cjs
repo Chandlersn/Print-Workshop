@@ -65,6 +65,7 @@ const CONTRACT = [
   { id: 'I-30', file: 'test/designs.cjs', anchor: '门槛是用户保存过' },
   { id: 'I-31', file: 'test/asset-library.cjs', anchor: '**同一字节内容只存一份原件**' },
   { id: 'I-32', file: 'test/asset-library.cjs', anchor: 'I-32 清理未引用原件：删除前必须复核仍孤儿，绝不静默删被引用的图' },
+  { id: 'I-33', file: 'test/template-asset-library.cjs', anchor: '=== I-33 模板底图走素材库原件（assetId），discard 按 source 分流，受管理件不即时删 ===' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')
