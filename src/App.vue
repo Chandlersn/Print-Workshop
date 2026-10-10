@@ -14,8 +14,8 @@ import { designerNav } from './lib/designer-nav.js'
 
 const TABS = [
   { id: 'dataset', label: '数据', hint: '导入名单' },
-  { id: 'template', label: '模板', hint: '设计版式' },
   { id: 'designer', label: '底图制作', hint: '编辑图片与图层' },
+  { id: 'template', label: '模板', hint: '设计版式' },
   { id: 'print', label: '打印中心', hint: '批量出片' },
 ]
 
