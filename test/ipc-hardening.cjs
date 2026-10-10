@@ -311,6 +311,32 @@ console.log('== 4e. 模板列表封顶 + 「列对齐」下线（前端静态核
   ok(/--tpl-item-h:\s*\d+px/.test(body), '.tpl-list 上定义了这个变量')
 }
 
+console.log('== 4f. 模板页属性面板必须是浮层，不许占列（前端静态核查） ==')
+{
+  const view = src('src/views/TemplateView.vue')
+
+  // 实测（默认窗口 1280×800）：属性面板当常驻 210px flex 列时，.canvas-wrap 只剩 739px，
+  // 而 .canvas 固定 760px → 画布右边缘被裁 21px 并出现横向滚动条；960 窗口下被裁 341px。
+  // 改成绝对定位浮层后 canvas-wrap 回到 965px，画布完整可见。
+  // 这类回归**不报错、不崩**，只是画布悄悄被切掉一块，所以必须静态钉住。
+  const propsRule = view.match(/\.props\s*\{([\s\S]*?)\}/)
+  ok(Boolean(propsRule), '存在 .props 规则')
+  const propsBody = propsRule ? propsRule[1] : ''
+  ok(/position:\s*absolute/.test(propsBody), '.props 绝对定位（浮层，不占 flex 列）')
+  ok(!/flex-shrink/.test(propsBody), '.props 不再是 flex 项（没有 flex-shrink）')
+  ok(/box-shadow:/.test(propsBody), '.props 有浮层阴影（与画布分层，否则像贴在纸上）')
+  ok(/right:\s*0/.test(propsBody), '.props 贴在右侧')
+
+  // 定位参照：抽屉挂在 .workbench 上，它必须是相对定位
+  const wbRule = view.match(/\.workbench\s*\{([\s\S]*?)\}/)
+  ok(/position:\s*relative/.test(wbRule ? wbRule[1] : ''),
+    '.workbench 是相对定位（属性抽屉的定位参照，缺了抽屉会跑到页面右下角）')
+
+  // 抽屉必须只在选中时出现：常驻浮层会一直盖住画布右边缘
+  ok(/<aside v-if="selectedField \|\| bgSelected" class="props">/.test(view),
+    '属性抽屉仅在选中字段/底图时渲染（常驻会盖住画布）')
+}
+
 console.log('== 5. 取消「印」必须使模板字段失效 ==')
 {
   const fp = path.join(TMP, '印列.csv')

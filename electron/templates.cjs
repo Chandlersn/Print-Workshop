@@ -233,7 +233,7 @@ function migrateBackgrounds() {
     if (!t || typeof t.background !== 'string') continue
     if (!/^print-bg\/[^/\\]+\.(png|jpe?g)$/i.test(t.background)) continue
     try {
-      const asset = designs.importImageFile(path.join(BG_DIR, path.basename(t.background)), 'template')
+      const asset = designs.importImageFile(path.join(BG_DIR, path.basename(t.background)), 'ephemeral')
       t.background = asset.id
       migrated++
       changed = true
@@ -322,7 +322,7 @@ function uploadBackground(srcPath) {
   const base = path.basename(srcPath)
   const ext = path.extname(base).toLowerCase()
   if (!BG_EXTS.has(ext)) throw new Error('仅支持 PNG / JPEG 图片')
-  const asset = designs.importImageFile(srcPath, 'template')
+  const asset = designs.importImageFile(srcPath, 'ephemeral')
   return {
     background: asset.id,
     width: asset.width,
@@ -335,13 +335,13 @@ function uploadBackground(srcPath) {
  * 底图上传（拖拽 / 剪贴板粘贴）：从内存字节写入，不需要源文件路径——
  * 截图粘贴进来的图片本来就只存在于剪贴板里，根本没有路径。
  *
- * 扩展名一律由内容嗅探决定，不采用前端给的文件名后缀。原件进素材库池（source 'template'）。
+ * 扩展名一律由内容嗅探决定，不采用前端给的文件名后缀。原件进素材库池（source 'ephemeral'）。
  */
 function uploadBackgroundBytes(buf, rawName) {
   if (!Buffer.isBuffer(buf) || buf.length === 0) throw new Error('图片内容为空')
   const ext = sniffImageExt(buf)
   if (!ext) throw new Error('仅支持 PNG / JPEG 图片')
-  const asset = designs.importImageBytes({ name: rawName, base64: buf.toString('base64'), source: 'template' })
+  const asset = designs.importImageBytes({ name: rawName, base64: buf.toString('base64'), source: 'ephemeral' })
   return {
     background: asset.id,
     width: asset.width,

@@ -3,13 +3,14 @@
  *
  * 钉的是「模板页上传的底图」并入素材库内容寻址池后的分流性质：
  *   1. 模板上传 → background 为 assetId，原件进 design-assets，列表不展示（source 过滤）；
- *   2. discard 按 source 分流：template 且无引用即时删；library 不删；
+ *   2. discard 按 source 分流：ephemeral 且无引用即时删；managed 不删；
  *   3. referencedAssetIds 接过来扫描模板背景 → 清理未引用不误杀；
- *   4. 去重升级：template → library 后 discard 不再即时删；
- *   5. 列表只来源于 library（source==='template' 过滤）；
+ *   4. 去重升级：ephemeral → managed 后 discard 不再即时删；
+ *   5. 列表只来源于 managed（normalizeSource !== 'ephemeral' 过滤）；
  *   6. 存量 print-bg 背景 migrateBackgrounds 迁为 assetId；
- *   7. 底图制作页直接加图（粘贴/拖入/对话框）= template 临时件：通道层强制 source，
- *      删图层后 exceptDesignId 跳过未保存的当前工程再同步清理；领域层缺省 library。
+ *   7. 底图制作页直接加图（粘贴/拖入/对话框）= ephemeral 临时件：通道层强制 source，
+ *      删图层后 exceptDesignId 跳过未保存的当前工程再同步清理；领域层缺省 managed；
+ *   8. 旧值兼容：磁盘上存量 template/library 读时归一为 ephemeral/managed（无需迁移）。
  *
  * 缩略图不注入（纯 Node），领域层只在有 makeThumbnail 回调时才缩，没有就降级——与本文件无关。
  */
@@ -77,7 +78,7 @@ dataset.setColumnPrint(ds.id, '姓名', true)
 console.log('== I-33 模板底图并入素材库 ==')
 // === I-33 模板底图走素材库原件（assetId），discard 按 source 分流，受管理件不即时删 ===
 
-// 1. 模板上传 → assetId + 原件落盘 + source=template + 列表不展示
+// 1. 模板上传 → assetId + 原件落盘 + source=ephemeral + 列表不展示
 check('模板上传底图 → background 为 assetId，原件在 design-assets，列表不展示', () => {
   const r = templates.uploadBackgroundBytes(pngA, 'a.png')
   assert.match(r.background, /^asset_[a-f0-9]{64}$/, '返回 assetId')
@@ -85,13 +86,13 @@ check('模板上传底图 → background 为 assetId，原件在 design-assets�
   assert.ok(fs.existsSync(path.join(assetsDir, `${hash}.png`)), '原件 png 应落盘')
   assert.ok(fs.existsSync(path.join(assetsDir, `${hash}.json`)), '原件元数据应落盘')
   const meta = JSON.parse(fs.readFileSync(path.join(assetsDir, `${hash}.json`), 'utf8'))
-  assert.equal(meta.source, 'template', '原件 source 应为 template')
+  assert.equal(meta.source, 'ephemeral', '原件 source 应为 ephemeral')
   const list = library.listLibrary({})
   assert.ok(!list.items.some((it) => it.assetId === r.background), '模板底图不应出现在素材库列表')
 })
 
-// 2. discard(source template, 无引用) → 删原件
-check('discard(source template, 无引用) → 删原件', () => {
+// 2. discard(source ephemeral, 无引用) → 删原件
+check('discard(source ephemeral, 无引用) → 删原件', () => {
   const r = templates.uploadBackgroundBytes(pngA, 'b.png')
   const hash = shaOf(r.background)
   assert.ok(existsAny(hash))
@@ -101,14 +102,14 @@ check('discard(source template, 无引用) → 删原件', () => {
   assert.ok(!library.referencedAssetIds().has(r.background), '引用扫描不应含它')
 })
 
-// 3. discard(source library) → 保留原件（用独立内容 jpgB，避免污染 pngA 的 template 来源）
-check('discard(source library) → 保留原件（不即时删）', () => {
+// 3. discard(source managed) → 保留原件（用独立内容 jpgB，避免污染 pngA 的 ephemeral 来源）
+check('discard(source managed) → 保留原件（不即时删）', () => {
   const asset = designs.importImageBytes({ name: 'lib.jpg', base64: jpgB.toString('base64') })
-  library.upsert(asset, { source: 'library' })
-  designs.setAssetSource(asset.id, 'library')
+  library.upsert(asset, { source: 'managed' })
+  designs.setAssetSource(asset.id, 'managed')
   const res = library.discardIfEphemeral(asset.id)
   assert.equal(res.removed, false, '受管理件不删')
-  assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(asset.id)}.${asset.path.endsWith('.jpg') ? 'jpg' : 'png'}`)), 'library 原件应保留')
+  assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(asset.id)}.${asset.path.endsWith('.jpg') ? 'jpg' : 'png'}`)), '受管理原件应保留')
 })
 
 // 4. referencedAssetIds 接过来扫描模板背景 → 不误杀
@@ -118,31 +119,31 @@ check('referencedAssetIds 含在用模板背景 → 不列为孤儿', () => {
   assert.ok(library.referencedAssetIds().has(r.background), '模板背景应被计入引用')
   const orphans = library.findOrphanOriginals()
   assert.ok(!orphans.some((o) => o.assetId === r.background), '在用模板底图不应是孤儿')
-  templates.deleteTemplate(tpl.id) // 清理：template 来源且无引用 → 删原件
+  templates.deleteTemplate(tpl.id) // 清理：ephemeral 来源且无引用 → 删原件
 })
 
-// 5. 去重升级：模板上传同图 → adopt 升 library → discard 不再即时删
-check('去重升级：模板上传 → adopt 升 library → discard 不再即时删', () => {
+// 5. 去重升级：模板上传同图 → adopt 升 managed → discard 不再即时删
+check('去重升级：模板上传 → adopt 升 managed → discard 不再即时删', () => {
   const r = templates.uploadBackgroundBytes(pngA, 'd.png')
-  assert.equal(designs.assetInfo(r.background).source, 'template', '上传时是 template')
+  assert.equal(designs.assetInfo(r.background).source, 'ephemeral', '上传时是 ephemeral')
   library.adopt(r.background, { displayName: 'd' })
-  assert.equal(designs.assetInfo(r.background).source, 'library', 'adopt 后升为 library')
+  assert.equal(designs.assetInfo(r.background).source, 'managed', 'adopt 后升为 managed')
   const res = templates.discardBackground(r.background)
-  assert.equal(res.removed, false, '升为 library 后 discard 不再即时删')
+  assert.equal(res.removed, false, '升为 managed 后 discard 不再即时删')
   assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(r.background)}.png`)), '原件保留')
 })
 
-// 6. 列表只来源于 library（source==='template' 过滤）——用独立生成的图像，避免共享 fixture 去重污染
-check('listLibrary 只展示 library（过滤 source template）', () => {
+// 6. 列表只来源于 managed（过滤 source ephemeral）——用独立生成的图像，避免共享 fixture 去重污染
+check('listLibrary 只展示 managed（过滤 source ephemeral）', () => {
   const pngT = makePng(8, 8, [10, 20, 200])
   const pngL = makePng(8, 8, [200, 20, 10])
-  const assetT = designs.importImageBytes({ name: 'tt.png', base64: pngT.toString('base64'), source: 'template' })
-  library.upsert(assetT, { source: 'template' })
-  const assetL = designs.importImageBytes({ name: 'll.png', base64: pngL.toString('base64'), source: 'library' })
-  library.upsert(assetL, { source: 'library' })
+  const assetT = designs.importImageBytes({ name: 'tt.png', base64: pngT.toString('base64'), source: 'ephemeral' })
+  library.upsert(assetT, { source: 'ephemeral' })
+  const assetL = designs.importImageBytes({ name: 'll.png', base64: pngL.toString('base64'), source: 'managed' })
+  library.upsert(assetL, { source: 'managed' })
   const ids = library.listLibrary({}).items.map((i) => i.assetId)
-  assert.ok(!ids.includes(assetT.id), 'template 来源不应出现在列表')
-  assert.ok(ids.includes(assetL.id), 'library 来源应出现在列表')
+  assert.ok(!ids.includes(assetT.id), 'ephemeral 来源不应出现在列表')
+  assert.ok(ids.includes(assetL.id), 'managed 来源应出现在列表')
 })
 
 // 7. discardBackground 路由到 discardIfEphemeral（不再直接 fs.unlink 路径）——用独立生成图，避免共享 fixture 去重污染
@@ -151,7 +152,7 @@ check('discardBackground 对 assetId 走素材库分流（不直接删路径副�
   const r = templates.uploadBackgroundBytes(pngE, 'e.png')
   const hash = shaOf(r.background)
   // 若错误地走 removeBgFile(assetId)，正则不匹配 → 不删、removed=false、文件仍在。
-  // 正确路由到 discardIfEphemeral → template 无引用 → 删原件。
+  // 正确路由到 discardIfEphemeral → ephemeral 无引用 → 删原件。
   const res = templates.discardBackground(r.background)
   assert.equal(res.removed, true)
   assert.ok(!existsAny(hash))
@@ -173,22 +174,22 @@ check('migrateBackgrounds：旧 print-bg 背景迁为 assetId', () => {
 
 console.log('== I-33 扩展：底图制作页直接加图 = 临时件（与模板页同逻辑） ==')
 
-// 9. 通道语义：design:importBytes 强制 template（调用方传 library 也不行）；领域层缺省仍是 library（安全默认）
-check('design:importBytes 通道强制 source=template；领域层缺省 library（漏传只能是「不删」）', () => {
+// 9. 通道语义：design:importBytes 强制 ephemeral（调用方传 managed 也不行）；领域层缺省仍是 managed（安全默认）
+check('design:importBytes 通道强制 source=ephemeral；领域层缺省 managed（漏传只能是「不删」）', () => {
   const api = require('../electron/api.cjs')
   const pngC1 = makePng(8, 8, [1, 2, 3])
-  const viaChannel = api.call('design:importBytes', { name: 'paste.png', base64: pngC1.toString('base64'), source: 'library' }, { allowWrite: true })
-  assert.equal(designs.assetInfo(viaChannel.id).source, 'template', '通道层强制 template，调用方传什么都不行')
+  const viaChannel = api.call('design:importBytes', { name: 'paste.png', base64: pngC1.toString('base64'), source: 'managed' }, { allowWrite: true })
+  assert.equal(designs.assetInfo(viaChannel.id).source, 'ephemeral', '通道层强制 ephemeral，调用方传什么都不行')
   const pngC2 = makePng(8, 8, [3, 2, 1])
   const direct = designs.importImageBytes({ name: 'direct.png', base64: pngC2.toString('base64') })
-  assert.equal(designs.assetInfo(direct.id).source, 'library', '领域层缺省 library：漏传的后果只能是「不删」，不能是「误删」')
+  assert.equal(designs.assetInfo(direct.id).source, 'managed', '领域层缺省 managed：漏传的后果只能是「不删」，不能是「误删」')
 })
 
 // 10. 工程文档引用保护 + exceptDesignId（正在编辑未保存的工程，磁盘是旧版，内存态才是权威）
 check('工程引用保护：磁盘引用不删；exceptDesignId 跳过当前工程后同步删；adopt 后保留', () => {
   // 粘贴图 A：登记进工程文档（图层 + assets），磁盘上「仍被引用」
   const pngP = makePng(8, 8, [88, 8, 188])
-  const pasted = designs.importImageBytes({ name: 'paste-a.png', base64: pngP.toString('base64'), source: 'template' })
+  const pasted = designs.importImageBytes({ name: 'paste-a.png', base64: pngP.toString('base64'), source: 'ephemeral' })
   const saved = designs.saveDesign({
     schemaVersion: 1, revision: 0, name: '粘贴工程',
     artboard: { w: 297, h: 210, background: '#ffffff' },
@@ -201,13 +202,31 @@ check('工程引用保护：磁盘引用不删；exceptDesignId 跳过当前工�
   assert.equal(res.removed, true, '当前工程内存态已不引用（视图已撤）→ 同步删')
   assert.ok(!existsAny(shaOf(pasted.id)), '原件应被删除')
 
-  // 粘贴图 B：先「加入素材库」（adopt 升 library）再删图层 → 保留
+  // 粘贴图 B：先「加入素材库」（adopt 升 managed）再删图层 → 保留
   const pngQ = makePng(8, 8, [8, 88, 188])
-  const adopted = designs.importImageBytes({ name: 'paste-b.png', base64: pngQ.toString('base64'), source: 'template' })
+  const adopted = designs.importImageBytes({ name: 'paste-b.png', base64: pngQ.toString('base64'), source: 'ephemeral' })
   library.adopt(adopted.id, { displayName: 'paste-b' })
   const res2 = library.discardIfEphemeral(adopted.id, { exceptDesignId: saved.id })
   assert.equal(res2.removed, false, '已加入素材库 → 保留')
-  assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(adopted.id)}.png`)), 'library 原件应保留')
+  assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(adopted.id)}.png`)), '受管理原件应保留')
+})
+
+// 11. 旧值兼容：磁盘上仍是 template/library 的原件，读时归一为 ephemeral/managed（无需迁移存量）
+check('旧值兼容：磁盘上 template/library 被归一为 ephemeral/managed', () => {
+  // 手工把磁盘元数据改回 0.5.0 之前的旧值，模拟存量数据
+  const pngR = makePng(8, 8, [9, 9, 9])
+  const assetR = designs.importImageBytes({ name: 'legacy-t.png', base64: pngR.toString('base64'), source: 'ephemeral' })
+  const metaRPath = path.join(assetsDir, `${shaOf(assetR.id)}.json`)
+  fs.writeFileSync(metaRPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(metaRPath, 'utf8')), source: 'template' }))
+  assert.equal(designs.assetInfo(assetR.id).source, 'ephemeral', '旧值 template 读作 ephemeral')
+  assert.equal(library.discardIfEphemeral(assetR.id).removed, true, '旧值仍按临时件即时删')
+
+  const pngS = makePng(8, 8, [7, 7, 7])
+  const assetS = designs.importImageBytes({ name: 'legacy-l.png', base64: pngS.toString('base64'), source: 'managed' })
+  const metaSPath = path.join(assetsDir, `${shaOf(assetS.id)}.json`)
+  fs.writeFileSync(metaSPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(metaSPath, 'utf8')), source: 'library' }))
+  assert.equal(designs.assetInfo(assetS.id).source, 'managed', '旧值 library 读作 managed')
+  assert.equal(library.discardIfEphemeral(assetS.id).removed, false, '旧值仍按受管理件保留')
 })
 
 console.log(`\n通过 ${passed} 项（I-33 模板底图并入素材库）`)

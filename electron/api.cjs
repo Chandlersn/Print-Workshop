@@ -574,17 +574,17 @@ const OPS = {
         filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }],
       })
       if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true }
-      // 底图制作页直接加图（对话框 / 粘贴 / 拖入）一律 template 语义：删图层即同步删原件，
-      // 只有显式「加入素材库」（asset:adopt）才升级为 library（I-33，与模板页上传一致）
-      return designs.importImageFile(result.filePaths[0], 'template')
+      // 底图制作页直接加图（对话框 / 粘贴 / 拖入）一律 ephemeral 语义：删图层即同步删原件，
+      // 只有显式「加入素材库」（asset:adopt）才升级为 managed（I-33，与模板页上传一致）
+      return designs.importImageFile(result.filePaths[0], 'ephemeral')
     },
   },
 
   'design:importBytes': {
     write: true,
     params: { base64: { required: true, desc: '原始 PNG/JPEG 图片 base64，不含 data: 前缀' }, name: { required: false, desc: '显示文件名' } },
-    // source 强制 template（临时件）：调用方传什么都不行——升级 library 的唯一出口是 asset:adopt
-    run: (p) => designs.importImageBytes({ ...p, source: 'template' }),
+    // source 强制 ephemeral（临时件）：调用方传什么都不行——升级 managed 的唯一出口是 asset:adopt
+    run: (p) => designs.importImageBytes({ ...p, source: 'ephemeral' }),
   },
 
   'design:importBackground': {
@@ -765,8 +765,8 @@ const OPS = {
   },
 
   /**
-   * 即时删除临时原件（I-33 分流）：仅 `source === 'template'` 且再无引用时删，
-   * `library`（已加入素材库）一律保留。`exceptDesignId` 用于底图制作页删除图层：
+   * 即时删除临时原件（I-33 分流）：仅 `source === 'ephemeral'` 且再无引用时删，
+   * `managed`（已加入素材库）一律保留。`exceptDesignId` 用于底图制作页删除图层：
    * 正在编辑的工程磁盘上还是旧版，引用扫描要跳过它，以内存文档为准。
    * 路径只由 hash 推导，绝不接受任意路径（同 I-32 守卫口径）。
    */

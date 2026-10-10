@@ -58,6 +58,23 @@ function normalizeFamily(name) {
  */
 const DEFAULT_FONT_STACK = '"Microsoft YaHei","PingFang SC",sans-serif'
 
+/**
+ * 素材生命周期策略归一——**唯一权威实现**（Vue / 主进程 / 测试共用）。
+ *
+ * 名字说的是「策略」，不是「来源」：同一个「临时件」语义同时覆盖模板页上传与底图制作页
+ * 直接加图（粘贴 / 拖入 / 对话框），用 `template` 当名字会让人以为只跟模板有关。
+ *
+ * - `ephemeral`（临时件）：删掉最后一个引用它的图层 / 模板 / 工程后，原件由素材库即时回收；
+ * - `managed`（受管理）：一旦进过素材库即受 I-31 保护，任何自动流程都不删原件。
+ *
+ * 兼容 0.5.0 之前写入的旧值：`template` → `ephemeral`、`library` → `managed`（存量磁盘数据
+ * 无需迁移，读时归一即可）。缺省一律 `managed`——**漏传字段的后果只能是「多占一块盘」，
+ * 绝不能是「删了用户的图」**。
+ */
+function normalizeSource(value) {
+  return value === 'ephemeral' || value === 'template' ? 'ephemeral' : 'managed'
+}
+
 function normalizeDesign(input) {
   const doc = object(input, '底图工程')
   if (doc.schemaVersion !== undefined && ![1, 2, 3].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
@@ -74,7 +91,7 @@ function normalizeDesign(input) {
     if (asset.id !== id) throw new Error('素材标识与索引不一致')
     const assetPath = string(asset.path, '', 200, '素材路径')
     if (!/^design-assets\/[a-f0-9]{64}\.(png|jpg)$/.test(assetPath)) throw new Error('素材路径不在底图素材目录内')
-    assets[id] = { id, path: assetPath, width: number(asset.width, 1, 1, 24000, '图片宽度'), height: number(asset.height, 1, 1, 24000, '图片高度'), name: string(asset.name, '图片', 200, '素材名称'), mime: asset.mime }
+    assets[id] = { id, path: assetPath, width: number(asset.width, 1, 1, 24000, '图片宽度'), height: number(asset.height, 1, 1, 24000, '图片高度'), name: string(asset.name, '图片', 200, '素材名称'), mime: asset.mime, source: normalizeSource(asset.source) }
     if (!['image/png', 'image/jpeg'].includes(asset.mime)) throw new Error('素材格式无效')
   }
   const ids = new Set()
@@ -253,4 +270,4 @@ function renderDesign(input, options = {}) {
   return { html: `<div class="${prefix}-root">${fragments.join('')}</div>`, css: css.join('\n'), fontFamilies: collectFontFamilies(doc, { includeEditorOnly }) }
 }
 
-module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, LIMITS }
+module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, DEFAULT_FONT_STACK, LIMITS }

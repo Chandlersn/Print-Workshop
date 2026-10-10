@@ -91,6 +91,9 @@ async function adoptLayerAsset(layer) {
   try {
     await window.printpress.adoptAsset(layer.assetId, {})
     adoptedIds.value = new Set([...adoptedIds.value, layer.assetId])
+    // 同步文档里的 source：升为受管理后，「删图层会不会清原图」的判定才准确
+    // （commit 内部会 clearFeedback，所以提示必须写在它之后）
+    commit((doc) => { if (doc.assets[layer.assetId]) doc.assets[layer.assetId].source = 'managed' })
     message.value = '已加入素材库：这张图受管理，删除图层不会清理原件'
   } catch (err) { fail(err) }
   finally { busy.value = false }
@@ -162,10 +165,24 @@ const loadedFontFiles = new Set()
 function fail(err) { error.value = err?.message || String(err); message.value = '' }
 function formatColor(value) { return value === 'transparent' ? '透明' : String(value || '').toUpperCase() }
 function clearFeedback() { error.value = ''; message.value = '' }
+/**
+ * 撤销 / 重做栈上限（步数）。
+ *
+ * 快照存的是整份文档（实测约 0.33 KB/图层：20 图层工程一步 ~6.6 KB，50 步 ≈ 0.3 MB；
+ * 最重的 300 图层 × 50 步也只有 ~4 MB），所以**内存不是约束**——这个上限只是防御性封顶，
+ * 防止超长编辑会话 / 超大工程把栈撑到无意义的大。
+ *
+ * 之所以敢从 5 放大到 50：删临时件时不再「整栈清空」，改成**只丢弃引用了被删素材的那些快照**
+ * （见 discardOrphanedEphemeral）。清栈不再是钝刀，这个上限就不必再兼任「清栈损失的上限」。
+ */
+const UNDO_LIMIT = 50
+function pushCapped(stack, snapshot) {
+  stack.value.push(snapshot)
+  while (stack.value.length > UNDO_LIMIT) stack.value.shift()
+}
 function record(before) {
   if (fingerprint(before) === fingerprint(design.value)) return
-  history.value.push(before)
-  if (history.value.length > 80) history.value.shift()
+  pushCapped(history, before)
   future.value = []
 }
 function commit(change) {
@@ -189,13 +206,13 @@ function commit(change) {
 function undo() {
   endGesture(); finishKeyboardMove()
   if (!history.value.length) return
-  future.value.push(clone(design.value))
+  pushCapped(future, clone(design.value))
   restoreHistory(history.value.pop())
 }
 function redo() {
   endGesture(); finishKeyboardMove()
   if (!future.value.length) return
-  history.value.push(clone(design.value))
+  pushCapped(history, clone(design.value))
   restoreHistory(future.value.pop())
 }
 function restoreHistory(snapshot) {
@@ -432,6 +449,19 @@ watch(() => designerNav.request, (request) => { if (initialized) consumeRequest(
 watch(busy, (value) => { if (!value && initialized && designerNav.request) consumeRequest(designerNav.request) })
 // 切换 / 新建 / 另存工程后重算「已加入素材库」集合（图层行 ★/＋ 状态）
 watch(() => design.value.id, () => { refreshAdopted() })
+/**
+ * 顶部提示条 5 秒后自动消失（「已恢复上次未保存的底图草稿。」这类）。
+ * 只作用于 `message`（成功 / 信息）：`error` 是 `role="alert"`，还可能带「采用模板尺寸」
+ * 这类需要用户动手的按钮，自动消失会把操作入口一起带走，所以保持常驻、由用户点「关闭」。
+ * 每次 message 变化都重置计时（含 `message.value += ...` 的追加写法）。
+ */
+const MESSAGE_TTL = 5000
+let messageTimer = null
+watch(message, (value) => {
+  clearTimeout(messageTimer)
+  if (!value) return
+  messageTimer = setTimeout(() => { message.value = '' }, MESSAGE_TTL)
+})
 
 function persistDraft() {
   clearTimeout(draftTimer)
@@ -764,6 +794,24 @@ function resetCrop() {
 function toggleLayer(layer, key) { commit((doc) => { const target = doc.layers.find((item) => item.id === layer.id); target[key] = !target[key] }) }
 function removeSelected() {
   if (!editable.value.length) return
+  // 先「预演」一遍：这次删除会让哪些素材不再被任何图层引用。
+  // 其中 source 为 ephemeral（临时件：粘贴/拖入/对话框直接加入，未加入素材库）的原件
+  // 会被同步删除，且不可撤销——这是破坏性后果，必须先确认（与 I-32 显式清理同一安全姿态）。
+  const preview = removeSelection(clone(design.value), selectedIds.value, { expandGroups: false })
+  const usedAfter = new Set(preview.design.layers.filter((layer) => layer.type === 'image' && layer.assetId).map((layer) => layer.assetId))
+  const ephemeralOrphans = Object.keys(preview.design.assets).filter((id) => !usedAfter.has(id) && design.value.assets[id]?.source === 'ephemeral')
+  if (ephemeralOrphans.length) {
+    pending.value = {
+      title: '删除图层并清理原图',
+      message: `选中的图片里有 ${ephemeralOrphans.length} 张还没加入素材库。删除图层会同时删除它们的原图，且不可撤销。\n想保留原图，请先点图层行的「加入素材库」；已加入素材库的图不受影响。`,
+      confirmText: '删除图层并清理原图',
+      action: applyRemoveSelected,
+    }
+    return
+  }
+  applyRemoveSelected()
+}
+function applyRemoveSelected() {
   let result
   let orphanedIds = []
   if (commit(doc => {
@@ -771,7 +819,7 @@ function removeSelected() {
     Object.assign(doc, result.design)
     // 删图层后不再被任何图层引用的图片原件，从文档里一并撤引用（I-33）：
     // 不撤的话磁盘扫描永远判「仍被引用」，临时件永远删不掉。
-    // library 来源的原件撤引用后仍留在素材库，不受影响。
+    // 受管理（managed）来源的原件撤引用后仍留在素材库，不受影响。
     const used = new Set(doc.layers.filter((layer) => layer.type === 'image' && layer.assetId).map((layer) => layer.assetId))
     orphanedIds = Object.keys(doc.assets).filter((id) => !used.has(id))
     for (const id of orphanedIds) delete doc.assets[id]
@@ -783,27 +831,34 @@ function removeSelected() {
 
 /**
  * 图层删除后的后台同步清理（I-33，与模板页上传同一逻辑）：
- * template 来源（粘贴 / 拖入 / 「＋ 图片」对话框直接加入）且再无任何引用的原件
- * 当场删文件；library 来源（已点「加入素材库」）保留。
- * 真删了文件就清空撤销 / 重做栈——撤销快照会把图层复活，可文件已经没了（碎图）；
- * 「文件生死不进撤销栈」，此步不可撤销，界面会明说。
+ * ephemeral 来源（粘贴 / 拖入 / 「＋ 图片」对话框直接加入）且再无任何引用的原件
+ * 当场删文件；managed 来源（已点「加入素材库」）保留。
+ *
+ * **文件生死不进撤销栈**：被删掉的原件，任何「引用了它」的快照都不能再当撤销目标
+ * （撤销回去只会得到一个指向已删文件的碎图层）。但**整栈清空是钝刀**——它把不相关的
+ * 编辑历史一起丢掉。所以这里做外科手术：**只丢弃快照里引用了这些素材的那些步**，其余照留。
+ * 判据与下面 `serialized.includes(id)` 同一手法（序列化后查 id 子串），未知字段也不怕。
+ * 代价是「删图层」这一步本身不可撤销（它的 before 快照必然引用被删素材），界面会明说。
  */
 async function discardOrphanedEphemeral(ids) {
   // 双保险：撤完引用后再核对一遍序列化文档里确实再无任何引用形状（未知字段也不怕）
   const serialized = JSON.stringify(design.value)
   const safeIds = ids.filter((id) => !serialized.includes(id))
-  let removedAny = false
+  const removedIds = []
   for (const id of safeIds) {
     try {
       const res = await window.printpress.discardEphemeralAsset(id, design.value.id || undefined)
-      if (res && res.removed) removedAny = true
+      if (res && res.removed) removedIds.push(id)
     } catch { /* 单个失败不阻塞界面：原件留在磁盘，后续 I-32 孤儿清理兜底 */ }
   }
-  if (removedAny) {
-    history.value = []
-    future.value = []
-    message.value = '已删除所选图层，未加入素材库的原图已同步清理（此步不可撤销）'
+  if (!removedIds.length) return
+  const stale = (snapshot) => {
+    const s = JSON.stringify(snapshot)
+    return removedIds.some((id) => s.includes(id))
   }
+  history.value = history.value.filter((snapshot) => !stale(snapshot))
+  future.value = future.value.filter((snapshot) => !stale(snapshot))
+  message.value = '已删除所选图层，未加入素材库的原图已同步清理（原图不可恢复，此步不可撤销）'
 }
 function duplicate() {
   if (!selected.value.length) return
@@ -1018,7 +1073,7 @@ function pointerDown(event, layer, corner = null) {
    * 所以只能自己记「上一次按下同一文字图层的时刻」。400ms 取在 Windows 默认双击间隔
    * （500ms）之内，并且只在同一图层上才算——点了别的图层就重新计时，不会跨图层误判。
    */
-  if (!resize) {
+  if (!corner) {
     const now = Date.now()
     const isDouble = layer.type === 'text' && !layer.locked
       && lastTextDown.id === layer.id && now - lastTextDown.at < 400
@@ -1233,7 +1288,7 @@ onMounted(async () => {
 })
 onActivated(activate)
 onDeactivated(deactivate)
-onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face of fontFaces) document.fonts.delete(face) })
+onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(messageTimer); for (const face of fontFaces) document.fonts.delete(face) })
 </script>
 
 <template>
@@ -1241,7 +1296,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
     <div class="designer-heading">
       <div><h2>底图制作</h2><p>图片、固定文字与形状分别编辑，保存后用于打印模板。</p></div>
       <div class="heading-actions">
-        <button data-testid="design-new" :disabled="busy" @click="newDesign">新建底图</button>
+        <button data-testid="design-new" class="primary" :disabled="busy" @click="newDesign">新建底图</button>
         <label class="preset-picker" title="内置版面与常用工程：选「内置模板」是「已有就打开、没有才新建」——不会每点一次就多一个同名工程；「常用」里只列你自己保存过的工程，选中直接打开那份（也不会复制）">
           <span>常用模板</span>
           <select data-testid="design-preset" :disabled="busy || (!presets.length && !recentDesigns.length)" @change="pickPreset">
@@ -1324,7 +1379,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); for (const face 
                   <span v-else class="adopted-flag" title="已在素材库（受管理，删除图层不会清理）">★</span>
                 </template>
               </span>
-              <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '锁定图层' : '解锁图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
+              <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '解锁图层' : '锁定图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
             </div>
           </template>
         </div>

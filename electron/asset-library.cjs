@@ -28,6 +28,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
 const designs = require('./designs.cjs')
+const { normalizeSource } = require('./design-layout.cjs')
 
 const ASSET_ID = /^asset_([a-f0-9]{64})$/
 const THUMB_DIR = 'design-thumbnails'
@@ -130,10 +131,10 @@ function listLibrary(opts = {}) {
 
   const matched = index().filter((entry) => {
     if (!includeArchived && entry.archivedAt) return false
-    // 分流切口：list 只展示「受管理」原件（source !== 'template'）。
-    // 模板页上传的底图虽也存进 design-assets/ 池子、受引用扫描保护，
-    // 但不进素材库列表（用户明确：列表只来源于 library）。
-    if (entry.source === 'template') return false
+    // 分流切口：list 只展示「受管理」原件（normalizeSource !== 'ephemeral'）。
+    // 模板页上传 / 底图制作页直接加图的底图虽也存进 design-assets/ 池子、受引用扫描保护，
+    // 但不进素材库列表（用户明确：列表只来源于受管理件）。
+    if (normalizeSource(entry.source) === 'ephemeral') return false
     if (favoriteOnly && !entry.favorite) return false
     if (tags.length && !tags.every((tag) => (entry.tags || []).some((t) => t.toLowerCase() === tag))) return false
     if (!query) return true
@@ -184,9 +185,9 @@ function upsert(asset, metadata = {}, options = {}) {
     displayName: cleanText(metadata.displayName, LIMITS.displayName, existing ? existing.displayName : cleanText(asset.name, LIMITS.displayName, '图片')),
     tags: metadata.tags === undefined ? (existing ? existing.tags : []) : cleanTags(metadata.tags, []),
     favorite: metadata.favorite === undefined ? Boolean(existing && existing.favorite) : metadata.favorite === true,
-    // source 分流：缺省视为 'library'（受管理，绝不误删既有图）；
-    // 单向升级——已是 library 绝不降级回 template（一旦进过素材库即受管理）。
-    source: existing && existing.source === 'library' ? 'library' : (metadata.source === 'template' ? 'template' : 'library'),
+    // source 分流：缺省视为 'managed'（受管理，绝不误删既有图）；
+    // 单向升级——已是 managed 绝不降级回 ephemeral（一旦进过素材库即受管理）。
+    source: existing && normalizeSource(existing.source) === 'managed' ? 'managed' : normalizeSource(metadata.source),
     archivedAt: null,
     createdAt: existing ? existing.createdAt : now,
     updatedAt: now,
@@ -206,10 +207,10 @@ function upsert(asset, metadata = {}, options = {}) {
 function adopt(assetId, metadata = {}, options = {}) {
   const id = assetIdOf(assetId)
   const info = designs.assetInfo(id) // 原件不存在会在这里抛错
-  // 单向升级：把原件 source 从可能的 'template' 升为 'library'，
+  // 单向升级：把原件 source 从可能的 'ephemeral' 升为 'managed'，
   // 这样模板即便仍引用它，discard 也不再即时删除（受管理）。
-  designs.setAssetSource(id, 'library')
-  return upsert(info, { ...metadata, source: 'library' }, options)
+  designs.setAssetSource(id, 'managed')
+  return upsert(info, { ...metadata, source: 'managed' }, options)
 }
 
 /** 改展示信息：只动 displayName / tags / favorite 三项，其余字段调用方说了不算。 */
@@ -339,8 +340,8 @@ function purgeOrphanOriginals(hashes) {
 /**
  * 即时删除分流入口（I-33）。
  *
- * 仅当原件 `source === 'template'`（模板页上传 / 底图制作页粘贴拖入对话框直接加入）
- * **且**已无任何引用时才删原件；其余情况（`library` / 已归档 / 仍被引用）一律不删，
+ * 仅当原件 `normalizeSource === 'ephemeral'`（模板页上传 / 底图制作页粘贴拖入对话框直接加入）
+ * **且**已无任何引用时才删原件；其余情况（`managed` / 已归档 / 仍被引用）一律不删，
  * 只由调用方撤引用。原件生死归素材库，模板层与工程文档只持引用。
  *
  * `options.exceptDesignId`：引用扫描跳过指定工程（正在编辑、尚未保存的那个——
@@ -352,8 +353,8 @@ function discardIfEphemeral(assetId, options = {}) {
   const id = assetIdOf(assetId)
   let info
   try { info = designs.assetInfo(id) } catch { return { removed: false } }
-  const source = info.source === 'template' ? 'template' : 'library'
-  if (source !== 'template') return { removed: false } // 受管理原件不即时删
+  const source = normalizeSource(info.source)
+  if (source !== 'ephemeral') return { removed: false } // 受管理原件不即时删
   const refs = referencedAssetIds(options)
   if (refs.has(id)) return { removed: false } // 仍被引用 → 不删
   const hash = hashOf(id)

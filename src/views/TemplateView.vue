@@ -181,15 +181,62 @@ const candidateDesign = computed(() => designs.value.find((d) => d.id === select
 const designSurfaceWidth = computed(() => activeDesign.value
   ? CANVAS_W * activeDesign.value.artboard.w / activeTpl.value.pageSize.w : CANVAS_W)
 
+/**
+ * 工程尺寸问题的唯一判据，返回 `{ kind, text }` 或 `null`。
+ *
+ * 分 `kind` 是因为两类问题的**归属**不同：
+ *   `grid`     → **模板自身**的多联版式放不下 2 个成品（跟选了哪份工程无关）；
+ *   `mismatch` → **这份工程**的 artboard 与当前成品尺寸不一致。
+ * 「候选工程」提示只关心 mismatch——grid 问题状态条带里已经有一条在说，候选行再说一遍就是复读。
+ *
+ * `text` 一律写成**从句**（不带「请…」前缀），由调用方去拼「，请…」的尾巴；
+ * 否则会拼出「…让纸张至少容纳 2 个成品，请调整尺寸后再应用」这种两个「请」的句子。
+ */
 function designSizeIssue(doc) {
-  if (!doc || !activeTpl.value) return ''
-  if (isGrid.value && !gridInfo.value?.ok) return '请先调整纸张或成品尺寸，让纸张至少容纳 2 个成品'
+  if (!doc || !activeTpl.value) return null
+  if (isGrid.value && !gridInfo.value?.ok) return { kind: 'grid', text: '纸张放不下 2 个成品' }
   const { w, h } = outputItemSpec.value
   return Math.abs(doc.artboard.w - w) > 0.01 || Math.abs(doc.artboard.h - h) > 0.01
-    ? `工程 ${doc.artboard.w}×${doc.artboard.h}mm 与当前成品 ${w}×${h}mm 不一致` : ''
+    ? { kind: 'mismatch', text: `尺寸 ${doc.artboard.w}×${doc.artboard.h}mm 与当前成品 ${w}×${h}mm 不一致` }
+    : null
 }
-const designSizeWarning = computed(() => designSizeIssue(activeDesign.value))
-const candidateSizeWarning = computed(() => designSizeIssue(candidateDesign.value))
+/** 已挂上的工程 vs 当前模板尺寸（状态条带、保存前校验都用它） */
+const designSizeWarning = computed(() => designSizeIssue(activeDesign.value)?.text || '')
+/** 下拉里选中但还没应用的工程：只在「这份工程与模板对不上」时给提示 */
+const candidateSizeHint = computed(() => {
+  const issue = designSizeIssue(candidateDesign.value)
+  return issue && issue.kind === 'mismatch' ? issue.text : ''
+})
+
+/**
+ * 「应用工程」按钮的状态。**原先这里是两个并排按钮**，但它们永远不会同时有效：
+ *   尺寸一致   → 候选提示为空 → 第二个按钮不渲染，只有「应用工程」能用；
+ *   尺寸不一致 → 两个都显示，但「应用工程」走 `matchSize=false`（不改尺寸），
+ *                紧接着的校验必然失败——**可见、可点、点了必报错**，
+ *                而报错内容正是旁边那个按钮主动帮用户做的事，是条死路。
+ * 合成一个随状态自适应的按钮后，「能点的那个」永远只有一种语义，也就不存在
+ * 「是不是重复了」的疑问。
+ */
+const applyDesignButton = computed(() => {
+  const issue = designSizeIssue(candidateDesign.value)
+  if (!candidateDesign.value) {
+    return { text: '应用工程', match: false, disabled: true, title: '先在上面的下拉里选一份已保存工程' }
+  }
+  if (issue && issue.kind === 'grid') {
+    // 模板自己的版式就放不下 2 个成品——改工程尺寸也救不了，得先修纸张/成品尺寸
+    return { text: '应用工程', match: false, disabled: true, title: `${issue.text}，请先调整纸张或成品尺寸` }
+  }
+  if (issue) {
+    return {
+      text: '匹配工程尺寸并应用',
+      match: true,
+      disabled: false,
+      title: '当前模板尺寸与这份工程不一致：点击会把模板的纸张/成品尺寸改成与工程一致，再挂上引用'
+        + '（改尺寸不进撤销栈，失败会自动回滚）',
+    }
+  }
+  return { text: '应用工程', match: false, disabled: false, title: '工程尺寸与模板一致，直接挂上引用' }
+})
 
 async function loadActiveDesign() {
   const token = ++designReadToken
@@ -227,7 +274,7 @@ async function applyDesignReference(ref, matchSize = false) {
       }
     }
     const issue = designSizeIssue(doc)
-    if (issue) throw new Error(`${issue}，请调整尺寸后再应用`)
+    if (issue) throw new Error(`${issue.text}，请调整尺寸后再应用`)
   } catch (err) {
     if (sizeBefore) {
       t.pageSize = sizeBefore.pageSize
@@ -423,10 +470,37 @@ function extractError(err) {
     /^Error invoking remote method '[^']+': (Error: )?/, '')
 }
 
+/**
+ * 成功提示的存活时长。与底图制作页的 MESSAGE_TTL 取同一个数（5000），
+ * 两页行为一致；只作用于 `msg`，`errorMsg` 常驻由用户点「关闭」。
+ */
+const MESSAGE_TTL = 5000
+let msgTimer = null
+watch(msg, (value) => {
+  clearTimeout(msgTimer)
+  if (!value) return
+  msgTimer = setTimeout(() => { msg.value = '' }, MESSAGE_TTL)
+})
+
 function flash(text) {
-  msg.value = text
-  setTimeout(() => { if (msg.value === text) msg.value = '' }, 2500)
+  msg.value = text // 自动消失交给上面的 watch（每次变化都重置计时）
 }
+
+/**
+ * 状态条带是否有内容。没有就整块不渲染——否则会留一个空边框盒子。
+ * 与条带里各 `<p>` 的 v-if 一一对应，改一处要同步另一处。
+ */
+const showStatusBand = computed(() => Boolean(
+  activeDesign.value
+  || designSizeWarning.value
+  || candidateSizeHint.value
+  || !activeDatasetId.value
+  || (activeDatasetId.value && hiddenFieldCount.value)
+  || gridInfo.value
+  || foldInfo.value
+  || bgRatioWarn.value
+  || bgDpi.value,
+))
 
 function newTemplate() {
   errorMsg.value = '' // 切换编辑对象前清掉上一次的报错，避免提示张冠李戴
@@ -1204,11 +1278,20 @@ onBeforeUnmount(() => {
     <div class="page-head">
       <h2 class="page-title">模板工坊</h2>
       <div class="head-actions">
-        <span v-if="msg" class="ok-text">{{ msg }}</span>
-        <span v-if="errorMsg" class="error-text">{{ errorMsg }}</span>
         <button class="btn-primary" @click="newTemplate">新建模板</button>
       </div>
     </div>
+
+    <!--
+      提示条：原先挤在 page-head 右侧当 12px 小字，而操作点在下方工具栏/画布上，
+      视线要来回跳。搬成整条带底色的横条（对齐底图制作页的 `.notice`）。
+      error 优先于 success 显示；success 5 秒自动消失，error 常驻并给「关闭」——
+      报错往往要用户对照着改，自动消失会把依据一起带走。
+    -->
+    <div v-if="errorMsg" class="notice error" role="alert">
+      {{ errorMsg }}<button class="notice-close" @click="errorMsg = ''">关闭</button>
+    </div>
+    <div v-else-if="msg" class="notice success" role="status">{{ msg }}</div>
 
     <div class="layout">
       <aside class="side">
@@ -1258,7 +1341,15 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else class="editor">
+        <!--
+          工具栏分两行（.tb-row）。此前是一条 flex-wrap 长龙：多联态下 17 个控件随机折行，
+          把「保存 / 删除」甩到第二行左边、「撤销 / 重做」留在第一行末尾——同一个操作组被劈成两半。
+          按语义分行后折行位置不再随机。**DOM 顺序必须保持**：`.toolbar .custom-select` 的
+          首个元素是「纸张」下拉，多处 e2e 直接点它，换序会静默选错下拉。
+          第 1 行 = 模板与版式属性；第 2 行 = 数据集与操作。
+        -->
         <div class="toolbar">
+          <div class="tb-row">
           <input v-model="activeTpl.name" class="name-input" placeholder="模板名称" />
           <span class="tb-label">纸张</span>
           <CustomSelect
@@ -1333,6 +1424,8 @@ onBeforeUnmount(() => {
               裁切线
             </label>
           </template>
+          </div>
+          <div class="tb-row tb-row-actions">
           <CustomSelect
             v-model="activeDatasetId"
             :options="datasetOptions"
@@ -1344,33 +1437,43 @@ onBeforeUnmount(() => {
           <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）按 x 顺序等距排成一行，y 取中位数" @click="applyEvenRow">均分横排</button>
           <button class="btn-primary" @click="saveTemplate">保存</button>
           <button class="btn-danger" @click="removeTemplate">删除</button>
+          </div>
         </div>
 
         <div class="design-toolbar">
           <span class="tb-label">图层底图</span>
           <CustomSelect v-model="selectedDesignId" :options="designOptions" width="290px" placeholder="选择已保存工程" />
-          <button class="btn-ghost" :disabled="!candidateDesign" @click="applySelectedDesign()">应用工程</button>
-          <button v-if="candidateSizeWarning" class="btn-ghost" @click="applySelectedDesign(true)">匹配工程尺寸并应用</button>
+          <button
+            data-testid="tpl-apply-design"
+            class="btn-ghost"
+            :disabled="applyDesignButton.disabled"
+            :title="applyDesignButton.title"
+            @click="applySelectedDesign(applyDesignButton.match)"
+          >{{ applyDesignButton.text }}</button>
           <button class="btn-ghost" @click="editBackgroundDesign">{{ activeTpl.backgroundDesign ? '编辑底图工程' : bgUrl ? '将底图转为图层编辑' : '制作新底图' }}</button>
           <button v-if="hasBackground" class="btn-ghost" @click="uploadBackground">更换为图片</button>
           <button v-if="activeTpl.backgroundDesign" class="btn-ghost" @click="removeBackground">移除工程底图</button>
         </div>
+
+        <!--
+          状态条带：把原先散落的 4–8 行裸 `.warn-line` 收进一个有边框底色的容器里。
+          此前它们夹在工具栏与字段面板之间，视觉上像工具栏「漏出来的几行」。
+          **`.warn-line` 类名不改**：`bg-fidelity.cjs` 的静态守卫、`e2e-grid`、`design-e2e`
+          都把它当锚点（改名要连带改 4 处断言，风险大于收益）。它现在读作「状态行」，
+          真正的警告由 `warn-strong` 修饰类加色。
+        -->
+        <div v-if="showStatusBand" class="status-band">
         <p v-if="activeDesign" class="warn-line">
           底图工程：{{ activeDesign.name }} · 固定版本 v{{ activeDesign.revision }} · {{ activeDesign.artboard.w }}×{{ activeDesign.artboard.h }}mm
         </p>
+        <!--
+          候选工程提示必须排在「底图工程」那行**之后**：design-e2e.cjs 用
+          `document.querySelector('.warn-line')` 取**第一个**并要求它是「底图工程」行。
+          此前这个提示只被当作「显示第二个按钮」的开关，文案从不显示——用户选了尺寸
+          不匹配的工程，界面只说「多出一个按钮」，不告诉他差在哪。
+        -->
+        <p v-if="candidateSizeHint" class="warn-line warn-strong">选中的工程{{ candidateSizeHint }}</p>
         <p v-if="designSizeWarning" class="warn-line warn-strong">{{ designSizeWarning }}，请调整工程或成品尺寸后保存</p>
-
-        <!-- 多选对齐条：选中 ≥2 个字段时出现 -->
-        <div v-if="multiSel.size > 1" class="align-bar">
-          <span class="align-label">已选 {{ multiSel.size }} 个字段</span>
-          <button class="btn-ghost btn-mini" @click="alignSelected('left')">左对齐</button>
-          <button class="btn-ghost btn-mini" @click="alignSelected('center-h')">水平居中</button>
-          <button class="btn-ghost btn-mini" @click="alignSelected('right')">右对齐</button>
-          <button class="btn-ghost btn-mini" @click="alignSelected('top')">顶对齐</button>
-          <button class="btn-ghost btn-mini" @click="alignSelected('center-v')">垂直居中</button>
-          <button class="btn-ghost btn-mini" @click="alignSelected('bottom')">底对齐</button>
-        </div>
-
         <p v-if="!activeDatasetId" class="warn-line">先选择数据集，字段面板和真实数据预览才会出现</p>
         <p v-if="activeDatasetId && hiddenFieldCount" class="warn-line">
           {{ hiddenFieldCount }} 个字段未启用打印（数据表格列头点「印」可开启）
@@ -1408,6 +1511,19 @@ onBeforeUnmount(() => {
         <p v-else-if="bgDpi" class="warn-line">
           底图 {{ activeTpl.bgSize.width }}×{{ activeTpl.bgSize.height }}px · {{ bgDpi.text }}（{{ bgDpi.advice }}）
         </p>
+        </div>
+
+        <!-- 多选对齐条：选中 ≥2 个字段时出现（移到状态条带之后——它是选中态的临时工具，
+             与「模板/底图状态」不是一类信息） -->
+        <div v-if="multiSel.size > 1" class="align-bar">
+          <span class="align-label">已选 {{ multiSel.size }} 个字段</span>
+          <button class="btn-ghost btn-mini" @click="alignSelected('left')">左对齐</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('center-h')">水平居中</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('right')">右对齐</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('top')">顶对齐</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('center-v')">垂直居中</button>
+          <button class="btn-ghost btn-mini" @click="alignSelected('bottom')">底对齐</button>
+        </div>
 
         <!-- 字段面板：数据页启用「印」的字段平铺于此，点击即加入画布 -->
         <div v-if="activeDatasetId" class="field-palette">
@@ -1611,7 +1727,14 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <aside class="props" :class="{ disabled: !selectedField && !bgSelected }">
+          <!--
+            属性面板 = **浮层抽屉**（照搬底图制作页的 .designer-panel.inspector）：
+            绝对定位、不占 flex 列，只在选中字段/底图时出现。
+            此前它是常驻 210px 的 flex 列：默认 1280×800 窗口下把 .canvas-wrap 挤到 739px，
+            而画布固定 760px → 右边缘被裁 21px 并出现横向滚动条（960 窗口下被裁 341px）。
+            改成浮层后 canvas-wrap 恢复整宽，默认窗口下 760px 画布完整可见。
+          -->
+          <aside v-if="selectedField || bgSelected" class="props">
             <h3 class="side-title">{{ bgSelected ? '底图' : '字段属性' }}</h3>
             <!-- 底图选中：只报信息与删除方式，不放按钮——删除统一走 Delete 键 -->
             <template v-if="bgSelected && !selectedField">
@@ -1628,7 +1751,7 @@ onBeforeUnmount(() => {
               <p class="kbd-hint">按 Delete 键移除底图，图片文件会一并删掉</p>
               </template>
             </template>
-            <template v-if="selectedField">
+            <template v-else-if="selectedField">
               <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">
                 该字段的数据列在当前数据集中不存在——请删除本字段，或从上方字段面板重新添加
               </div>
@@ -1675,7 +1798,6 @@ onBeforeUnmount(() => {
               <button class="btn-danger prop-remove" @click="removeField">移除字段</button>
               <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除选中项</p>
             </template>
-            <p v-else class="props-empty">点击画布中的字段查看属性，拖拽调整位置</p>
           </aside>
         </div>
       </div>
@@ -1711,8 +1833,32 @@ onBeforeUnmount(() => {
 
 .head-actions { display: flex; align-items: center; gap: 12px; }
 
-.ok-text { font-size: 12px; color: var(--ok); }
-.error-text { font-size: 12px; color: var(--cinnabar); }
+/* 提示条：与底图制作页 `.notice` 同一套（整条带底色、按钮靠右） */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.notice.success { background: var(--ok-soft); color: var(--ok); }
+.notice.error { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+/* 模板页的按钮都是类选择器（没有全局 button 元素样式），所以这里要写全，
+   并用 currentColor 跟随所在条带的配色（error 是琥珀色、success 是绿色） */
+.notice-close {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
 
 .btn-primary {
   padding: 7px 18px;
@@ -1855,17 +2001,30 @@ onBeforeUnmount(() => {
 
 .editor { flex: 1; min-width: 0; }
 
+/* 工具栏：外层仍是卡片（e2e 用 `.editor .toolbar .btn-primary` / `.toolbar button` /
+   `.toolbar .custom-select` 定位，**外层类名与 DOM 顺序都不能动**），内部改成两条显式行。
+   此前是一条 flex-wrap 长龙，折行位置随窗口宽度随机，会把「保存/删除」与「撤销/重做」劈开。 */
 .toolbar {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 7px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--paper-card);
   margin-bottom: 10px;
 }
+
+.tb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 第二行（数据集 + 操作）：操作组靠右，与左侧的数据集选择分开 */
+.tb-row-actions .btn-icon:first-of-type { margin-left: 12px; }
+.tb-row-actions .btn-primary { margin-left: auto; }
 
 .name-input {
   width: 140px;
@@ -1904,10 +2063,22 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.warn-line { font-size: 12px; color: var(--stone); margin: 4px 0; }
+/* 状态条带：把散落的 `.warn-line` 收进一个有边框底色的容器。
+   注意 `.warn-line` 是**测试锚点**（bg-fidelity 静态守卫 / e2e-grid / design-e2e 都钉它），
+   只能加容器、不能改名；它现在的语义是「状态行」，警告靠 `.warn-strong` 加色。 */
+.status-band {
+  padding: 8px 12px;
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.warn-line { font-size: 12px; color: var(--stone); margin: 3px 0; }
 .warn-strong { color: var(--warn); }
 
-.workbench { display: flex; gap: 16px; align-items: flex-start; }
+/* position:relative 是属性抽屉的定位参照（抽屉 absolute 挂在它右侧） */
+.workbench { position: relative; display: flex; gap: 16px; align-items: flex-start; }
 
 .canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
 
@@ -1927,7 +2098,19 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.design-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+/* 与上方 `.toolbar` 同款卡片容器。此前是无边框无底色的裸行，视觉上像工具栏「漏出来的第三行」，
+   但它其实是独立的一组（图层底图），套上卡片才有正确的层级。 */
+.design-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-card);
+}
 .canvas-design { position: absolute; inset: 0; cursor: pointer; overflow: hidden; }
 .canvas-design.selected { outline: 2px solid var(--cinnabar); outline-offset: -2px; }
 
@@ -2133,16 +2316,25 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+/* 属性抽屉：绝对定位浮在画布右侧，**不占 flex 列**（对齐底图制作页的 .designer-panel.inspector）。
+   之前是常驻 210px 的 flex 列，默认 1280×800 窗口下把 .canvas-wrap 挤到 739px，
+   而画布固定 760px → 右边缘被裁 21px + 横向滚动条；960 窗口下被裁 341px。
+   宽度取 240px（底图页是 264）：模板页画布是**固定 760px**、不会跟着缩，
+   抽屉每宽 1px 就多盖住画布 1px，所以收窄一点。 */
 .props {
-  width: 210px;
-  flex-shrink: 0;
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 40;
+  width: 240px;
+  max-height: calc(100vh - 200px);
+  overflow: auto;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--paper-card);
+  box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22);
 }
-
-.props.disabled { opacity: 0.75; }
 
 .prop-row {
   display: flex;
@@ -2279,6 +2471,4 @@ onBeforeUnmount(() => {
 .prop-meta { font-size: 11px; color: var(--stone); }
 
 .prop-remove { width: 100%; margin-top: 4px; }
-
-.props-empty { font-size: 12px; color: var(--stone); }
 </style>

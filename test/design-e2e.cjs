@@ -728,6 +728,68 @@ async function main() {
   ok(designs.listDesigns().find((item) => item.id === other.id).lastUsedAt > other.lastUsedAt, '打开后被记入「常用」（lastUsedAt 刷新，且不碰版本号）')
   ok(designs.getDesign(idCard.id).layers.some((layer) => layer.editorOnly === true), '打开别的工程不会改动先前那份证件预设工程')
 
+  /*
+   * 交互优化（v0.5.0）：① 顶部提示条 5 秒自动消失；② 删「未加入素材库的图」前二次确认
+   * （同步删原图不可撤销，安全姿态对齐 I-32）；③ 删临时件**只丢引用该素材的快照**（外科清栈，
+   * 不再整栈清空）；④ 撤销栈上限从 5 放宽到 50。都是「用户看不见但一定会踩」的交互性质，
+   * 只有真界面能验。
+   */
+  // 先做一次「无关编辑」，稍后用它证明删临时件没有把整栈清空
+  const layersBeforeRect = await evaluate(`document.querySelectorAll('[data-layer-id]').length`)
+  await click('[data-testid="design-add-rect"]')
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforeRect + 1}`, '先加一个矩形（无关编辑）')
+
+  const toastJpeg = nativeImage.createFromBuffer(jpeg).resize({ width: 90 }).toJPEG(80)
+  const toastBytes = JSON.stringify(toastJpeg.toString('base64'))
+  const layersBeforeToast = await evaluate(`document.querySelectorAll('[data-layer-id]').length`)
+  await evaluate(`(() => {
+    const make=(b64,n,t)=>{const bin=atob(b64);const a=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new File([a],n,{type:t})}
+    const dt=new DataTransfer(); dt.items.add(make(${toastBytes}, '提示条验证.jpg', 'image/jpeg'))
+    document.querySelector('.canvas-scroll').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforeToast + 1}`, '粘贴用于验证的图片')
+  // 只认「通用提示条」，避开导出完成条（.export-done 常驻直到手动关）
+  const noticeSel = `.notice.success:not(.export-done)`
+  await waitFor(`(document.querySelector('${noticeSel}')?.textContent||'').includes('已加入图片图层')`, '粘贴后出现提示条')
+  await waitFor(`!document.querySelector('${noticeSel}')`, '提示条 5 秒后自动消失', 9000)
+  ok(true, '顶部提示条 5 秒后自动消失（无需手动关闭）')
+
+  // ② 删临时件前二次确认：先取消（图层与原图都还在），再确认（原图被同步清理）
+  const dToast = await evaluate(draftDesign)
+  const toastLayer = dToast.layers[dToast.layers.length - 1]
+  const toastFile = path.join(DATA, designs.assetInfo(toastLayer.assetId).path)
+  ok(fs.existsSync(toastFile), '待删的临时原件已在磁盘')
+  await click(`[data-layer-id="${toastLayer.id}"]`)
+  await click('[data-testid="design-group-delete"]')
+  await waitFor(`Boolean(document.querySelector('.cd-box'))`, '删临时件弹出确认框')
+  ok((await evaluate(`document.querySelector('.cd-title')?.textContent||''`)).includes('清理原图'), '确认框点明会同时清理原图')
+  await clickText('.cd-actions button', '取消')
+  await waitFor(`!document.querySelector('.cd-box')`, '取消后关闭确认框')
+  ok(await evaluate(`Boolean(document.querySelector('[data-layer-id="${toastLayer.id}"]'))`), '取消删除后图层仍在')
+  ok(fs.existsSync(toastFile), '取消删除后原件仍在（没被误删）')
+  await click(`[data-layer-id="${toastLayer.id}"]`)
+  await click('[data-testid="design-group-delete"]')
+  await waitFor(`Boolean(document.querySelector('.cd-box'))`, '再次弹出确认框')
+  await clickText('.cd-actions button', '删除图层并清理原图')
+  await waitNode(() => !fs.existsSync(toastFile), '确认后临时原件被清理')
+  ok(!fs.existsSync(toastFile), '确认后临时原件被同步删除')
+
+  // ③ 外科清栈：删临时件后，与它无关的编辑历史必须还在（旧的「整栈清空」会让 undo 立刻变灰）
+  ok(!(await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`)), '删临时件后撤销栈未被清空（无关编辑仍可撤）')
+  let backSteps = 0
+  while (backSteps < 60 && !(await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`))) {
+    await click('[data-testid="design-undo"]')
+    backSteps += 1
+  }
+  ok(backSteps > 0 && await evaluate(`document.querySelectorAll('[data-layer-id]').length===${layersBeforeRect}`), '无关编辑（先加的那个矩形）仍能撤销回去')
+
+  // ④ 撤销栈上限已从 5 放宽到 50：连加 12 个矩形能一路全撤（若仍是 5 则只能撤回 7 个）
+  const rectsBase = await evaluate(`document.querySelectorAll('[data-layer-id]').length`)
+  for (let i = 0; i < 12; i += 1) await click('[data-testid="design-add-rect"]')
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${rectsBase + 12}`, '连加 12 个矩形')
+  for (let i = 0; i < 12; i += 1) await click('[data-testid="design-undo"]')
+  ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===${rectsBase}`), '连加 12 个矩形可全部撤销（上限已从 5 放宽到 50）')
+
   ok(errors.length === 0, `界面无控制台错误：${errors.join('; ')}`)
   console.log(`DESIGN_E2E_OK checks=${checks} artifacts=${OUTPUT}`)
   ui.destroy()
