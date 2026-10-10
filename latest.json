@@ -1,5 +1,5 @@
 {
   "version": "0.4.0",
-  "notes": "底图制作新增图层分组、可保存参考线和高清 PNG 导出，支持指定 DPI 与透明背景。",
+  "notes": "底图制作升级为可编辑的图层工程（分组 / 参考线 / 高清 PNG 导出），并新增本地素材库：常用图片跨工程复用，同一张图只存一份原件。",
   "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }
