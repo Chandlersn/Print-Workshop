@@ -754,25 +754,19 @@ async function main() {
   await waitFor(`!document.querySelector('${noticeSel}')`, '提示条 5 秒后自动消失', 9000)
   ok(true, '顶部提示条 5 秒后自动消失（无需手动关闭）')
 
-  // ② 删临时件前二次确认：先取消（图层与原图都还在），再确认（原图被同步清理）
+  // ② 删临时件不再弹确认（用户要求别打断操作）：原图仍随图层同步清理，改由顶部提示条告知
   const dToast = await evaluate(draftDesign)
   const toastLayer = dToast.layers[dToast.layers.length - 1]
   const toastFile = path.join(DATA, designs.assetInfo(toastLayer.assetId).path)
   ok(fs.existsSync(toastFile), '待删的临时原件已在磁盘')
   await click(`[data-layer-id="${toastLayer.id}"]`)
   await click('[data-testid="design-group-delete"]')
-  await waitFor(`Boolean(document.querySelector('.cd-box'))`, '删临时件弹出确认框')
-  ok((await evaluate(`document.querySelector('.cd-title')?.textContent||''`)).includes('清理原图'), '确认框点明会同时清理原图')
-  await clickText('.cd-actions button', '取消')
-  await waitFor(`!document.querySelector('.cd-box')`, '取消后关闭确认框')
-  ok(await evaluate(`Boolean(document.querySelector('[data-layer-id="${toastLayer.id}"]'))`), '取消删除后图层仍在')
-  ok(fs.existsSync(toastFile), '取消删除后原件仍在（没被误删）')
-  await click(`[data-layer-id="${toastLayer.id}"]`)
-  await click('[data-testid="design-group-delete"]')
-  await waitFor(`Boolean(document.querySelector('.cd-box'))`, '再次弹出确认框')
-  await clickText('.cd-actions button', '删除图层并清理原图')
-  await waitNode(() => !fs.existsSync(toastFile), '确认后临时原件被清理')
-  ok(!fs.existsSync(toastFile), '确认后临时原件被同步删除')
+  await waitNode(() => !fs.existsSync(toastFile), '临时原件被同步清理')
+  ok(!(await evaluate(`Boolean(document.querySelector('.cd-box'))`)), '删临时件不再弹确认框（不打断操作）')
+  ok(!fs.existsSync(toastFile), '临时原件随图层同步删除（删除行为不变）')
+  ok(await evaluate(`!Boolean(document.querySelector('[data-layer-id="${toastLayer.id}"]'))`), '图层已删除')
+  await waitFor(`(document.querySelector('.notice.success:not(.export-done)')?.textContent||'').includes('原图已同步清理')`, '顶部提示条告知原图已清理')
+  ok(true, '顶部提示条告知「未加入素材库的原图已同步清理」（非阻塞，替代原确认框）')
 
   // ③ 外科清栈：删临时件后，与它无关的编辑历史必须还在（旧的「整栈清空」会让 undo 立刻变灰）
   ok(!(await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`)), '删临时件后撤销栈未被清空（无关编辑仍可撤）')

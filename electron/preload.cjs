@@ -86,6 +86,7 @@ contextBridge.exposeInMainWorld('printpress', {
   getDesign: (id, revision) => ipcRenderer.invoke('design:get', id, revision),
   saveDesign: (design) => ipcRenderer.invoke('design:save', design),
   deleteDesign: (id) => ipcRenderer.invoke('design:delete', id),
+  purgeOrphanDesigns: () => ipcRenderer.invoke('design:purgeOrphanDirs'),
   uploadDesignImageDialog: () => ipcRenderer.invoke('design:importDialog'),
   uploadDesignImageBytes: (payload) => ipcRenderer.invoke('design:importBytes', payload),
   importDesignBackground: (payload) => ipcRenderer.invoke('design:importBackground', payload),
@@ -113,6 +114,7 @@ contextBridge.exposeInMainWorld('printpress', {
   rebuildAssetThumb: (id) => ipcRenderer.invoke('asset:rebuildThumb', id),
   listAssetOrphans: () => ipcRenderer.invoke('asset:listOrphans'),
   purgeAssetOrphans: (hashes) => ipcRenderer.invoke('asset:purgeOrphans', hashes),
+  openAssetFolder: () => ipcRenderer.invoke('asset:openFolder'),
 
   // 打印
   printValidate: (payload) => ipcRenderer.invoke('print:validate', payload),

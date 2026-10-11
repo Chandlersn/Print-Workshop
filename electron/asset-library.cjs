@@ -52,6 +52,19 @@ function hashOf(assetId) {
 function thumbRelative(assetId) {
   return `${THUMB_DIR}/${hashOf(assetId)}.png`
 }
+/**
+ * 素材库原件所在目录的**绝对路径**（`<dataDir>/design-assets`）。
+ *
+ * 只服务于「打开素材库文件夹」这一个动作。路径完全由本模块按数据目录推导，
+ * **不接受任何外部输入**——它会交给 `shell.openPath`（启动系统程序），
+ * 渲染进程若能指定路径就等于拿到「以当前用户身份打开任意文件」的能力（同 I-28 口径）。
+ * 目录可能尚不存在（从未导入过素材），这里顺手建出来，保证按钮点了总能用。
+ */
+function originalsDir() {
+  const dir = resolveInsideDataDir('design-assets')
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
 function cleanText(value, max, fallback) {
   const text = String(value == null ? '' : value).replace(/[\x00-\x1f]/g, '').trim().slice(0, max)
   return text || fallback
@@ -113,6 +126,26 @@ function ensureThumbnail(entry, options, force = false) {
 // ─────────────────────────── 读 ───────────────────────────
 
 /**
+ * 原件还在不在（只做**存在性**探测：不读字节、不校验哈希——列表要快）。
+ *
+ * 素材库索引与原件是两套东西：用户在文件管理器里删掉 `design-assets/<hash>.png`，
+ * 或清理工具误删，索引里那条记录**不会自动消失**。这种「点开就是空图」的条目
+ * 不该继续出现在列表里，但也不能静默丢掉记录 ⇒ 列表把它们单独报出来（`missing`），
+ * 由界面提示用户「文件已被删除」。
+ *
+ * @returns {string|null} `design-assets/<hash>.<ext>` 相对路径；原件不在则 null
+ */
+function originalRelative(assetId) {
+  let hash
+  try { hash = hashOf(assetId) } catch { return null }
+  for (const ext of ['png', 'jpg']) {
+    const relative = `design-assets/${hash}.${ext}`
+    try { if (fs.existsSync(resolveInsideDataDir(relative))) return relative } catch { /* 越界或不存在 */ }
+  }
+  return null
+}
+
+/**
  * 素材列表：搜索 + 标签筛选 + 收藏 + 归档 + 分页。
  *
  * 排序：**收藏的排前面**，再按更新时间倒序——「常用素材」应该一眼看到，
@@ -120,6 +153,9 @@ function ensureThumbnail(entry, options, force = false) {
  *
  * 标签筛选是 **AND**（选中的标签要全部命中）：多点是收窄，不是扩大。
  * 分页是硬要求（计划 §3.2「列表分页并限制单页数量」），大素材库不能一次全量返回。
+ *
+ * **原件已被删除的条目不进列表**（`items` / `total` 都不含），另外经 `missing`
+ * 单独报给界面——它们既渲染不出来也插不进画布，混在列表里只会让用户白点一次。
  */
 function listLibrary(opts = {}) {
   const query = cleanText(opts.query, 80, '').toLowerCase()
@@ -145,8 +181,23 @@ function listLibrary(opts = {}) {
     if (Boolean(a.favorite) !== Boolean(b.favorite)) return a.favorite ? -1 : 1
     return String(b.updatedAt).localeCompare(String(a.updatedAt))
   })
+
+  // 分流必须在分页**之前**：否则 total 会把死条目算进去，末页还会出现「空一格」。
+  const alive = []
+  const missing = []
+  for (const entry of matched) {
+    if (originalRelative(entry.assetId)) alive.push(entry)
+    else missing.push({ assetId: entry.assetId, displayName: entry.displayName })
+  }
+
   const start = (page - 1) * pageSize
-  return { items: matched.slice(start, start + pageSize), total: matched.length, page, pageSize }
+  return {
+    items: alive.slice(start, start + pageSize),
+    total: alive.length,
+    page,
+    pageSize,
+    missing,
+  }
 }
 
 function getEntry(assetId) {
@@ -370,6 +421,6 @@ function discardIfEphemeral(assetId, options = {}) {
 
 module.exports = {
   listLibrary, getEntry, listTags, upsert, adopt, updateMetadata, archive, restore, rebuildThumbnail,
-  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, discardIfEphemeral,
+  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, discardIfEphemeral, originalsDir,
   THUMB_MAX_SIDE, LIMITS,
 }

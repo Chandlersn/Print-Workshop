@@ -60,7 +60,7 @@ const CONTRACT = [
   { id: 'I-25', file: 'test/design-render.cjs', anchor: '== 仅编辑可见的图层绝不出片（静态守卫）==' },
   { id: 'I-26', file: 'test/e2e-harness.cjs', anchor: '== 6. 打包必须显式关闭 electron-builder 自身的发布（v0.2.13 空包真凶） ==' },
   { id: 'I-27', file: 'test/design-presets.cjs', anchor: '== 内置预设：参考框一律「仅编辑可见」，出片时一个图层都不印 ==' },
-  { id: 'I-28', file: 'test/api-cli.cjs', anchor: '== 10. 打开导出文件不接受路径参数（I-28） ==' },
+  { id: 'I-28', file: 'test/api-cli.cjs', anchor: '== 10. 打开类操作不接受路径参数（I-28） ==' },
   { id: 'I-29', file: 'test/designs.cjs', anchor: '使用记录（design:touch）绝不动版本号，否则下次保存会撞 DESIGN_CONFLICT' },
   { id: 'I-30', file: 'test/designs.cjs', anchor: '门槛是用户保存过' },
   { id: 'I-31', file: 'test/asset-library.cjs', anchor: '**同一字节内容只存一份原件**' },
@@ -69,6 +69,7 @@ const CONTRACT = [
   { id: 'I-34', file: 'test/ipc-hardening.cjs', anchor: '== 4f. 模板页属性面板必须是浮层，不许占列（前端静态核查） ==' },
   { id: 'I-35', file: 'test/ipc-hardening.cjs', anchor: '== 10. 「检查更新」必须真能触发更新（前端静态核查） ==' },
   { id: 'I-36', file: 'test/ipc-hardening.cjs', anchor: '== 11. 应用内说明与 docs/使用说明.md 的章节骨架必须一致（I-36） ==' },
+  { id: 'I-37', file: 'test/designs.cjs', anchor: '清理残留：只回收「不在索引」的工程目录，索引里的与形状不符的都不动（I-37）' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

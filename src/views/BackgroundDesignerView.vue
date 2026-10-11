@@ -794,21 +794,10 @@ function resetCrop() {
 function toggleLayer(layer, key) { commit((doc) => { const target = doc.layers.find((item) => item.id === layer.id); target[key] = !target[key] }) }
 function removeSelected() {
   if (!editable.value.length) return
-  // 先「预演」一遍：这次删除会让哪些素材不再被任何图层引用。
-  // 其中 source 为 ephemeral（临时件：粘贴/拖入/对话框直接加入，未加入素材库）的原件
-  // 会被同步删除，且不可撤销——这是破坏性后果，必须先确认（与 I-32 显式清理同一安全姿态）。
-  const preview = removeSelection(clone(design.value), selectedIds.value, { expandGroups: false })
-  const usedAfter = new Set(preview.design.layers.filter((layer) => layer.type === 'image' && layer.assetId).map((layer) => layer.assetId))
-  const ephemeralOrphans = Object.keys(preview.design.assets).filter((id) => !usedAfter.has(id) && design.value.assets[id]?.source === 'ephemeral')
-  if (ephemeralOrphans.length) {
-    pending.value = {
-      title: '删除图层并清理原图',
-      message: `选中的图片里有 ${ephemeralOrphans.length} 张还没加入素材库。删除图层会同时删除它们的原图，且不可撤销。\n想保留原图，请先点图层行的「加入素材库」；已加入素材库的图不受影响。`,
-      confirmText: '删除图层并清理原图',
-      action: applyRemoveSelected,
-    }
-    return
-  }
+  // 删图层会把「没加入素材库的临时件原图」（粘贴 / 拖入 / 「＋ 图片」对话框加入）一并清理，
+  // 且不可恢复。这里**刻意不弹确认框**——2026-10-11 用户明确要求删图时别打断操作。
+  // 清理结果由顶部提示条告知（见 discardOrphanedEphemeral 里设置的 message），
+  // 已加入素材库（managed）的图不受影响。
   applyRemoveSelected()
 }
 function applyRemoveSelected() {
@@ -1569,7 +1558,10 @@ button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
 .workspace-resizer:hover::after, .designer-workspace.tools-resizing .workspace-resizer::after { background: var(--cinnabar-soft); }
 .designer-workspace.tools-resizing { user-select: none; cursor: col-resize; }
 /* 素材库抽屉：浮在画布左侧（覆盖而非占列），打开不再挤压画布；内部自行滚动；点外部收起 */
-.designer-panel.asset-library { position: absolute; top: 0; bottom: 0; left: calc(var(--tools-w, 176px) + 12px); width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
+/* 素材库浮层顶部让开画布工具栏那一行（撤销 / 重做 / 上移 / 下移 / 置顶 / 置底）：
+   它原本 top: 0，从工作区顶部铺下来，会把工具栏左半整排盖住。工具栏高 48px，再留 8px 间隙
+   （2026-10-11 用户要求：别遮挡那一排按钮）。 */
+.designer-panel.asset-library { position: absolute; top: 56px; bottom: 0; left: calc(var(--tools-w, 176px) + 12px); width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
 /* 属性面板抽屉：浮在画布右侧；选中图层自动弹出、点空白画布取消选中自动收起（无手动开关）；
    打开时工具条与状态栏让出其宽度（缩放/保存状态不被盖住） */
 .designer-panel.inspector { position: absolute; top: 0; bottom: 0; right: 0; width: 264px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }

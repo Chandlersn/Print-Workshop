@@ -1,3 +1,11 @@
+<script>
+/**
+ * 模块级（不是组件级）：同一批「原件已被删除」在**同一个应用会话内只提示一次**。
+ * 放在组件里的话，侧栏每关一次再开就会重弹一遍，同一件事提醒 N 次等于骚扰。
+ */
+const reportedMissing = new Set()
+</script>
+
 <script setup>
 /**
  * 本地素材库侧栏（v0.5.0 M1）。
@@ -51,6 +59,7 @@ async function refresh() {
     total.value = res.total || 0
     page.value = res.page || 1
     pageSize.value = res.pageSize || pageSize.value
+    noteMissing(res.missing)
   } catch (err) {
     error.value = err?.message || String(err)
     items.value = []
@@ -68,20 +77,33 @@ async function refreshTags() {
   }
 }
 
+// 缩略图缺失（纯 Node 入库 / 缓存被清 / 生成失败）时，**直接让 pp://media 服务原件**：
+// 主进程的 pp 协议认得 `asset_<sha256>`，会解析成 design-assets 里的真实文件，
+// 不用再往渲染层搬一次路径，也不必为每张图多打一次 IPC。
+// 缩略图文件本身坏掉（被清缓存）也走同一条退路；连原件都读不出才落回「图」占位。
+const brokenThumbs = reactive({})    // assetId → 缩略图加载失败，改用原件
+const brokenOriginals = reactive({}) // assetId → 原件也读不出，落回占位
+
 function thumbUrl(item) {
-  return item.thumbFile ? mediaUrl(item.thumbFile) : ''
+  if (brokenOriginals[item.assetId]) return ''
+  if (item.thumbFile && !brokenThumbs[item.assetId]) return mediaUrl(item.thumbFile)
+  return mediaUrl(item.assetId)
+}
+function onThumbError(item) {
+  if (item.thumbFile && !brokenThumbs[item.assetId]) { brokenThumbs[item.assetId] = true; return }
+  brokenOriginals[item.assetId] = true
 }
 
-// 缩略图缺失（纯 Node 入库 / 缓存被清）时，现场拉原件兜底显示，不阻塞列表
-const fallbackUrls = reactive({})
-async function ensureFallback(item) {
-  if (item.thumbFile || fallbackUrls[item.assetId]) return
-  try {
-    const { asset } = await pp.getAsset(item.assetId)
-    if (asset?.path) fallbackUrls[item.assetId] = mediaUrl(asset.path)
-  } catch {
-    /* 原件不在：保持占位即可 */
-  }
+// 原件已被删除的条目：后端已把它们挡在列表外，这里只负责把「发生过什么」告诉用户。
+const missingNotice = ref([])
+function noteMissing(list) {
+  const fresh = (Array.isArray(list) ? list : []).filter((m) => m && m.assetId && !reportedMissing.has(m.assetId))
+  if (!fresh.length) return
+  for (const m of fresh) reportedMissing.add(m.assetId)
+  missingNotice.value = missingNotice.value.concat(fresh)
+}
+function dismissMissing() {
+  missingNotice.value = []
 }
 
 function resetPage() {
@@ -129,6 +151,17 @@ async function importDialog() {
       await refreshTags()
       await refresh()
     }
+  } catch (err) {
+    error.value = err?.message || String(err)
+  }
+}
+
+// 打开素材库原件文件夹（design-assets/）：路径由主进程按数据目录推导，
+// 前端只发「打开」这件事本身——`shell.openPath` 会启动系统程序，不让渲染层传路径（I-28）。
+async function openFolder() {
+  error.value = ''
+  try {
+    await pp.openAssetFolder()
   } catch (err) {
     error.value = err?.message || String(err)
   }
@@ -238,6 +271,7 @@ onMounted(() => {
       <button data-testid="asset-import" :disabled="loading" @click="importDialog">＋ 导入图片</button>
       <button data-testid="asset-cleanup" :disabled="loading" title="扫描并清理不被任何工程或素材库引用的孤立原件" @click="scanOrphans">清理未引用</button>
       <button data-testid="asset-reset-filter" v-if="hasFilters" @click="() => { query=''; activeTags=[]; favoriteOnly=false; includeArchived=false; resetPage(); refresh() }">清除筛选</button>
+      <button class="asset-open-folder" data-testid="asset-open-folder" :disabled="loading" title="在系统文件管理器里打开素材库原件所在的文件夹" @click="openFolder">打开素材库文件夹</button>
     </div>
 
     <input
@@ -284,8 +318,13 @@ onMounted(() => {
         @click="pick(item)"
       >
         <div class="asset-thumb">
-          <img v-if="thumbUrl(item)" :src="thumbUrl(item)" :alt="item.displayName" loading="lazy" @error="ensureFallback(item)" />
-          <img v-else-if="fallbackUrls[item.assetId]" :src="fallbackUrls[item.assetId]" :alt="item.displayName" loading="lazy" />
+          <img
+            v-if="thumbUrl(item)"
+            :src="thumbUrl(item)"
+            :alt="item.displayName"
+            loading="lazy"
+            @error="onThumbError(item)"
+          />
           <span v-else class="asset-thumb-ph">图</span>
         </div>
         <div class="asset-meta">
@@ -317,13 +356,32 @@ onMounted(() => {
       <button :disabled="page >= totalPages" data-testid="asset-next" @click="nextPage">下一页</button>
     </div>
 
+    <!-- 原件已被删除：告诉用户发生了什么，列表里对应的条目已经不渲染了 -->
+    <div v-if="missingNotice.length" class="asset-missing-mask" @click.self="dismissMissing">
+      <div class="asset-missing-box" role="alertdialog" aria-labelledby="asset-missing-title" data-testid="asset-missing-dialog">
+        <h4 id="asset-missing-title" class="asset-missing-title">素材文件已被删除</h4>
+        <p class="asset-missing-lead">
+          以下素材的原文件已不在磁盘上，无法再插入画布，已从列表中隐藏：
+        </p>
+        <ul class="asset-missing-list">
+          <li v-for="m in missingNotice" :key="m.assetId">{{ m.displayName }}</li>
+        </ul>
+        <p class="asset-missing-hint">如需继续使用，请重新导入这些图片。</p>
+        <div class="asset-missing-actions">
+          <button data-testid="asset-missing-ok" @click="dismissMissing">知道了</button>
+        </div>
+      </div>
+    </div>
+
   </aside>
 </template>
 
 <style scoped>
 .asset-library { display: flex; flex-direction: column; gap: 8px; }
-.asset-actions { display: flex; gap: 7px; }
+.asset-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .asset-actions button { flex: 1; font-size: 12px; padding: 7px 4px; }
+/* 「打开素材库文件夹」独占一行全宽：256px 侧栏里 4 个按钮并排会把文字挤成两行 */
+.asset-actions .asset-open-folder { flex: 1 1 100%; }
 .asset-search { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 13px; }
 .asset-filters { display: flex; flex-wrap: wrap; gap: 5px; }
 .chip { font-size: 11px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--ink-2); cursor: pointer; }
@@ -357,4 +415,17 @@ onMounted(() => {
 .asset-edit-actions button { flex: 1; font-size: 11px; padding: 5px; }
 .asset-pager { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .asset-pager button { font-size: 11px; padding: 5px 9px; }
+/* 「原件已被删除」提示弹窗（与 ConfirmDialog 同调的宣纸墨韵）。
+   整体下移到画布工具栏那一行（撤销 / 重做 / 上移 / 下移 / 置顶 / 置底）下方：原本垂直居中，
+   窗口一矮（≲720px）弹窗顶部就压到那排按钮上。给遮罩留出上方 216px 再居中 ⇒ 顶部始终 ≥216px
+   （工具栏底 ≈211px）；弹窗比可用空间还高时改为滚动，也不会顶到按钮上。 */
+.asset-missing-mask { position: fixed; inset: 0; background: rgba(30, 26, 20, 0.45); display: flex; align-items: center; justify-content: center; padding: 216px 20px 24px; overflow: auto; z-index: 120; }
+.asset-missing-box { width: 380px; max-width: calc(100vw - 40px); background: var(--paper-card); border: 1px solid var(--line-strong); border-radius: 10px; padding: 18px 20px; box-shadow: 0 8px 28px rgba(30, 26, 20, 0.18); }
+.asset-missing-title { margin: 0 0 8px; font-size: 15px; color: var(--cinnabar); }
+.asset-missing-lead { margin: 0 0 8px; font-size: 13px; line-height: 1.7; color: var(--ink-2); }
+.asset-missing-list { margin: 0 0 8px; padding-left: 18px; max-height: 180px; overflow: auto; font-size: 12px; line-height: 1.8; color: var(--ink); }
+.asset-missing-hint { margin: 0 0 14px; font-size: 12px; color: var(--stone); }
+.asset-missing-actions { display: flex; justify-content: flex-end; }
+.asset-missing-actions button { padding: 6px 16px; font-size: 13px; border: 1px solid var(--line-strong); border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer; }
+.asset-missing-actions button:hover { background: var(--cinnabar-soft); }
 </style>

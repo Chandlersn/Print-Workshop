@@ -307,6 +307,47 @@ try {
     const child = spawnSync(process.execPath, ['-e', "const d=require('./electron/designs.cjs'); const docs=d.listDesigns(); if(!docs.length || !d.getDesign(docs[0].id).layers.length)process.exit(2)"], { cwd: root, env: process.env, encoding: 'utf8' })
     assert.equal(child.status, 0, child.stderr)
   })
+  check('清理残留：只回收「不在索引」的工程目录，索引里的与形状不符的都不动（I-37）', () => {
+    const dirOf = (id) => path.join(tmp, 'designs', id)
+    // 前置：first 之前已被删除（deleteDesign 只移索引）⇒ 目录还在，正是要回收的「残留」
+    assert.equal(designs.listDesigns().some(d => d.id === first.id), false, '前置：first 已不在索引')
+    assert.equal(fs.existsSync(dirOf(first.id)), true, '前置：残留目录仍在磁盘上')
+
+    // 活工程：它的目录绝不能被清
+    const live = designs.saveDesign(draft())
+    assert.equal(fs.existsSync(dirOf(live.id)), true, '前置：活工程目录在磁盘上')
+
+    // 形状不符的目录：不认得的目录一律不碰
+    const stray = path.join(tmp, 'designs', 'not-a-design-dir')
+    fs.mkdirSync(stray, { recursive: true })
+    fs.writeFileSync(path.join(stray, 'keep.txt'), 'x')
+
+    const r = designs.purgeOrphanDirs()
+    assert.equal(r.removed.includes(first.id), true, 'first 的残留目录应被回收')
+    assert.equal(fs.existsSync(dirOf(first.id)), false, 'first 的残留目录确实没了')
+    assert.equal(fs.existsSync(dirOf(live.id)), true, '索引里的活工程目录绝不能被清')
+    assert.equal(r.removed.includes(live.id), false, '活工程不在回收清单里')
+    assert.equal(fs.existsSync(stray), true, '形状不符的目录不许碰')
+    assert.equal(typeof r.freed, 'number')
+    assert.equal(Array.isArray(r.skipped), true)
+
+    // 幂等：再清一次没有可清的
+    assert.equal(designs.purgeOrphanDirs().removed.length, 0)
+    rmDeep(stray)
+  })
+  check('清理残留的通道无参、路径只由目录名推导（I-37 静态守卫）', () => {
+    const op = api.describe().find(o => o.name === 'design:purgeOrphanDirs')
+    assert.ok(op, 'design:purgeOrphanDirs 已注册')
+    assert.equal(Object.keys(op.params).length, 0, '注册表声明零参数（渲染层无从传路径进来）')
+    assert.equal(op.write, true, '标为写操作（CLI 需显式授权）')
+    const src = fs.readFileSync(path.join(root, 'electron/designs.cjs'), 'utf8')
+    assert.match(src, /function purgeOrphanDirs\s*\(\s*\)/, 'purgeOrphanDirs 不接受任何参数')
+    assert.match(src, /if \(!DESIGN_ID\.test\(name\)\) continue/, '只认 design_<24hex> 形状的目录名')
+    assert.match(src, /if \(index\(\)\.some\(\(d\) => d\.id === name\)\) continue/, '删每个目录前重新读索引复核')
+    assert.match(src, /resolveInsideDataDir\(`designs\/\$\{name\}`\)/, '路径由目录名经数据目录守卫推导')
+    const pre = fs.readFileSync(path.join(root, 'electron/preload.cjs'), 'utf8')
+    assert.match(pre, /purgeOrphanDesigns:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('design:purgeOrphanDirs'\)/, 'preload 暴露零参函数')
+  })
   console.log(`\n${passed} design domain acceptance groups passed`)
 } finally {
   const relative = path.relative(__dirname, tmp)

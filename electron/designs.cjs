@@ -317,8 +317,64 @@ function deleteDesign(id) {
     if (used.length) throw new Error(`底图正在被模板使用：${used.map(t => t.name).join('、')}，请先移除引用`)
     saveJson('designs', all.filter(d => d.id !== id))
     // Keep source bytes and revision documents for unsaved drafts and undo history.
+    // 这些目录不会自己消失 —— 由 purgeOrphanDirs()（「关于 → 清理缓存与残留」）统一回收。
     return { ok: true }
   })
+}
+
+/** 递归求目录字节数；个别文件读不到就跳过，不因为一个文件放弃整个统计 */
+function dirBytes(dir) {
+  let total = 0
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name)
+      try { total += entry.isDirectory() ? dirBytes(p) : fs.statSync(p).size } catch { /* 读不到就跳过 */ }
+    }
+  } catch { /* 目录不存在 / 无权限，视为 0 */ }
+  return total
+}
+
+/**
+ * 回收「已删除工程的残留目录」。
+ *
+ * 为什么会有残留：`deleteDesign` 只从索引移除，`designs/<id>/` 与里面的版本 JSON 会留在磁盘上。
+ * 当初的理由是「未保存草稿与撤销历史」，但 2026-10-11 核查过：草稿活在 localStorage、撤销栈活在内存，
+ * 两者都不读这些文件；`referencedAssetIds` 也只遍历索引。所以它们是纯残留，且**没有任何界面入口**能清，
+ * 长期使用后 `designs/` 会堆满没人管的目录。由「关于 → 清理缓存与残留」统一回收。
+ *
+ * 安全口径（同 I-32）：
+ *   - 只扫 `designs/` 下的目录；路径由目录名经 `resolveInsideDataDir` 推导，**不接受任何外部路径**；
+ *   - 目录名不匹配 `design_<24hex>` 的一律跳过（不认识的目录绝不碰）；
+ *   - 只删**不在当前索引**里的；索引里有的一律不动（那是活工程）；
+ *   - 删每个目录前**重新读一次索引**复核，防「读索引 → 删目录」之间有人刚保存了新工程；
+ *   - 删不掉的（被占用 / 权限）如实报进 `skipped`，不静默吞。
+ *
+ * @returns {{removed: string[], freed: number, skipped: string[]}}
+ */
+function purgeOrphanDirs() {
+  const root = resolveInsideDataDir('designs')
+  if (!fs.existsSync(root)) return { removed: [], freed: 0, skipped: [] }
+  const removed = []
+  const skipped = []
+  let freed = 0
+  for (const name of fs.readdirSync(root)) {
+    if (!DESIGN_ID.test(name)) continue
+    const abs = resolveInsideDataDir(`designs/${name}`)
+    let stat
+    try { stat = fs.statSync(abs) } catch { continue }
+    if (!stat.isDirectory()) continue
+    // 逐个复核：只要索引里还有这个 id（哪怕刚保存进来的），就绝不删
+    if (index().some((d) => d.id === name)) continue
+    const size = dirBytes(abs)
+    try {
+      fs.rmSync(abs, { recursive: true, force: true })
+      removed.push(name)
+      freed += size
+    } catch {
+      skipped.push(name)
+    }
+  }
+  return { removed, freed, skipped }
 }
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, i) => {
@@ -476,4 +532,4 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource }

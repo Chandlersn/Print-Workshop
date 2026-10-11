@@ -474,8 +474,8 @@ console.log('== 8. 缓存 0 值语义 ==')
   ok(/const cacheOk = ref\(true\)/.test(app), '有独立的成功标志（0 不再兼任「成功」与「失败」）')
   ok(/cacheOk\.value = false/.test(app), '查询失败时置false')
   ok(/读取失败/.test(app), '失败有独立文案（不把故障说成「已无缓存」）')
-  ok(/:disabled="clearingCache \|\| \(cacheOk && cacheSize === 0\)"/.test(app),
-    '确认 0 时禁用；查询失败时 cacheOk=false 故仍可点（保留重试路径）')
+  ok(/<button class="footer-btn" :disabled="clearingCache" @click="onClearCache">/.test(app),
+    '按钮只在「清理中」禁用；缓存为 0 时仍可点 —— 同一按钮还要回收工程残留，不能按 cacheSize 挡死')
 }
 
 console.log('== 8b. 清理缓存「点了没反应」不许再复发 ==')
@@ -508,11 +508,15 @@ console.log('== 8b. 清理缓存「点了没反应」不许再复发 ==')
   // 界面：必须把结果说出来，且「排到下次启动」要和「已清掉」区分开
   const app = src('src/App.vue')
   ok(/const cacheMsg = ref\(''\)/.test(app), '界面有清理结果的状态位')
-  ok(/已清理 \$\{fmtCacheSize\(r\.freed\)\}/.test(app), '清掉了多少，如实说')
+  ok(/已清理缓存 \$\{fmtCacheSize\(r\.freed\)\}/.test(app), '缓存清掉了多少，如实说')
+  // 与缓存不同：工程残留是**曾经的用户数据**、删了不可恢复 —— 清掉了多少必须逐项报出来，
+  // 不能让它变成「点了个清理缓存，工程文件却悄悄没了」（I-37）
+  ok(/清理了 \$\{n\} 个已删除工程的残留/.test(app), '工程残留清掉了多少，也必须如实说')
+  ok(/purgeOrphanDesigns\(\)/.test(app), '「清理缓存」按钮顺带调用工程残留回收（界面一键两用）')
   ok(/if \(r\.freed >= 1024\)/.test(app),
     '不足 1KB 不报「已清理 0 KB」（Chromium 的 Cache 目录常年只有几十字节索引，报了是噪音）')
   ok(/正被系统占用，将在下次启动时清理/.test(app), '**当场清不掉的要交代去向**（不许「没反应」）')
-  ok(/已无可清理缓存/.test(app), '真的没缓存可清时也有话说')
+  ok(/已无可清理的缓存与残留/.test(app), '真的没缓存与残留可清时也有话说')
   ok(/r\.queued/.test(app) && /r\.failed/.test(app), '界面读的是 failed / queued，不是自己猜')
   ok(/cacheMsgFail\.value = true/.test(app), '异常路径有独立标志（不是只说「已无缓存」）')
   ok(/'cr-warn'/.test(app), '「排到下次启动」用警示色（需要用户知情）')

@@ -582,6 +582,17 @@ const OPS = {
     run: (p) => designs.deleteDesign(p.id),
   },
 
+  /**
+   * 回收「已删除工程的残留目录」：`deleteDesign` 只移索引、不删文件，`designs/<id>/`
+   * 会一直躺在磁盘上且没有别的入口能清。无参——路径只由目录名推导（`design_<24hex>`），
+   * 只删不在索引里的，删前逐个复核，绝不接受任何外部路径（同 I-32 口径）。
+   */
+  'design:purgeOrphanDirs': {
+    write: true,
+    params: {},
+    run: () => designs.purgeOrphanDirs(),
+  },
+
   'design:importDialog': {
     write: true,
     gui: 'dialog',
@@ -815,6 +826,24 @@ const OPS = {
     write: true,
     params: { hashes: { required: true, desc: '要清理的孤立原件 hash 列表（64 位十六进制）' } },
     run: (p) => assetLibrary.purgeOrphanOriginals(p.hashes),
+  },
+
+  /**
+   * 在系统文件管理器里打开**素材库原件文件夹**（`design-assets/`）。
+   *
+   * 与 `app:openDataDir` 同构：路径由领域层按数据目录推导，渲染进程**不传任何参数**。
+   * `shell.openPath` 会拿这个字符串去启动系统程序，渲染进程若能指定路径就等于
+   * 「以当前用户身份打开任意文件 / 可执行文件」——所以这里只暴露「打开素材库文件夹」这一件事（I-28）。
+   */
+  'asset:openFolder': {
+    gui: 'dialog',
+    params: {},
+    run: async (_p, ctx) => {
+      const dir = assetLibrary.originalsDir()
+      const err = await ctx.dialog.openPath(dir)
+      if (err) throw new Error(err)
+      return { ok: true, dir }
+    },
   },
 
   // ==================== 字体 ====================

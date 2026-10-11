@@ -90,6 +90,7 @@ const ADDED_CHANNELS = [
   'design:get',
   'design:save',
   'design:delete',
+  'design:purgeOrphanDirs',
   'design:importDialog',
   'design:importBytes',
   'design:importBackground',
@@ -110,6 +111,7 @@ const ADDED_CHANNELS = [
   'asset:rebuildThumb',
   'asset:listOrphans',
   'asset:purgeOrphans',
+  'asset:openFolder',
   // 应用内更新（I-35）：信标只负责提示，这两条才真下载 / 真安装；能力经 ctx.autoUpdate 注入
   'app:startUpdate',
   'app:installUpdate',
@@ -406,7 +408,7 @@ async function run() {
    * 所以路径只由主进程在真正写出 PNG 之后自己记着，注册表这两条只暴露动作本身。
    * 一旦有人「顺手」给它们加个 filePath 参数（哪怕只是为了让测试好写），这个守卫要立刻红。
    */
-  console.log('== 10. 打开导出文件不接受路径参数（I-28） ==')
+  console.log('== 10. 打开类操作不接受路径参数（I-28） ==')
   {
     const ops = api.describe().filter((o) => o.name === 'design:revealExport' || o.name === 'design:openExport')
     ok(ops.length === 2, 'design:revealExport / design:openExport 都已注册')
@@ -436,6 +438,21 @@ async function run() {
       'printer.cjs 只在导出成功后记下路径（失败 / 取消都不更新）')
     ok(!/function\s+\w*[Ll]astDesignPng\s*\(\s*\w/.test(printerSrc),
       'printer.cjs 的「打开最近导出」不接受传入路径')
+
+    // 同一红线的另两个实例：打开「数据目录 / 素材库文件夹」也必须无参。
+    // 路径由主进程按数据目录推导（app:openDataDir 读 PRINTPRESS_DATA_DIR、
+    // asset:openFolder 调 assetLibrary.originalsDir()），渲染层无处塞路径进来。
+    const folderOps = api.describe().filter((o) => o.name === 'app:openDataDir' || o.name === 'asset:openFolder')
+    ok(folderOps.length === 2, 'app:openDataDir / asset:openFolder 都已注册')
+    ok(folderOps.every((o) => o.gui === 'dialog'),
+      '两条都标 gui: dialog —— CLI / agent 的 ctx.dialog 为 null，一律 GUI_REQUIRED')
+    ok(folderOps.every((o) => Object.keys(o.params).length === 0),
+      '两条都不声明任何参数（渲染层无从传路径进来）')
+    ok(/openAssetFolder:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('asset:openFolder'\)/.test(preloadSrc),
+      'preload 暴露的 openAssetFolder 是零参函数（渲染层无处传路径）')
+    const folderBlock = apiSrc.slice(apiSrc.indexOf("'asset:openFolder'"), apiSrc.indexOf("'asset:openFolder'") + 320)
+    ok(/assetLibrary\.originalsDir\(\)/.test(folderBlock),
+      'asset:openFolder 的目录由 assetLibrary.originalsDir() 推导，不读任何入参')
   }
 }
 

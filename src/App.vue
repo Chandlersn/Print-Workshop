@@ -252,13 +252,28 @@ async function onClearCache() {
     const parts = []
     // 不足 1KB 不单独报——Chromium 的 Cache 目录里常年只有几十字节的索引文件，
     // 报一句「已清理 0 KB」纯属噪音，真正要说的在下一句。
-    if (r.freed >= 1024) parts.push(`已清理 ${fmtCacheSize(r.freed)}`)
+    if (r.freed >= 1024) parts.push(`已清理缓存 ${fmtCacheSize(r.freed)}`)
     const queued = Array.isArray(r.queued) ? r.queued : []
     if (queued.length) {
       const left = (r.failed || []).reduce((n, f) => n + (f.size || 0), 0)
-      parts.push(`${fmtCacheSize(left)} 正被系统占用，将在下次启动时清理`)
+      parts.push(`${fmtCacheSize(left)} 缓存正被系统占用，将在下次启动时清理`)
     }
-    if (!parts.length) parts.push('已无可清理缓存')
+    // 顺带回收「已删除工程的残留目录」：deleteDesign 只移索引、不删文件，
+    // 这些目录会一直躺在 designs/ 下（没有别的入口能清）。
+    // ⚠️ 与缓存不同：它们是**曾经的用户数据**，删了不可恢复 —— 所以结果必须逐项报出来，
+    // 不能让它变成「点了个清理缓存，工程文件却悄悄没了」。
+    try {
+      const p = (await window.printpress.purgeOrphanDesigns()) || {}
+      const n = Array.isArray(p.removed) ? p.removed.length : 0
+      // 残留都是几百字节的小 JSON，不足 1KB 不报体积 —— 报「（0 KB）」纯属噪音
+      if (n) parts.push(`清理了 ${n} 个已删除工程的残留${p.freed >= 1024 ? `（${fmtCacheSize(p.freed)}）` : ''}`)
+      const skipped = Array.isArray(p.skipped) ? p.skipped.length : 0
+      if (skipped) parts.push(`${skipped} 个工程残留被占用，未能清理`)
+    } catch (err) {
+      cacheMsgFail.value = true
+      parts.push('工程残留清理失败：' + (err && err.message ? err.message : err))
+    }
+    if (!parts.length) parts.push('已无可清理的缓存与残留')
     cacheMsg.value = parts.join('；')
     await refreshCacheInfo()
   } catch (err) {
@@ -423,14 +438,14 @@ onMounted(async () => {
             </span>
           </div>
           <div class="about-row">
-            <span class="ar-label">系统缓存</span>
+            <span class="ar-label" title="系统缓存可安全清理（会自动重建）；「残留」是已删除工程留下的版本文件，删了不可恢复">缓存与残留</span>
             <span class="ar-value check-group">
-              <button class="footer-btn" :disabled="clearingCache || (cacheOk && cacheSize === 0)" @click="onClearCache">
-                {{ clearingCache ? '清理中…' : '清理缓存（' + fmtCacheSize(cacheSize) + '）' }}
+              <button class="footer-btn" :disabled="clearingCache" @click="onClearCache">
+                {{ clearingCache ? '清理中…' : '清理缓存与残留（' + fmtCacheSize(cacheSize) + '）' }}
               </button>
               <span v-if="!clearingCache && !cacheOk" class="cr cr-fail">缓存大小读取失败</span>
               <span v-else-if="!clearingCache && cacheMsg" class="cr" :class="cacheMsgFail ? 'cr-fail' : 'cr-warn'">{{ cacheMsg }}</span>
-              <span v-else-if="!clearingCache && cacheSize === 0" class="cr cr-ok">已无可清理缓存</span>
+              <span v-else-if="!clearingCache && cacheSize === 0" class="cr cr-ok">系统缓存已空</span>
             </span>
           </div>
           <div class="about-row">

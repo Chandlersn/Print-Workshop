@@ -250,6 +250,34 @@ try {
     const extB = path.extname(assetB2.path)
     assert.ok(fs.existsSync(path.join(assetsDir, `${hashB}${extB}`)), 'B 在素材库，原件保留')
   })
+
+  // 原件被外部删掉（文件管理器手删 / 清理工具误删）：索引里那条记录不会自己消失，
+  // 但它已经渲染不出、也插不进画布 ⇒ 列表必须把它挡掉，同时单独报给界面提示用户。
+  check('原件已被删除：条目不进列表、不计数，单独报在 missing 里（记录不丢，文件回来即恢复）', () => {
+    const pngGone = makePng(8, 8, [10, 20, 30]) // 独立内容，避免与上面的用例撞 hash
+    const gone = designs.importImageBytes({ name: '会被删掉.png', base64: pngGone.toString('base64') })
+    library.upsert(gone, { displayName: '待删除素材' })
+
+    const before = library.listLibrary({})
+    assert.ok(before.items.some((i) => i.assetId === gone.id), '删之前正常在列表里')
+    assert.deepEqual(before.missing, [], '没有缺失时 missing 为空')
+
+    // 只删图片本体，`<hash>.json` 索引记录仍在——这正是「文件被删」的真实形态
+    fs.unlinkSync(path.join(assetsDir, `${shaOf(gone.id)}.png`))
+
+    const after = library.listLibrary({})
+    assert.ok(!after.items.some((i) => i.assetId === gone.id), '原件没了 → 列表不再渲染该条目')
+    assert.equal(after.total, before.total - 1, '总数也要扣掉，否则分页会多出一格空白')
+    assert.deepEqual(after.missing, [{ assetId: gone.id, displayName: '待删除素材' }], '单独报给界面，供弹窗提示')
+    assert.ok(!library.listLibrary({ includeArchived: true }).items.some((i) => i.assetId === gone.id),
+      '含归档时也不能把死条目放出来')
+
+    // 记录绝不静默丢弃：把原件放回来（同内容），条目应当自动恢复可见
+    fs.writeFileSync(path.join(assetsDir, `${shaOf(gone.id)}.png`), pngGone)
+    const restored = library.listLibrary({})
+    assert.ok(restored.items.some((i) => i.assetId === gone.id), '原件回来了 → 条目自动恢复')
+    assert.deepEqual(restored.missing, [])
+  })
 } finally {
   rmDeep(tmp)
 }
