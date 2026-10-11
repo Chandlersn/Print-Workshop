@@ -77,6 +77,26 @@ async function main() {
   check(pixel(opaque, 298, 148).every(value => value === 255), '非透明导出使用白色背景')
   const alphaOnWhite = pixel(opaque, 188, 37)
   check(alphaOnWhite[3] === 255 && alphaOnWhite[1] > alphaOnWhite[0], '半透明图片正确合成到白色背景')
+  const shadowDoc = { schemaVersion: 4, name: '阴影与透明渐变验收', artboard: { w: 25.4, h: 25.4, background: '#ffffff', backgroundPaint: { type: 'linear', angle: 90, stops: [{ offset: 0, color: '#ffffff', opacity: 1 }, { offset: 1, color: '#ddeeff', opacity: 1 }] } }, assets: {}, layers: [
+    { id: 'shadow-rect', type: 'rect', x: 3, y: 3, w: 8, h: 8, fill: '#ff0000', strokeWidth: 0, shadow: { dxMm: 3, dyMm: 0, blurMm: 0, color: '#000000', opacity: 0.5 } },
+  ] }
+  const shadowPrepared = exporter.prepareExport({ design: shadowDoc, dpi: 300, transparent: true })
+  check(!shadowPrepared.html.includes('export-design-board-paint'), '透明 PNG 导出移除画板渐变')
+  const shadowImage = nativeImage.createFromBuffer(await exporter.renderPng(shadowPrepared))
+  const mm = value => Math.round(value * 300 / 25.4)
+  const cast = pixel(shadowImage, mm(12), mm(7))
+  check(cast[3] >= 120 && cast[3] <= 135 && cast[0] < 10 && cast[1] < 10 && cast[2] < 10, '形状外侧实际输出半透明黑色阴影像素')
+  check(pixel(shadowImage, mm(5), mm(7))[2] > 245, '阴影不覆盖形状主体的红色像素')
+  check(pixel(shadowImage, mm(20), mm(20))[3] === 0, '阴影之外的透明 PNG 背景仍透明')
+  const fadedDoc = structuredClone(shadowDoc)
+  fadedDoc.layers[0].fillPaint = { type: 'linear', angle: 0, stops: [{ offset: 0, color: '#ff0000', opacity: 1 }, { offset: 1, color: '#ff0000', opacity: 0 }] }
+  const fadedImage = nativeImage.createFromBuffer(await exporter.renderPng(exporter.prepareExport({ design: fadedDoc, dpi: 300, transparent: true })))
+  check(pixel(fadedImage, mm(12), mm(7))[3] > pixel(fadedImage, mm(13.5), mm(7))[3], '阴影遵循透明渐变填充的实际 alpha')
+  const edgeDoc = structuredClone(shadowDoc)
+  edgeDoc.layers[0].x = 1
+  edgeDoc.layers[0].shadow = { dxMm: -1, dyMm: 0, blurMm: 2, color: '#000000', opacity: 1 }
+  const edgeImage = nativeImage.createFromBuffer(await exporter.renderPng(exporter.prepareExport({ design: edgeDoc, dpi: 300, transparent: true })))
+  check(pixel(edgeImage, mm(0.5), mm(7))[3] > 0, '贴近画板边缘的模糊阴影未被图层边框提前裁断')
   const large = structuredClone(doc)
   large.artboard = { w: 210, h: 297, background: '#ffffff' }
   const largeOutput = await exporter.exportPng(exporter.prepareExport({ design: large, dpi: 600 }), path.join(OUTPUT, 'a4-600dpi.png'))

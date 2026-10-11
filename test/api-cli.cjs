@@ -115,6 +115,13 @@ const ADDED_CHANNELS = [
   // 应用内更新（I-35）：信标只负责提示，这两条才真下载 / 真安装；能力经 ctx.autoUpdate 注入
   'app:startUpdate',
   'app:installUpdate',
+  // 工程包（v0.5.0 M2）：导出固定版本、检查 → 提交导入副本；大文件不经过 base64 IPC
+  'design:packageExport',
+  'design:packageInspect',
+  'design:packageCommit',
+  'design:packageCancel',
+  'design:packageCancelExport',
+  'design:packagePickFont',
 ]
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }

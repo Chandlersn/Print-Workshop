@@ -95,6 +95,19 @@ contextBridge.exposeInMainWorld('printpress', {
   revealDesignExport: () => ipcRenderer.invoke('design:revealExport'),
   openDesignExport: () => ipcRenderer.invoke('design:openExport'),
 
+  // 工程包 .ppdesign（v0.5.0 M2）：导出固定版本 / 检查 → 提交导入副本
+  exportDesignPackage: (payload) => ipcRenderer.invoke('design:packageExport', payload),
+  cancelExportDesignPackage: (taskId) => ipcRenderer.invoke('design:packageCancelExport', { taskId }),
+  onDesignPackageProgress: (cb) => {
+    const handler = (_e, progress) => cb(progress)
+    ipcRenderer.on('design:packageProgress', handler)
+    return () => ipcRenderer.removeListener('design:packageProgress', handler)
+  },
+  inspectDesignPackage: (payload) => ipcRenderer.invoke('design:packageInspect', payload || {}),
+  commitDesignPackage: (payload) => ipcRenderer.invoke('design:packageCommit', payload),
+  cancelDesignPackage: (token) => ipcRenderer.invoke('design:packageCancel', { token }),
+  pickPackageFont: () => ipcRenderer.invoke('design:packagePickFont'),
+
   // 字体
   listFonts: () => ipcRenderer.invoke('font:list'),
   uploadFontDialog: () => ipcRenderer.invoke('font:uploadDialog'),

@@ -128,6 +128,33 @@ check('对折上下两联使用半页工程，上联旋转180度', () => {
   assert.equal((fold.match(/class="fold-half flip"/g) || []).length, 2)
   assert.ok(fold.includes('transform: rotate(180deg)'))
 })
+check('渐变在单页、多联和对折的每份实际底图中使用独立 SVG ID', () => {
+  const paint = { type: 'linear', angle: 35, stops: [{ offset: 0, color: '#ffffff', opacity: 1 }, { offset: 1, color: '#456789', opacity: 0.6 }] }
+  const source = structuredClone(baseDoc)
+  source.artboard.backgroundPaint = paint
+  source.layers.push({ id: 'gradient-box', type: 'rect', x: 2, y: 2, w: 22, h: 14, fillPaint: paint })
+  const saved = designs.saveDesign(source)
+  const decorated = { ...template, backgroundDesign: { id: saved.id, revision: saved.revision } }
+  for (const [name, options, sample, copies] of [
+    ['单页', { pageSize: { id: 'custom', w: 85, h: 54 }, layout: { mode: 'single' } }, rows.slice(0, 2), 2],
+    ['多联', { pageSize: 'a4-portrait', layout: { mode: 'grid', itemW: 85, itemH: 54 } }, rows.slice(0, 4), 4],
+    ['对折', { pageSize: { id: 'custom', w: 85, h: 108 }, layout: { mode: 'fold' } }, rows.slice(0, 2), 4],
+  ]) {
+    const output = engine.buildHtml({ ...decorated, ...options }, sample)
+    const ids = [...output.matchAll(/<linearGradient id="(pp_effect_[^"]+)"/g)].map(match => match[1])
+    const refs = [...output.matchAll(/fill="url\(#(pp_effect_[^)]+)\)"/g)].map(match => match[1])
+    assert.equal(ids.length, copies * 2, `${name}应逐份生成画板和图形渐变`)
+    assert.equal(new Set(ids).size, ids.length, `${name}渐变 ID 不应重复`)
+    assert.deepEqual(refs.sort(), [...ids].sort(), `${name}每个渐变引用都应指向本份实例`)
+    assert.equal((output.match(/data:image\/png;base64,/g) || []).length, 1, `${name}仍只内联一次原图资源`)
+  }
+})
+check('重复底图实例只生成图层几何，不重复编码原图 CSS', () => {
+  const { renderDesign } = require('../electron/design-layout.cjs')
+  const output = renderDesign(baseDoc, { classPrefix: 'print-design', geometryOnly: true, assetUrl: () => { throw new Error('不应重复读取原图') } })
+  assert.equal(output.css, '')
+  assert.ok(output.html.includes('print-design-asset-0'))
+})
 check('尺寸不符、无固定版本、旧底图混用均明确拒绝', () => {
   assert.throws(() => engine.buildHtml({ ...template, pageSize: 'a4-portrait' }, rows), /尺寸.*不一致/)
   assert.throws(() => templates.saveTemplate({ ...template, pageSize: 'a4-portrait' }), /尺寸.*不一致/)

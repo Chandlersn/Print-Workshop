@@ -236,9 +236,12 @@ function replaceDesign(value, source = null, saved = true) {
   persistDraft()
 }
 function protectDraft(action, cancel = null) {
-  if (busy.value) return
-  if (dirty.value) pending.value = { title: '切换底图工程', message: '当前底图有未保存的修改。继续将放弃这些修改，请先保存需要保留的内容。', confirmText: '放弃修改并继续', action, cancel }
-  else action()
+  if (busy.value) return false
+  if (dirty.value) {
+    pending.value = { title: '切换底图工程', message: '当前底图有未保存的修改。继续将放弃这些修改，请先保存需要保留的内容。', confirmText: '放弃修改并继续', action, cancel }
+    return false
+  }
+  return action()
 }
 function confirmPending() {
   const action = pending.value?.action
@@ -372,7 +375,7 @@ async function loadProject(project) {
   // 打开的就是当前这份、且没有未保存修改：直接返回。重载会清掉撤销历史，
   // 用户从「最近使用」里点中当前这一份时不该有这种副作用。
   if (project.id === design.value.id && !dirty.value) return
-  protectDraft(async () => {
+  return protectDraft(async () => {
     busy.value = true
     try {
       replaceDesign(await window.printpress.getDesign(project.id), context.value)
@@ -554,6 +557,131 @@ async function runExportAction(action) {
 }
 const revealExport = () => runExportAction(() => window.printpress.revealDesignExport())
 const openExportedFile = () => runExportAction(() => window.printpress.openDesignExport())
+
+// ---- 工程包 .ppdesign（v0.5.0 M2）----
+/**
+ * 任何浮层打开时都不抢键盘 / 粘贴 / 拖放。
+ *
+ * 单独收成一个 computed 而不是到处补条件：每加一个浮层就要改五处判断，
+ * 迟早漏一个——漏了的表现是「弹窗开着按 Ctrl+Z 却把画布改了」这种难复现的毛病。
+ */
+const modalOpen = computed(() => Boolean(pending.value || showExport.value || showPackageExport.value || packageSummary.value))
+/**
+ * 导出的是「**已保存的那一版**」，不是当前草稿：版本文件不可变，所以导出期间
+ * 继续编辑不会影响包的内容。有未保存修改时让用户二选一（保存后导出 / 直接导出已保存版本），
+ * 不偷偷替他决定，也不让「改了没保存却以为导出的是最新版」这种事发生。
+ */
+const showPackageExport = ref(false)
+const packageIncludeFonts = ref(true)
+const packageExportError = ref('')
+const packageProgress = ref(null)
+const packageTaskId = ref('')
+function openPackageExport() {
+  if (busy.value || showPackageExport.value) return
+  if (!design.value.id || !design.value.revision) {
+    fail(new Error('请先保存工程：工程包导出的是已保存的版本（新建未保存的工程没有版本可导出）'))
+    return
+  }
+  packageExportError.value = ''
+  showPackageExport.value = true
+}
+async function runPackageExport(saveFirst) {
+  if (busy.value) return
+  packageExportError.value = ''
+  // 先保存必须放在 busy 之外：save() 自己会开关 busy，被占着会直接返回
+  if (saveFirst) {
+    await save()
+    if (!design.value.id || !design.value.revision) return
+  }
+  const taskId = uid('package-export')
+  packageTaskId.value = taskId
+  packageProgress.value = { index: 0, total: 0, name: '' }
+  const stopProgress = window.printpress.onDesignPackageProgress((progress) => {
+    if (progress.taskId === taskId) packageProgress.value = progress
+  })
+  busy.value = true
+  try {
+    const result = await window.printpress.exportDesignPackage({
+      id: design.value.id, revision: design.value.revision, includeFonts: packageIncludeFonts.value, taskId,
+    })
+    if (result.canceled) {
+      packageExportError.value = '工程包导出已取消，未覆盖已有文件。'
+      return
+    }
+    showPackageExport.value = false
+    message.value = `工程包已导出：${result.entries} 个条目 · ${(result.bytes / 1024).toFixed(0)} KB`
+  } catch (err) { packageExportError.value = err?.message || String(err) }
+  finally {
+    stopProgress?.()
+    busy.value = false
+    packageTaskId.value = ''
+    packageProgress.value = null
+  }
+}
+async function cancelPackageExport() {
+  const taskId = packageTaskId.value
+  if (!taskId) return
+  packageExportError.value = '正在取消导出…'
+  try { await window.printpress.cancelExportDesignPackage(taskId) }
+  catch (err) { packageExportError.value = err?.message || String(err) }
+}
+
+/**
+ * 导入分两步：先检查（后端解包校验、返回摘要与令牌），用户确认后才提交。
+ * 提交只认令牌对应的暂存快照——检查之后源文件被换也不影响导入结果。
+ * 缺失字体必须在提交前逐条决定：替代 / 用默认字体 / 提供字体文件，不然不让过。
+ */
+const packageSummary = ref(null)
+const packageError = ref('')
+const fontChoices = ref({})
+async function importPackage() {
+  if (busy.value || packageSummary.value) return
+  busy.value = true
+  packageError.value = ''
+  try {
+    const result = await window.printpress.inspectDesignPackage({})
+    if (result.canceled) return
+    packageSummary.value = result
+    // 默认给「用默认字体栈」，用户可改成替代或提供文件——但不允许留空蒙混过关
+    fontChoices.value = Object.fromEntries((result.unresolved || []).map((family) => [family, { action: 'default' }]))
+  } catch (err) { fail(err) }
+  finally { busy.value = false }
+}
+function closeImport(openIt = false) {
+  const summary = packageSummary.value
+  packageSummary.value = null
+  fontChoices.value = {}
+  packageError.value = ''
+  if (summary && !openIt) {
+    // 取消要把后端的暂存区放掉，否则它会一直躺在数据目录里直到过期
+    window.printpress.cancelDesignPackage(summary.token).catch(() => {})
+  }
+}
+async function pickFontFor(family) {
+  const result = await window.printpress.pickPackageFont()
+  if (result.canceled || !result.filePath) return
+  fontChoices.value = { ...fontChoices.value, [family]: { action: 'file', filePath: result.filePath } }
+}
+async function commitImport(openCopy) {
+  const summary = packageSummary.value
+  if (busy.value || !summary) return
+  busy.value = true
+  packageError.value = ''
+  try {
+    // Vue 把对象包成 Proxy，Electron IPC structured clone 不接受 Proxy；传普通快照。
+    const ref = await window.printpress.commitDesignPackage({ token: summary.token, fontDecisions: clone(fontChoices.value) })
+    packageSummary.value = null
+    fontChoices.value = {}
+    await refreshProjects()
+    if (openCopy) {
+      // loadProject guards on busy and must also participate in this promise chain.
+      busy.value = false
+      await loadProject({ id: ref.id })
+    }
+    message.value = `已导入副本：${ref.name}（第 ${ref.revision} 版）${openCopy ? '' : '，可在工程库打开'}`
+  } catch (err) { packageError.value = err?.message || String(err) }
+  finally { busy.value = false }
+}
 function add(type, asset = null) {
   const w = design.value.artboard.w, h = design.value.artboard.h
   const layer = { id: uid(), type, name: { text: '固定文字', image: (asset?.name || '图片').slice(0, 120), rect: '矩形', ellipse: '椭圆', line: '直线' }[type], x: round(w * 0.15), y: round(h * 0.15), w: Math.min(80, w * 0.7), h: Math.min(35, h * 0.5), rotation: 0, opacity: 1, visible: true, locked: false }
@@ -644,7 +772,7 @@ async function acceptImageFile(file) {
  * 焦点在输入框 / 文本域 / 可编辑区时不能抢——那里的粘贴属于文字编辑。
  */
 function onPaste(event) {
-  if (!active || pending.value || showExport.value) return
+  if (!active || modalOpen.value) return
   if (event.target?.closest?.('input,textarea,select,[contenteditable="true"]')) return
   const items = event.clipboardData && event.clipboardData.items
   if (!items) return
@@ -659,13 +787,13 @@ function onPaste(event) {
 }
 
 function onDragEnter() {
-  if (pending.value || showExport.value) return
+  if (modalOpen.value) return
   dropDepth += 1
   dropActive.value = true
 }
 
 function onDragOver(event) {
-  if (pending.value || showExport.value) return
+  if (modalOpen.value) return
   event.preventDefault() // 不阻止默认行为的话，浏览器会直接把这个文件打开
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
 }
@@ -679,7 +807,7 @@ function onDrop(event) {
   event.preventDefault()
   dropDepth = 0
   dropActive.value = false
-  if (pending.value || showExport.value) return
+  if (modalOpen.value) return
   const dt = event.dataTransfer
   const file = dt && dt.files && dt.files.length ? dt.files[0] : null
   if (file) { acceptImageFile(file); return }
@@ -691,6 +819,48 @@ function setDoc(key, value) {
 }
 function setArtboard(key, value) {
   commit((doc) => { doc.artboard[key] = key === 'background' ? value : Number(value) })
+}
+function setPaint(scope, key, value) {
+  commit((doc) => {
+    const target = scope === 'artboard' ? doc.artboard : doc.layers.find((item) => item.id === single.value?.id)
+    if (!target) return
+    const paintKey = scope === 'artboard' ? 'backgroundPaint' : 'fillPaint'
+    if (key === 'enabled') {
+      if (value) target[paintKey] = { type: 'linear', angle: 90, stops: [{ offset: 0, color: '#ffffff', opacity: 1 }, { offset: 1, color: '#dbeafe', opacity: 1 }] }
+      else delete target[paintKey]
+    } else if (target[paintKey]) {
+      if (key === 'angle') target[paintKey].angle = Number(value)
+      else {
+        const [field, indexText] = String(key).split(':')
+        const stop = target[paintKey].stops[Number(indexText)]
+        if (stop) stop[field] = field === 'color' ? value : Number(value)
+      }
+    }
+  })
+}
+function changePaintStops(scope, action) {
+  commit((doc) => {
+    const target = scope === 'artboard' ? doc.artboard : doc.layers.find((item) => item.id === single.value?.id)
+    const paint = target?.[scope === 'artboard' ? 'backgroundPaint' : 'fillPaint']
+    if (!paint) return
+    if (action === 'add' && paint.stops.length < 8) {
+      const left = paint.stops.at(-2), right = paint.stops.at(-1)
+      paint.stops.push({ offset: (left.offset + right.offset) / 2, color: '#b7c8e8', opacity: 1 })
+      paint.stops.sort((a, b) => a.offset - b.offset)
+    } else if (action === 'remove' && paint.stops.length > 2) paint.stops.splice(paint.stops.length - 2, 1)
+  })
+}
+function setShadow(key, value) {
+  const id = single.value?.id
+  if (!id || singleBlocked.value) return
+  commit((doc) => {
+    const layer = doc.layers.find(item => item.id === id)
+    if (!layer || !['rect', 'ellipse'].includes(layer.type)) return
+    if (key === 'enabled') {
+      if (value) layer.shadow = { dxMm: 1, dyMm: 1.5, blurMm: 1, color: '#000000', opacity: 0.2 }
+      else delete layer.shadow
+    } else if (layer.shadow) layer.shadow[key] = value
+  })
 }
 function adoptTemplateSize() {
   commit((doc) => { doc.artboard.w = context.value.artboard.w; doc.artboard.h = context.value.artboard.h })
@@ -1181,7 +1351,7 @@ function finishKeyboardMove() {
   }
 }
 function onKeyDown(event) {
-  if (!active || pending.value || showExport.value || event.isComposing) return
+  if (!active || modalOpen.value || event.isComposing) return
   const input = event.target?.closest?.('input,textarea,select,[contenteditable="true"]')
   const modifier = event.ctrlKey || event.metaKey
   // 就地编辑要先落定再存盘，否则「改完字按 Ctrl+S」会把旧文字存下去
@@ -1301,6 +1471,8 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
         <button data-testid="design-copy" :disabled="busy" @click="save(true)">另存副本</button>
         <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets">素材库</button>
         <button data-testid="design-export-png" :disabled="busy" @click="openExport">导出 PNG</button>
+        <button data-testid="design-export-package" :disabled="busy" title="把已保存的这一版连图带字体打包成 .ppdesign，可在另一台电脑上继续编辑（导出的是已保存版本，不是当前未保存的修改）" @click="openPackageExport">导出工程包</button>
+        <button data-testid="design-import-package" :disabled="busy" title="从 .ppdesign 导入一份可编辑副本；同名工程不会被覆盖" @click="importPackage">导入工程包</button>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
         <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
       </div>
@@ -1438,6 +1610,14 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
           <label>高度 mm<input type="number" min="1" step="0.1" :value="design.artboard.h" :disabled="!!context" @change="setArtboard('h', $event.target.value)"></label>
         </div>
         <label class="color-field" @click="openColorPicker"><span>画布背景</span><span class="color-control"><input type="color" :value="design.artboard.background === 'transparent' ? '#ffffff' : design.artboard.background" aria-label="选择画布背景颜色" @input="colorInput('background', $event.target.value, 'artboard')" @change="colorChange('background', $event.target.value, 'artboard')"><code class="color-value">{{ formatColor(design.artboard.background) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
+        <label class="inline"><input data-testid="design-board-gradient" type="checkbox" :checked="!!design.artboard.backgroundPaint" @change="setPaint('artboard', 'enabled', $event.target.checked)"> 使用线性渐变</label>
+        <div v-if="design.artboard.backgroundPaint" class="property-grid">
+          <label>方向 °<input data-testid="design-board-gradient-angle" type="number" min="-360" max="360" :value="design.artboard.backgroundPaint.angle" @change="setPaint('artboard', 'angle', $event.target.value)"></label>
+          <label v-for="(stop, index) in design.artboard.backgroundPaint.stops" :key="`board-stop-${index}`">色标 {{ index + 1 }}
+            <span class="property-grid"><input type="color" :value="stop.color" @change="setPaint('artboard', `color:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.01" aria-label="色标位置" :disabled="index===0 || index===design.artboard.backgroundPaint.stops.length-1" :value="stop.offset" @change="setPaint('artboard', `offset:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.05" aria-label="色标透明度" :value="stop.opacity" @change="setPaint('artboard', `opacity:${index}`, $event.target.value)"></span>
+          </label>
+          <button :disabled="design.artboard.backgroundPaint.stops.length>=8" @click="changePaintStops('artboard','add')">添加色标</button><button :disabled="design.artboard.backgroundPaint.stops.length<=2" @click="changePaintStops('artboard','remove')">移除中间色标</button>
+        </div>
         <details class="guide-panel" open>
           <summary>参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
           <label class="inline"><input v-model="guidesVisible" data-testid="design-guides-visible" type="checkbox"> 显示并吸附参考线</label>
@@ -1502,6 +1682,22 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
             <template v-else>
               <label v-if="single.type !== 'line'" class="color-field" @click="openColorPicker"><span>填充颜色</span><span class="color-control"><input type="color" :value="single.fill === 'transparent' ? '#ffffff' : single.fill" aria-label="选择填充颜色" @input="colorInput('fill', $event.target.value)" @change="colorChange('fill', $event.target.value)"><code class="color-value">{{ formatColor(single.fill) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
               <label v-if="single.type !== 'line'" class="inline"><input type="checkbox" :checked="single.fill === 'transparent'" @change="setLayer('fill', $event.target.checked ? 'transparent' : '#ead9bf')"> 无填充</label>
+              <label v-if="['rect','ellipse'].includes(single.type)" class="inline"><input data-testid="design-layer-gradient" type="checkbox" :checked="!!single.fillPaint" @change="setPaint('layer', 'enabled', $event.target.checked)"> 使用线性渐变</label>
+              <div v-if="single.fillPaint" class="property-grid">
+                <label>方向 °<input data-testid="design-layer-gradient-angle" type="number" min="-360" max="360" :value="single.fillPaint.angle" @change="setPaint('layer', 'angle', $event.target.value)"></label>
+                <label v-for="(stop, index) in single.fillPaint.stops" :key="`layer-stop-${index}`">色标 {{ index + 1 }}
+                  <span class="property-grid"><input type="color" :value="stop.color" @change="setPaint('layer', `color:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.01" aria-label="色标位置" :disabled="index===0 || index===single.fillPaint.stops.length-1" :value="stop.offset" @change="setPaint('layer', `offset:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.05" aria-label="色标透明度" :value="stop.opacity" @change="setPaint('layer', `opacity:${index}`, $event.target.value)"></span>
+                </label>
+                <button :disabled="single.fillPaint.stops.length>=8" @click="changePaintStops('layer','add')">添加色标</button><button :disabled="single.fillPaint.stops.length<=2" @click="changePaintStops('layer','remove')">移除中间色标</button>
+              </div>
+              <label v-if="['rect','ellipse'].includes(single.type)" class="inline"><input data-testid="design-layer-shadow" type="checkbox" :checked="!!single.shadow" @change="setShadow('enabled', $event.target.checked)"> 使用外阴影</label>
+              <div v-if="single.shadow" class="property-grid">
+                <label>水平偏移 mm<input data-testid="design-shadow-dx" type="number" min="-50" max="50" step="0.1" :value="single.shadow.dxMm" @change="setShadow('dxMm', Number($event.target.value))"></label>
+                <label>垂直偏移 mm<input data-testid="design-shadow-dy" type="number" min="-50" max="50" step="0.1" :value="single.shadow.dyMm" @change="setShadow('dyMm', Number($event.target.value))"></label>
+                <label>模糊 mm<input data-testid="design-shadow-blur" type="number" min="0" max="10" step="0.1" :value="single.shadow.blurMm" @change="setShadow('blurMm', Number($event.target.value))"></label>
+                <label>透明度 %<input data-testid="design-shadow-opacity" type="number" min="0" max="100" step="1" :value="Math.round(single.shadow.opacity * 100)" @change="setShadow('opacity', Number($event.target.value) / 100)"></label>
+                <label>阴影颜色<input data-testid="design-shadow-color" type="color" :value="single.shadow.color" @change="setShadow('color', $event.target.value)"></label>
+              </div>
               <div class="property-grid"><label class="color-field" @click="openColorPicker"><span>描边颜色</span><span class="color-control"><input type="color" :value="single.stroke === 'transparent' ? '#000000' : single.stroke" aria-label="选择描边颜色" @input="colorInput('stroke', $event.target.value)" @change="colorChange('stroke', $event.target.value)"><code class="color-value">{{ formatColor(single.stroke) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label><label>描边 mm<input type="number" min="0" step="0.1" :value="single.strokeWidth" @change="setLayer('strokeWidth', $event.target.value, true)"></label></div>
               <label v-if="single.type === 'rect'">圆角 mm<input type="number" min="0" step="0.5" :value="single.radius" @change="setLayer('radius', $event.target.value, true)"></label>
             </template>
@@ -1520,6 +1716,68 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
         <p class="muted">图片保持现有可见细节；提高 DPI 不会增加原图细节。图层工程可继续编辑。</p>
         <p v-if="exportSizeError || exportError" class="export-error" role="alert">{{ exportSizeError || exportError }}</p>
         <div class="export-actions"><button :disabled="busy" @click="showExport = false">取消</button><button data-testid="design-export-confirm" class="primary" :disabled="busy || !!exportSizeError" @click="exportPng">{{ busy ? '正在导出…' : '选择位置并导出' }}</button></div>
+      </section>
+    </div>
+    <!--
+      工程包导出：有未保存修改时必须让用户自己选「保存后导出」还是「导出已保存版本」。
+      导出的是**不可变的版本文件**，所以对话框里把版本号写出来，别让用户以为导出的是眼前这一屏。
+    -->
+    <div v-if="showPackageExport" class="export-mask" @click.self="!busy && (showPackageExport = false)">
+      <section data-testid="design-package-export-dialog" class="export-dialog" role="dialog" aria-modal="true" aria-labelledby="package-export-heading">
+        <h3 id="package-export-heading">导出工程包（.ppdesign）</h3>
+        <p>把工程这一版连图片原件与上传字体一起打包，换台电脑导入后可以继续编辑。</p>
+        <p class="export-dimensions" data-testid="design-package-version">导出内容：已保存的第 {{ design.revision }} 版 · {{ design.layers.length }} 个图层</p>
+        <label class="inline"><input v-model="packageIncludeFonts" data-testid="design-package-include-fonts" type="checkbox" :disabled="busy"> 携带已上传的字体原件（换机后字形一致；系统字体不会打包）</label>
+        <p v-if="dirty" class="export-error" role="alert">当前有未保存的修改。工程包只能导出已保存的版本——请选择「保存后导出」，或直接导出第 {{ design.revision }} 版。</p>
+        <p v-if="packageExportError" class="export-error" role="alert">{{ packageExportError }}</p>
+        <p v-if="packageProgress" class="export-dimensions" data-testid="design-package-progress">打包 {{ packageProgress.index }} / {{ packageProgress.total }}：{{ packageProgress.name }}</p>
+        <div class="export-actions">
+          <button :disabled="busy" @click="showPackageExport = false">取消</button>
+          <button data-testid="design-package-export-saved" :disabled="busy" @click="runPackageExport(false)">导出第 {{ design.revision }} 版</button>
+          <button v-if="dirty" data-testid="design-package-export-save-first" class="primary" :disabled="busy" @click="runPackageExport(true)">保存后导出</button>
+          <button v-else data-testid="design-package-export-confirm" class="primary" :disabled="busy" @click="runPackageExport(false)">{{ busy ? '正在导出…' : '选择位置并导出' }}</button>
+          <button v-if="busy" data-testid="design-package-export-cancel" @click="cancelPackageExport">取消导出</button>
+        </div>
+      </section>
+    </div>
+    <!--
+      导入检查页：先给用户看「这是什么、有多大、字体有没有问题」，确认后才真的导入。
+      缺失字体必须逐条决定（替代 / 默认 / 提供文件）——不许静默替代，那是「打开后字体全变了」的根源。
+    -->
+    <div v-if="packageSummary" class="export-mask" @click.self="!busy && closeImport()">
+      <section data-testid="design-package-import-dialog" class="export-dialog package-import" role="dialog" aria-modal="true" aria-labelledby="package-import-heading">
+        <h3 id="package-import-heading">导入工程包</h3>
+        <p><b>{{ packageSummary.name }}</b> · {{ packageSummary.artboard?.w }} × {{ packageSummary.artboard?.h }} mm</p>
+        <p class="export-dimensions" data-testid="design-package-stats">
+          {{ packageSummary.stats?.layerCount }} 个图层 · {{ packageSummary.stats?.imageCount }} 张图片 · {{ packageSummary.stats?.fontCount }} 种字体 · 解压 {{ (packageSummary.totalBytes / 1024 / 1024).toFixed(1) }} MB
+        </p>
+        <p class="muted">导入会新建一份副本（新工程、第 1 版），不会覆盖现有工程，也不改动当前画板。</p>
+        <div v-if="packageSummary.fonts?.length" class="package-fonts">
+          <h4>字体</h4>
+          <div v-for="font in packageSummary.fonts" :key="font.family" class="package-font-row" :data-font="font.family">
+            <span class="package-font-name">{{ font.family }}</span>
+            <span v-if="font.action === 'missing'" class="package-font-missing">本机没有，需要选择处理方式</span>
+            <span v-else-if="font.action === 'alias'" class="muted">本机已有同名不同内容的字体 → 将使用别名 {{ font.targetFamily }}</span>
+            <span v-else class="muted">{{ font.status === 'embedded' ? '包内自带' : '本机已有' }}</span>
+            <template v-if="font.action === 'missing'">
+              <select v-model="fontChoices[font.family].action" :data-testid="`package-font-action-${font.family}`">
+                <option value="default">用默认字体</option>
+                <option value="substitute">替代为本机字体</option>
+                <option value="file">提供字体文件…</option>
+              </select>
+              <select v-if="fontChoices[font.family].action === 'substitute'" v-model="fontChoices[font.family].family" :data-testid="`package-font-substitute-${font.family}`">
+                <option v-for="item in fonts.uploaded" :key="item.file" :value="item.family">{{ item.family }}</option>
+              </select>
+              <button v-if="fontChoices[font.family].action === 'file'" :disabled="busy" :data-testid="`package-font-pick-${font.family}`" @click="pickFontFor(font.family)">{{ fontChoices[font.family].filePath ? '已选择字体文件（点击可更换）' : '选择字体文件…' }}</button>
+            </template>
+          </div>
+        </div>
+        <p v-if="packageError" class="export-error" role="alert">{{ packageError }}</p>
+        <div class="export-actions">
+          <button :disabled="busy" @click="closeImport()">取消</button>
+          <button data-testid="design-package-import-confirm" :disabled="busy" @click="commitImport(false)">{{ busy ? '正在导入…' : '导入副本' }}</button>
+          <button data-testid="design-package-import-open" class="primary" :disabled="busy" @click="commitImport(true)">{{ busy ? '正在导入…' : '导入并打开' }}</button>
+        </div>
       </section>
     </div>
     <ConfirmDialog v-if="pending" :title="pending.title" :message="pending.message" :confirm-text="pending.confirmText" @confirm="confirmPending" @cancel="cancelPending" />
@@ -1658,6 +1916,13 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .export-dialog select { border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--ink); border-radius: 5px; padding: 6px 25px 6px 8px; }
 .export-dialog .export-dimensions { font-size: 14px; font-weight: 600; color: var(--ink); padding: 10px 12px; background: var(--paper); border-radius: 6px; margin: 18px 0 12px; }
 .export-dialog .export-error { color: var(--warn); background: var(--warn-soft); padding: 8px 10px; border-radius: 5px; }
-.export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+/* 导入检查页：字体冲突要逐条给处理方式，比导出对话框宽一些，内容多了自己滚 */
+.package-import { width: 520px; max-height: 84vh; overflow: auto; }
+.package-fonts { margin: 14px 0 0; }
+.package-fonts h4 { font-size: 12px; margin: 0 0 8px; color: var(--ink-2); }
+.package-font-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; padding: 6px 0; border-top: 1px solid var(--line); }
+.package-font-name { font-weight: 600; }
+.package-font-missing { color: var(--warn); }
 @media (max-width: 1180px) { .designer-workspace { grid-template-columns: min(160px, var(--tools-w, 176px)) minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
 </style>

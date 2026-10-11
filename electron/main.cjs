@@ -168,6 +168,21 @@ function main() {
     console.error('模板底图迁移异常:', err)
   }
 
+  // 工程包事务收敛：上次运行中途崩溃 / 强杀留下的导入事务在这里结清——
+  // 索引里已有该工程的认定成功（提交标记没写完不算失败），没有的回滚本次写出的字体与版本目录。
+  // 失败不阻塞启动：残留事务只会让那一次导入没结果，不影响别的功能。
+  try {
+    const designPackage = require('./design-package.cjs')
+    const recovered = designPackage.recoverPendingTransactions()
+    if (recovered.recovered.length || recovered.rolledBack.length) {
+      console.log(`工程包事务收敛：完成 ${recovered.recovered.length} 个，回滚 ${recovered.rolledBack.length} 个`)
+    }
+    const purged = designPackage.purgeStaging()
+    if (purged.removed.length) console.log(`清理过期导入暂存 ${purged.removed.length} 项`)
+  } catch (err) {
+    console.error('工程包事务收敛异常:', err)
+  }
+
   // 产品化接口位（M5 预留，不提前实现）：
   // 1. 自动更新：当前用 version-check.cjs 做轻量版本信标检测（只提示不自装），
   //    后续若做全量自更新再挂 electron-updater；

@@ -26,7 +26,7 @@ try {
     assert.equal(groupedDoc.schemaVersion, 2)
     assert.equal(edit.ungroupSelection(groupedDoc, ['b']).schemaVersion, 2)
     assert.equal(normalizeDesign({ ...legacy, guides: [{ id: 'vertical', axis: 'x', position: 20 }] }).schemaVersion, 2)
-    assert.throws(() => normalizeDesign({ ...legacy, schemaVersion: 4 }), /版本/)
+    assert.throws(() => normalizeDesign({ ...legacy, schemaVersion: 5 }), /版本/)
   })
   check('版本号取各特性最大值，已是高版本时不被分组倒标成旧格式', () => {
     const legacy = document()

@@ -2,7 +2,7 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { normalizeDesign, renderDesign } = require('./design-layout.cjs')
+const { normalizeDesign, renderDesign, shadowRegion } = require('./design-layout.cjs')
 const designs = require('./designs.cjs')
 const { fontFaceCss } = require('./render-engine.cjs')
 const { normalizeFamily } = require('./fonts.cjs')
@@ -36,9 +36,19 @@ function prepareExport({ design, dpi = 300, transparent = false } = {}) {
     const asset = doc.assets[id]
     estimated += asset.width * asset.height * 4 + fs.statSync(resolveInsideDataDir(asset.path)).size * 3
   }
+  for (const layer of doc.layers) {
+    if (!layer.visible || layer.editorOnly || layer.opacity === 0 || !layer.shadow) continue
+    const region = shadowRegion(layer.w, layer.h, layer.shadow)
+    const radians = layer.rotation * Math.PI / 180
+    const cosine = Math.abs(Math.cos(radians)), sine = Math.abs(Math.sin(radians))
+    const widthPx = Math.ceil((region.width * cosine + region.height * sine) * dpi / 25.4)
+    const heightPx = Math.ceil((region.width * sine + region.height * cosine) * dpi / 25.4)
+    // Filter output, source alpha and intermediate buffers coexist during a high-DPI capture.
+    estimated += widthPx * heightPx * 4 * 5
+  }
   for (const file of Object.values(doc.fontAssets)) estimated += fs.statSync(resolveInsideDataDir(`print-fonts/${file}`)).size * 3
-  if (estimated > LIMITS.workingBytes) throw new Error('PNG 导出预计工作内存超过 768 MB，请降低 DPI 或减少图片素材')
-  if (transparent) doc.artboard.background = 'transparent'
+  if (estimated > LIMITS.workingBytes) throw new Error('PNG 导出预计工作内存超过 768 MB，请降低 DPI 或减少图片素材、阴影效果')
+  if (transparent) { doc.artboard.background = 'transparent'; delete doc.artboard.backgroundPaint }
   const output = renderDesign(doc, {
     classPrefix: 'export-design', fontFamily: normalizeFamily,
     assetUrl: asset => `data:${asset.mime};base64,${fs.readFileSync(resolveInsideDataDir(asset.path)).toString('base64')}`,

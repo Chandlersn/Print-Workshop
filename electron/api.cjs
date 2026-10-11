@@ -29,6 +29,7 @@
  */
 const path = require('path')
 const fs = require('fs')
+const { Worker } = require('worker_threads')
 const { loadJson, saveJson } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
@@ -36,9 +37,51 @@ const designs = require('./designs.cjs')
 const designPresets = require('./design-presets.cjs')
 const fonts = require('./fonts.cjs')
 const assetLibrary = require('./asset-library.cjs')
+const designPackage = require('./design-package.cjs')
 const printDomain = require('./print.cjs')
 const dataDirModule = require('./data-dir.cjs')
 const cache = require('./cache.cjs')
+
+// 工程包导出在 worker 中运行；SharedArrayBuffer 让 UI 取消在同步 ZIP 循环里也能被观察到。
+const packageExportTasks = new Map()
+function startPackageExport(taskId, options, ctx) {
+  if (typeof taskId !== 'string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(taskId)) throw new Error('工程包导出任务编号无效')
+  if (packageExportTasks.has(taskId)) throw new Error('该工程包导出任务已在运行')
+  const cancelBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+  const cancelFlag = new Int32Array(cancelBuffer)
+  const worker = new Worker(path.join(__dirname, 'design-package-worker.cjs'), {
+    workerData: { options, cancelBuffer },
+  })
+  packageExportTasks.set(taskId, cancelFlag)
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      fn(value)
+    }
+    worker.on('message', (message) => {
+      if (message.type === 'progress') {
+        if (typeof ctx.emit === 'function') ctx.emit('design:packageProgress', { taskId, ...message.progress })
+      } else if (message.type === 'done') finish(resolve, message.result)
+      else if (message.type === 'canceled') finish(resolve, { canceled: true, taskId })
+      else if (message.type === 'error') finish(reject, new Error(message.message || '工程包导出失败'))
+    })
+    worker.once('error', (error) => finish(reject, error))
+    worker.once('exit', (code) => {
+      if (code !== 0) finish(reject, new Error(`工程包导出 worker 异常退出（${code}）`))
+      else if (!settled) finish(reject, new Error('工程包导出意外结束'))
+    })
+  }).finally(() => {
+    packageExportTasks.delete(taskId)
+  })
+}
+function cancelPackageExport(taskId) {
+  const flag = packageExportTasks.get(taskId)
+  if (!flag) return { canceled: false }
+  Atomics.store(flag, 0, 1)
+  return { canceled: true, taskId }
+}
 
 // ─────────────────────────── 错误 ───────────────────────────
 
@@ -669,6 +712,104 @@ const OPS = {
     gui: 'printer',
     params: {},
     run: (_p, ctx) => ctx.printer.openLastDesignPng(),
+  },
+
+  // ==================== 工程包（v0.5.0 M2）====================
+  // `.ppdesign`：把「已保存的那一版」连图带字体打包带走；导入永远创建副本。
+  // 检查与提交分两步——提交只认令牌对应的暂存快照，源文件事后被换也不影响结果。
+
+  'design:packageExport': {
+    write: true,
+    gui: 'dialog',
+    params: {
+      id: { required: true, desc: '底图工程 id' },
+      revision: { required: true, desc: '要导出的已保存版本（不是当前草稿）' },
+      taskId: { required: true, desc: '导出任务编号，用于进度和取消' },
+      includeFonts: { required: false, desc: 'true 携带已上传字体原件；false 只登记字体依赖' },
+      filePath: { required: false, desc: '.ppdesign 输出绝对路径；省略则显示保存对话框' },
+    },
+    run: async (p, ctx) => {
+      let filePath = p.filePath
+      if (!filePath) {
+        if (!ctx.dialog) throw guiRequired('design:packageExport', '保存对话框（请用 filePath 指定输出路径）')
+        const head = designs.listDesigns().find((d) => d.id === p.id)
+        const result = await ctx.dialog.saveFile({
+          title: '导出工程包（可编辑底图）',
+          defaultPath: `${printDomain.sanitizeFilename((head && head.name) || '底图工程')}.ppdesign`,
+          filters: [{ name: '批印坊工程包', extensions: ['ppdesign'] }],
+        })
+        if (result.canceled || !result.filePath) return { canceled: true }
+        filePath = result.filePath
+      }
+      return startPackageExport(p.taskId, {
+        id: p.id,
+        revision: p.revision,
+        targetPath: filePath,
+        includeFonts: p.includeFonts !== false,
+      }, ctx)
+    },
+  },
+
+  'design:packageCancelExport': {
+    write: true,
+    params: { taskId: { required: true, desc: '正在运行的工程包导出任务编号' } },
+    run: (p) => cancelPackageExport(p.taskId),
+  },
+
+  /**
+   * 检查包。落点是后端管理的暂存区，返回检查令牌与摘要（尺寸 / 图层 / 体积 / 字体问题）。
+   * 顺手做两件收尾：清扫过期暂存、恢复上次崩溃留下的事务——否则残留会一直躺在数据目录里。
+   */
+  'design:packageInspect': {
+    write: true,
+    gui: 'dialog',
+    params: { filePath: { required: false, desc: '.ppdesign 绝对路径；省略则显示打开对话框' } },
+    run: async (p, ctx) => {
+      let filePath = p.filePath
+      if (!filePath) {
+        if (!ctx.dialog) throw guiRequired('design:packageInspect', '打开对话框（请用 filePath 指定包路径）')
+        const result = await ctx.dialog.openFile({
+          title: '导入工程包', properties: ['openFile'],
+          filters: [{ name: '批印坊工程包', extensions: ['ppdesign'] }],
+        })
+        if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true }
+        filePath = result.filePaths[0]
+      }
+      designPackage.purgeStaging()
+      designPackage.recoverPendingTransactions()
+      const summary = await designPackage.inspectPackage(filePath)
+      return { ...summary, filePath }
+    },
+  },
+
+  'design:packageCommit': {
+    write: true,
+    params: {
+      token: { required: true, desc: '检查令牌' },
+      fontDecisions: { required: false, desc: '{ 原字体名: { action: substitute|default|file, family?, filePath? } }' },
+      name: { required: false, desc: '导入后的工程名；默认用包里的名字' },
+    },
+    run: (p) => designPackage.commitPackage(p.token, { fontDecisions: p.fontDecisions, name: p.name }),
+  },
+
+  'design:packageCancel': {
+    write: true,
+    params: { token: { required: true, desc: '检查令牌' } },
+    run: (p) => designPackage.cancelPackage(p.token),
+  },
+
+  /** 缺失字体时让用户挑一个字体文件补上（走同一套冲突规则，绝不覆盖本机已有字体） */
+  'design:packagePickFont': {
+    gui: 'dialog',
+    params: {},
+    run: async (_p, ctx) => {
+      const result = await ctx.dialog.openFile({
+        title: '选择字体文件', properties: ['openFile'],
+        filters: [{ name: '字体', extensions: ['ttf', 'otf', 'ttc', 'woff', 'woff2'] }],
+      })
+      if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true }
+      return { canceled: false, filePath: result.filePaths[0] }
+    },
   },
 
   // ==================== 本地素材库（v0.5.0 M1）====================

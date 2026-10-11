@@ -2,6 +2,7 @@
 const { app, BrowserWindow, protocol, net, ipcMain, nativeImage, dialog } = require('electron')
 const fs = require('fs')
 const path = require('path')
+const zlib = require('zlib')
 const assert = require('assert/strict')
 const { pathToFileURL } = require('url')
 
@@ -51,6 +52,20 @@ async function waitNode(predicate, label, timeout = 5000) {
 const click = (selector) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('找不到控件 '+${JSON.stringify(selector)});el.click()})()`)
 const fill = (selector, value) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('找不到输入 '+${JSON.stringify(selector)});el.focus();el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.blur()})()`)
 const clickText = (selector, text) => evaluate(`(() => {const el=[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>el.textContent.trim()===${JSON.stringify(text)});if(!el)throw new Error('找不到按钮 '+${JSON.stringify(text)});el.click()})()`)
+function hasPdfTextOperators(pdf) {
+  const raw = pdf.toString('latin1')
+  let index = 0
+  while ((index = raw.indexOf('stream\n', index)) >= 0) {
+    const start = index + 7, end = raw.indexOf('endstream', start)
+    if (end < 0) break
+    try {
+      const content = zlib.inflateSync(pdf.subarray(start, end)).toString('latin1')
+      if (/\bBT\b/.test(content) && /\bET\b/.test(content) && /\b(?:Tj|TJ)\b/.test(content)) return true
+    } catch { /* Binary image streams and uncompressed streams are unrelated. */ }
+    index = end + 9
+  }
+  return false
+}
 async function drag(selector, dx, dy, { snap = false } = {}) {
   const point = await evaluate(`(() => { const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)} })()`)
   ui.webContents.sendInputEvent({ type: 'mouseMove', ...point })
@@ -139,11 +154,13 @@ async function main() {
   const jpeg = nativeImage.createFromBitmap(pixels, { width: 1024, height: 768 }).toJPEG(94)
   fs.writeFileSync(path.join(OUTPUT, 'source.jpg'), jpeg)
   const asset = designs.importImageBytes({ name: '源照片.jpg', base64: jpeg.toString('base64') })
-  let design = designs.saveDesign({ schemaVersion: 1, revision: 0, name: '输出验收工程', artboard: { w: 210, h: 148.5, background: '#ffffff' }, assets: { [asset.id]: asset }, layers: [
+  const printPaint = { type: 'linear', angle: 35, stops: [{ offset: 0, color: '#ffffff', opacity: 1 }, { offset: 1, color: '#c4e5f6', opacity: 0.7 }] }
+  let design = designs.saveDesign({ schemaVersion: 1, revision: 0, name: '输出验收工程', artboard: { w: 210, h: 148.5, background: '#ffffff', backgroundPaint: printPaint }, assets: { [asset.id]: asset }, layers: [
     { id: 'photo', type: 'image', name: '原图', x: 12, y: 60, w: 64, h: 48, assetId: asset.id },
     { id: 'photo-rotated', type: 'image', name: '裁切旋转图', x: 135, y: 70, w: 40, h: 30, assetId: asset.id, rotation: 12, opacity: 0.7, crop: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 } },
     { id: 'title', type: 'text', name: '静态标题', x: 15, y: 12, w: 175, h: 25, text: '证书 CERTIFICATE', fontSize: 24, align: 'center', color: '#9b3029' },
     { id: 'frame', type: 'rect', name: '细框', x: 8, y: 8, w: 194, h: 130, fill: 'transparent', stroke: '#9b3029', strokeWidth: 0.25 },
+    { id: 'gradient', type: 'rect', name: '渐变装饰', x: 90, y: 95, w: 30, h: 18, fillPaint: printPaint, shadow: { dxMm: 1.5, dyMm: 2, blurMm: 1.2, color: '#223344', opacity: 0.4 }, stroke: 'transparent', strokeWidth: 0 },
   ] })
   const originalRevision = design.revision
   const modes = [
@@ -156,6 +173,10 @@ async function main() {
     const template = templates.saveTemplate({ name: `图层${mode.name}`, datasetId: 'design-e2e-dataset', pageSize: mode.pageSize, layout: mode.layout, background: '', backgroundDesign: { id: design.id, revision: design.revision }, fields: [{ column: 'name', x: 50, y: 34, fontSize: 18, align: 'center' }] })
     const html = renderer.buildHtml(template, [{ name: '张三' }, { name: '李四' }], { withToolbar: false })
     ok(html.split(jpeg.toString('base64')).length - 1 === 1, `${mode.name} 原图仅嵌入一次`)
+    const gradientIds = [...html.matchAll(/<linearGradient id="(pp_effect_[^"]+)"/g)].map(match => match[1])
+    ok(gradientIds.length === (mode.name === 'fold' ? 8 : 4) && new Set(gradientIds).size === gradientIds.length, `${mode.name} 每份画板和图形渐变的 SVG ID 唯一`)
+    const filterIds = [...html.matchAll(/<filter id="(pp_effect_[^"]+)"/g)].map(match => match[1])
+    ok(filterIds.length === (mode.name === 'fold' ? 4 : 2) && new Set(filterIds).size === filterIds.length, `${mode.name} 每份外阴影滤镜的 SVG ID 唯一`)
     const win = await printer.loadHtml(html)
     try {
       measurements[mode.name] = await win.webContents.executeJavaScript(`(() => {const root=document.querySelector('.print-design-root');return {root:root?.getBoundingClientRect().toJSON(), layers:[...document.querySelectorAll('[data-design-layer]')].map(el=>({id:el.dataset.designLayer,rect:el.getBoundingClientRect().toJSON()}))}})()`)
@@ -167,6 +188,7 @@ async function main() {
       ok(pdf.includes(jpeg), `${mode.name} PDF保留原始JPEG码流`)
       ok(/\/Width\s+1024\b/.test(text) && /\/Height\s+768\b/.test(text), `${mode.name} PDF保留1024×768源像素`)
       ok(/\/Type\s*\/Font\b/.test(text), `${mode.name} PDF含真实字体对象`)
+      ok(hasPdfTextOperators(pdf), `${mode.name} PDF保留可选取文字的文本绘制指令`)
     } finally { win.destroy() }
   }
   design.name = '新版工程'
@@ -491,17 +513,67 @@ async function main() {
   await click('[data-testid="design-guides-visible"]')
   ok(await evaluate(`document.querySelectorAll('[data-guide-line]').length===0`), '参考线显示开关生效')
   await click('[data-testid="design-guides-visible"]')
+  // 先隐藏无关图片，避免它的边缘吸附目标与参考线竞争。
+  await click(`[data-layer-id="${croppedLayer.id}"] [aria-label="隐藏图层"]`)
   await click(`[data-group-id="${group.id}"]`)
-  const groupStart = grouped.layers.find(layer => layer.id === rectLayer.id).x
+  // 吸附的是组合的当前包围盒；前面的撤销/微调已让坐标不同于 saved 快照。
+  const groupStart = await evaluate(`Math.min(...${JSON.stringify(group.layerIds)}.map(id=>parseFloat(document.querySelector('[data-canvas-layer-id="'+id+'"]').style.left)))*297/720`)
   const snapPixels = (80 - groupStart) * 720 / 297 - 1
-  await drag(`[data-canvas-layer-id="${rectLayer.id}"]`, snapPixels, 0, { snap: true })
-  await waitFor(`Math.abs((${draftDoc})?.layers.find(l=>l.id===${JSON.stringify(rectLayer.id)})?.x-80)<0.01`, '拖动吸附垂直参考线')
-  ok(true, '真实拖动吸附到参考线的毫米坐标')
+  // sendInputEvent may coalesce intermediate moves before mouseUp; dispatch the exact endpoint
+  // for this geometry assertion. Other checks above cover native mouse dragging.
+  await evaluate(`(() => {
+    const el = document.querySelector('[data-canvas-layer-id="${rectLayer.id}"]')
+    const r = el.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: x, clientY: y }))
+    window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, clientX: x + ${snapPixels}, clientY: y }))
+    window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: x + ${snapPixels}, clientY: y }))
+    return true
+  })()`)
+  await waitFor(`Math.abs(Math.min(...(${draftDoc}).layers.filter(l=>${JSON.stringify(group.layerIds)}.includes(l.id)).map(l=>l.x))-80)<0.01`, '拖动吸附垂直参考线')
+  ok(true, '组合拖动吸附到参考线的毫米坐标')
+  await click('[data-testid="design-undo"]')
   await click('[data-testid="design-undo"]')
   await click('[data-testid="design-save"]')
   await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存分组与参考线')
   const phaseTwo = designs.getDesign(saved.id)
   ok(phaseTwo.groups[0].name === '标题与边框' && phaseTwo.guides.some(g => g.axis === 'x' && g.position === 80) && phaseTwo.guides.some(g => g.axis === 'y' && g.position === 40), '工程落盘保留分组和参考线毫米位置')
+
+  // 工程包 M2：通过真实界面与 IPC 导出固定版本，再检查并导入新副本。
+  // 只替换系统文件选择器结果；打包、检查、提交和工程读取仍走生产实现。
+  const packageFile = path.join(OUTPUT, 'roundtrip.ppdesign')
+  const packageSaveDialog = dialog.showSaveDialog
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: packageFile })
+  try {
+    await click('[data-testid="design-export-package"]')
+    await waitFor(`Boolean(document.querySelector('[data-testid="design-package-export-dialog"]'))`, '打开工程包导出对话框')
+    ok(await evaluate(`document.querySelector('[data-testid="design-package-version"]')?.textContent.includes('已保存的第 ${phaseTwo.revision} 版')`), '工程包导出页明确显示固定版本号')
+    await evaluate(`window.__packageExportProgress=[];window.__stopPackageExportProgress=window.printpress.onDesignPackageProgress(p=>window.__packageExportProgress.push(p));true`)
+    await click('[data-testid="design-package-export-confirm"]')
+    await waitNode(() => fs.existsSync(packageFile) && fs.statSync(packageFile).size > 0, '工程包文件落盘')
+    await waitFor(`document.querySelector('.notice.success')?.textContent.includes('工程包已导出')`, '界面提示工程包导出完成')
+    ok(await evaluate(`window.__packageExportProgress.length>0 && window.__packageExportProgress.at(-1).index===window.__packageExportProgress.at(-1).total`), '导出过程通过 preload 收到逐条目进度')
+    await evaluate(`window.__stopPackageExportProgress?.();delete window.__stopPackageExportProgress`)
+    ok(fs.existsSync(packageFile), '界面导出按钮生成可读取的 .ppdesign 文件')
+  } finally { dialog.showSaveDialog = packageSaveDialog }
+
+  const packageOpenDialog = dialog.showOpenDialog
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [packageFile] })
+  try {
+    const beforeImportIds = new Set(designs.listDesigns().map((item) => item.id))
+    await click('[data-testid="design-import-package"]')
+    await waitFor(`Boolean(document.querySelector('[data-testid="design-package-import-dialog"]'))`, '打开工程包检查摘要')
+    ok(await evaluate(`document.querySelector('[data-testid="design-package-stats"]')?.textContent.includes('${phaseTwo.layers.length} 个图层')`), '导入检查页显示工程包图层摘要')
+    await click('[data-testid="design-package-import-open"]')
+    await waitNode(() => designs.listDesigns().some((item) => !beforeImportIds.has(item.id)), '副本发布到工程库')
+    const imported = designs.listDesigns().find((item) => !beforeImportIds.has(item.id))
+    ok(imported && imported.id !== saved.id && imported.revision === 1, '界面导入创建新 ID 和第 1 版，不覆盖来源工程')
+    await waitFor(`document.querySelector('.canvas-status')?.textContent.includes('已保存 · v1')`, '导入并打开工程副本')
+    const importedDoc = designs.getDesign(imported.id)
+    ok(importedDoc.groups.some((item) => item.name === '标题与边框') && importedDoc.guides.length === 2, '工程包往返保留分组与参考线')
+    ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===${phaseTwo.layers.length}`), '导入副本在当前编辑器中完整打开')
+    await evaluate(`(() => { const row=[...document.querySelectorAll('.project-row')].find(el=>el.querySelector('b')?.textContent==='真实界面保存验收' && el.querySelector('small')?.textContent.includes('v${phaseTwo.revision}')); if(!row)throw new Error('找不到导出来源工程');row.querySelector('.project-open').click() })()`)
+    await waitFor(`document.querySelector('.canvas-status')?.textContent.includes('已保存 · v${phaseTwo.revision}')`, '恢复工程包往返前的来源工程')
+  } finally { dialog.showOpenDialog = packageOpenDialog }
 
   // 参考框（仅编辑可见）：编辑器画布必须看得见，导出 PNG 必须完全不出现。
   // 探针用一个铺满整张画布的不透明矩形——它只要漏进导出，PNG 就不剩任何透明像素，
@@ -783,6 +855,33 @@ async function main() {
   await waitFor(`document.querySelectorAll('[data-layer-id]').length===${rectsBase + 12}`, '连加 12 个矩形')
   for (let i = 0; i < 12; i += 1) await click('[data-testid="design-undo"]')
   ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===${rectsBase}`), '连加 12 个矩形可全部撤销（上限已从 5 放宽到 50）')
+
+  // 渐变是右侧属性栏里的真实操作，不只验证模型字段存在。
+  ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-board-gradient"]'))`), '画布渐变开关在右侧属性栏可见')
+  if (!(await evaluate(`document.querySelector('[data-testid="design-board-gradient"]').checked`))) await click('[data-testid="design-board-gradient"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-board-gradient-angle"]'))`, '画布渐变属性展开')
+  await fill('[data-testid="design-board-gradient-angle"]', '35')
+  await waitFor(`document.querySelector('[data-testid="design-stage"] linearGradient')?.getAttribute('x1') !== document.querySelector('[data-testid="design-stage"] linearGradient')?.getAttribute('x2')`, '画布渐变绘出端点')
+  ok(await evaluate(`document.querySelector('[data-testid="design-board-gradient-angle"]')?.value==='35'`), '画布渐变角度可在界面编辑')
+  await clickText('.inspector button', '添加色标')
+  await waitFor(`document.querySelectorAll('.inspector label').length > 0 && document.querySelector('[data-testid="design-stage"] linearGradient')?.querySelectorAll('stop').length===3`, '画布增加第三个渐变色标')
+  ok(true, '画布渐变可增加色标并立即重绘')
+  await click('[data-testid="design-add-rect"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-layer-gradient"]'))`, '矩形图层渐变开关')
+  const beforeShapeGradient = await evaluate(`document.querySelectorAll('[data-testid="design-stage"] linearGradient').length`)
+  await click('[data-testid="design-layer-gradient"]')
+  await waitFor(`document.querySelectorAll('[data-testid="design-stage"] linearGradient').length===${beforeShapeGradient + 1}`, '矩形渐变与画布渐变同时渲染')
+  const visibleGradientIds = await evaluate(`[...document.querySelectorAll('[data-testid="design-stage"] linearGradient')].map(node=>node.id)`)
+  ok(new Set(visibleGradientIds).size === visibleGradientIds.length, '画布和矩形的渐变在编辑画布中使用不同 ID')
+  await fill('[data-testid="design-layer-gradient-angle"]', '120')
+  ok(await evaluate(`document.querySelector('[data-testid="design-layer-gradient-angle"]')?.value==='120'`), '矩形渐变角度可在界面编辑')
+  ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-layer-shadow"]'))`), '矩形外阴影开关在属性栏可见')
+  const beforeShapeShadow = await evaluate(`document.querySelectorAll('[data-testid="design-stage"] filter').length`)
+  await click('[data-testid="design-layer-shadow"]')
+  await waitFor(`document.querySelectorAll('[data-testid="design-stage"] filter').length===${beforeShapeShadow + 1}`, '矩形外阴影立即进入编辑画布')
+  await fill('[data-testid="design-shadow-dx"]', '-2')
+  await waitFor(`[...document.querySelectorAll('[data-testid="design-stage"] feOffset')].some(node=>node.getAttribute('dx')==='-2')`, '阴影负偏移实时渲染')
+  ok(await evaluate(`document.querySelector('[data-testid="design-shadow-dx"]')?.value==='-2'`), '阴影水平偏移可在界面编辑')
 
   ok(errors.length === 0, `界面无控制台错误：${errors.join('; ')}`)
   console.log(`DESIGN_E2E_OK checks=${checks} artifacts=${OUTPUT}`)

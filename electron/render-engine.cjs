@@ -200,20 +200,28 @@ function prepareTemplateDesign(template) {
   const design = resolveTemplateDesign(template)
   if (!design) return { html: '', css: '', fontFamilies: [], info: null }
   const { renderDesign, imageDpi } = require('./design-layout.cjs')
-  const rendered = renderDesign(design, {
+  const assetUrls = new Map()
+  const renderOptions = {
     classPrefix: 'print-design',
     fontFamily: normalizeFamily,
     assetUrl: (asset) => {
+      if (assetUrls.has(asset.path)) return assetUrls.get(asset.path)
       const bytes = readMediaFile(asset.path)
       if (!bytes) throw new Error(`底图素材缺失或无法读取：${asset.name || asset.path}`)
-      return `data:${mimeFor(asset.path)};base64,${bytes.toString('base64')}`
+      const url = `data:${mimeFor(asset.path)};base64,${bytes.toString('base64')}`
+      assetUrls.set(asset.path, url)
+      return url
     },
-  })
+  }
+  const rendered = renderDesign(design, renderOptions)
+  // 每个实际印出的成品都需要自己的 SVG 效果 ID。图片资源和 CSS 仍只准备一次。
+  const hasEffects = !!design.artboard.backgroundPaint || design.layers.some(layer => layer.visible && !layer.editorOnly && (layer.fillPaint || layer.shadow))
+  const renderInstance = hasEffects ? () => renderDesign(design, { ...renderOptions, geometryOnly: true }).html : () => rendered.html
   // 报告只描述会印出来的东西：参考框既不该计入图层数，也不该拿它的图片去拉低最低 dpi。
   const printed = design.layers.filter((layer) => !layer.editorOnly)
   const dpi = printed.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image')
     .map((layer) => imageDpi(layer, design.assets[layer.assetId]))
-  return { ...rendered, info: { name: design.name, revision: design.revision, layerCount: printed.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
+  return { ...rendered, renderInstance, info: { name: design.name, revision: design.revision, layerCount: printed.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
 }
 
 // 未知纸张的回退默认显式命名，不依赖数组顺序（顺序只管下拉展示）
@@ -324,7 +332,7 @@ function buildHtml(template, records, { withToolbar = true, preparedDesign } = {
   const layout = resolveLayout(template.layout, spec)
   const designOutput = preparedDesign || prepareTemplateDesign(template)
 
-  const fieldsHtml = (rec) => designOutput.html + fields
+  const fieldsHtml = (rec) => (designOutput.renderInstance ? designOutput.renderInstance() : designOutput.html) + fields
     .map((f) => `<div class="pf" style="${fieldStyle(f)}">${escapeHtml(rec[f.column || f.key])}</div>`)
     .join('')
 
@@ -333,10 +341,9 @@ function buildHtml(template, records, { withToolbar = true, preparedDesign } = {
     // 对折桌牌：上联旋转 180°（对折后从背面读是正的），下联正排，中线画折线。
     // 上下联同一条记录——打印后沿折线对折，两面都能读
     pages = records.map((rec) => {
-      const inner = fieldsHtml(rec)
       return `<div class="page">`
-        + `<div class="fold-half flip">${inner}</div>`
-        + `<div class="fold-half">${inner}</div>`
+        + `<div class="fold-half flip">${fieldsHtml(rec)}</div>`
+        + `<div class="fold-half">${fieldsHtml(rec)}</div>`
         + `<div class="fold-line"></div>`
         + `</div>`
     })

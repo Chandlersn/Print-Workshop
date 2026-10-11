@@ -31,6 +31,29 @@ function color(value, fallback) {
   if (typeof s !== 'string' || !/^#(?:[a-f0-9]{3}|[a-f0-9]{4}|[a-f0-9]{6}|[a-f0-9]{8})$/i.test(s)) throw new Error('颜色必须是十六进制颜色或 transparent')
   return s
 }
+function linearPaint(value, label) {
+  if (value === undefined) return undefined
+  const paint = object(value, label)
+  if (paint.type !== 'linear') throw new Error(`${label}类型无效`)
+  const angle = number(paint.angle, 90, -360, 360, `${label}方向`)
+  if (!Array.isArray(paint.stops) || paint.stops.length < 2 || paint.stops.length > 8) throw new Error(`${label}色标数量必须为 2～8`)
+  const stops = paint.stops.map((raw, index) => {
+    const stop = object(raw, `${label}色标`)
+    return { offset: number(stop.offset, NaN, 0, 1, '色标位置'), color: color(stop.color), opacity: number(stop.opacity, 1, 0, 1, '色标透明度'), index }
+  }).sort((a, b) => a.offset - b.offset || a.index - b.index)
+  if (stops[0].offset !== 0 || stops.at(-1).offset !== 1) throw new Error(`${label}首尾色标必须覆盖 0 和 1`)
+  return { type: 'linear', angle, stops: stops.map(({ offset, color, opacity }) => ({ offset, color, opacity })) }
+}
+function shapeShadow(value) {
+  const shadow = object(value, '图形阴影')
+  return {
+    dxMm: number(shadow.dxMm, 1, -50, 50, '阴影水平偏移'),
+    dyMm: number(shadow.dyMm, 1.5, -50, 50, '阴影垂直偏移'),
+    blurMm: number(shadow.blurMm, 1, 0, 10, '阴影模糊'),
+    color: color(shadow.color, '#000000'),
+    opacity: number(shadow.opacity, 0.2, 0, 1, '阴影透明度'),
+  }
+}
 
 /**
  * family 名规范化：**唯一权威实现**（画布 / 编辑器 / PDF / 打印 / PNG 导出共用）。
@@ -77,7 +100,7 @@ function normalizeSource(value) {
 
 function normalizeDesign(input) {
   const doc = object(input, '底图工程')
-  if (doc.schemaVersion !== undefined && ![1, 2, 3].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
+  if (doc.schemaVersion !== undefined && ![1, 2, 3, 4].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
   const board = object(doc.artboard, '画布')
   const layers = doc.layers === undefined ? [] : doc.layers
   if (!Array.isArray(layers) || layers.length > LIMITS.layers) throw new Error(`最多支持 ${LIMITS.layers} 个图层`)
@@ -98,7 +121,7 @@ function normalizeDesign(input) {
   const result = {
     schemaVersion: doc.schemaVersion || 1, revision: number(doc.revision, 0, 0, Number.MAX_SAFE_INTEGER, '工程版本'),
     name: string(doc.name, '未命名底图', 120, '工程名称').trim(),
-    artboard: { w: number(board.w, 297, 1, LIMITS.artboard, '画布宽度'), h: number(board.h, 210, 1, LIMITS.artboard, '画布高度'), background: color(board.background, '#ffffff') },
+    artboard: { w: number(board.w, 297, 1, LIMITS.artboard, '画布宽度'), h: number(board.h, 210, 1, LIMITS.artboard, '画布高度'), background: color(board.background, '#ffffff'), ...(board.backgroundPaint === undefined ? {} : { backgroundPaint: linearPaint(board.backgroundPaint, '画布渐变') }) },
     assets,
     layers: layers.map((raw, index) => {
       const l = object(raw, '图层')
@@ -133,6 +156,14 @@ function normalizeDesign(input) {
         if (!['left', 'center', 'right'].includes(out.align)) throw new Error('文字对齐方式无效')
       } else {
         Object.assign(out, { fill: color(l.fill, l.type === 'line' ? 'transparent' : '#eeeeee'), stroke: color(l.stroke, '#333333'), strokeWidth: number(l.strokeWidth, 0.3, 0, 100, '描边宽度'), radius: number(l.radius, 0, 0, 1000, '圆角') })
+        if (l.fillPaint !== undefined) {
+          if (!['rect', 'ellipse'].includes(l.type)) throw new Error('渐变仅支持矩形和椭圆')
+          out.fillPaint = linearPaint(l.fillPaint, '图形渐变')
+        }
+        if (l.shadow !== undefined) {
+          if (!['rect', 'ellipse'].includes(l.type)) throw new Error('阴影仅支持矩形和椭圆')
+          out.shadow = shapeShadow(l.shadow)
+        }
       }
       return out
     }),
@@ -180,6 +211,7 @@ function normalizeDesign(input) {
   let version = doc.schemaVersion || 1
   if (result.groups.length || result.guides.length) version = Math.max(version, 2)
   if (result.layers.some(layer => layer.editorOnly)) version = Math.max(version, 3)
+  if (result.artboard.backgroundPaint || result.layers.some(layer => layer.fillPaint || layer.shadow)) version = Math.max(version, 4)
   result.schemaVersion = version
   // Record uploaded fonts so a missing file cannot silently become a system fallback.
   const fontAssets = object(doc.fontAssets === undefined ? {} : doc.fontAssets, '字体素材表')
@@ -234,9 +266,17 @@ function renderDesign(input, options = {}) {
   const doc = normalizeDesign(input)
   const prefix = token(options.classPrefix || 'design', '样式前缀')
   const includeEditorOnly = options.includeEditorOnly === true
+  const geometryOnly = options.geometryOnly === true
   const assetUrl = options.assetUrl || (asset => `pp://media/${asset.path}`)
   const family = options.fontFamily || (name => name)
   const css = [`.${prefix}-root{position:relative;box-sizing:border-box;overflow:hidden;width:${doc.artboard.w}mm;height:${doc.artboard.h}mm;background:${doc.artboard.background};isolation:isolate}`, `.${prefix}-layer{position:absolute;box-sizing:border-box;margin:0;padding:0;transform-origin:center center}`, `.${prefix}-image{position:absolute;background-size:100% 100%;background-repeat:no-repeat}`]
+  const scope = `pp_effect_${++renderScope}`
+  let effectIndex = 0
+  const nextEffectId = () => `${scope}_${effectIndex++}`
+  const boardBackground = doc.artboard.backgroundPaint ? (() => {
+    const id = nextEffectId(), p = doc.artboard.backgroundPaint, e = linearEndpoints(doc.artboard.w, doc.artboard.h, p.angle)
+    return `<svg class="${prefix}-board-paint" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${doc.artboard.w} ${doc.artboard.h}" preserveAspectRatio="none"><defs>${gradientMarkup(id, p, e)}</defs><rect width="${doc.artboard.w}" height="${doc.artboard.h}" fill="url(#${id})"/></svg>`
+  })() : ''
   const assetClasses = new Map()
   const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly)).map(l => {
     let body = ''
@@ -246,7 +286,7 @@ function renderDesign(input, options = {}) {
       if (!cls) {
         cls = `${prefix}-asset-${assetClasses.size}`
         assetClasses.set(l.assetId, cls)
-        css.push(`.${cls}{background-image:url(${cssString(assetUrl(doc.assets[l.assetId]))})}`)
+        if (!geometryOnly) css.push(`.${cls}{background-image:url(${cssString(assetUrl(doc.assets[l.assetId]))})}`)
       }
       const c = l.crop
       body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%"></div></div>`
@@ -257,17 +297,54 @@ function renderDesign(input, options = {}) {
     } else {
       const sw = Math.min(l.strokeWidth, l.w, l.h)
       const s = sw / 2
-      const common = `fill="${l.fill}" stroke="${l.stroke}" stroke-width="${sw}"`
+      const paintId = l.fillPaint ? nextEffectId() : null
+      const shadowId = l.shadow ? nextEffectId() : null
+      const fillValue = paintId ? `url(#${paintId})` : l.fill
+      const common = `fill="${fillValue}" stroke="${l.stroke}" stroke-width="${sw}"`
       const shape = l.type === 'ellipse'
         ? `<ellipse cx="${l.w / 2}" cy="${l.h / 2}" rx="${(l.w - sw) / 2}" ry="${(l.h - sw) / 2}" ${common}/>`
         : l.type === 'line'
           ? `<line x1="0" y1="${l.h / 2}" x2="${l.w}" y2="${l.h / 2}" ${common}/>`
           : `<rect x="${s}" y="${s}" width="${l.w - sw}" height="${l.h - sw}" rx="${Math.min(l.radius, l.w / 2, l.h / 2)}" ${common}/>`
-      body = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${l.w} ${l.h}" width="100%" height="100%" style="display:block">${shape}</svg>`
+      const defs = [
+        paintId ? gradientMarkup(paintId, l.fillPaint, linearEndpoints(l.w, l.h, l.fillPaint.angle)) : '',
+        shadowId ? shadowMarkup(shadowId, l.w, l.h, l.shadow) : '',
+      ].join('')
+      const shadowShape = shadowId ? shape.replace(/\/>$/, ` filter="url(#${shadowId})"/>`) : ''
+      body = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${l.w} ${l.h}" width="100%" height="100%" style="display:block;overflow:${shadowId ? 'visible' : 'hidden'}">${defs ? `<defs>${defs}</defs>` : ''}${shadowShape}${shape}</svg>`
     }
     return `<div class="${prefix}-layer" data-design-layer="${escapeHtml(l.id)}" style="${escapeHtml(style.join(';'))}">${body}</div>`
   })
-  return { html: `<div class="${prefix}-root">${fragments.join('')}</div>`, css: css.join('\n'), fontFamilies: collectFontFamilies(doc, { includeEditorOnly }) }
+  if (boardBackground && !geometryOnly) css.push(`.${prefix}-board-paint{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}`)
+  return { html: `<div class="${prefix}-root">${boardBackground}${fragments.join('')}</div>`, css: geometryOnly ? '' : css.join('\n'), fontFamilies: geometryOnly ? [] : collectFontFamilies(doc, { includeEditorOnly }) }
 }
 
-module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, DEFAULT_FONT_STACK, LIMITS }
+let renderScope = 0
+function linearEndpoints(w, h, angle) {
+  const rad = angle * Math.PI / 180, dx = Math.cos(rad), dy = Math.sin(rad)
+  const half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2
+  return { x1: w / 2 - dx * half, y1: h / 2 - dy * half, x2: w / 2 + dx * half, y2: h / 2 + dy * half }
+}
+function gradientMarkup(id, paint, endpoints) {
+  const stops = paint.stops.map(s => `<stop offset="${s.offset}" stop-color="${s.color}" stop-opacity="${s.opacity}"/>`).join('')
+  return `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" color-interpolation="sRGB" x1="${endpoints.x1}" y1="${endpoints.y1}" x2="${endpoints.x2}" y2="${endpoints.y2}">${stops}</linearGradient>`
+}
+function shadowRegion(w, h, shadow) {
+  const pad = 4 * shadow.blurMm + 0.25
+  return {
+    x: Math.min(0, shadow.dxMm) - pad,
+    y: Math.min(0, shadow.dyMm) - pad,
+    width: w + Math.abs(shadow.dxMm) + 2 * pad,
+    height: h + Math.abs(shadow.dyMm) + 2 * pad,
+  }
+}
+function shadowMarkup(id, w, h, shadow) {
+  const r = shadowRegion(w, h, shadow)
+  return `<filter id="${id}" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse" color-interpolation-filters="sRGB" x="${r.x}" y="${r.y}" width="${r.width}" height="${r.height}">` +
+    `<feGaussianBlur in="SourceAlpha" stdDeviation="${shadow.blurMm}" result="blur"/>` +
+    `<feOffset in="blur" dx="${shadow.dxMm}" dy="${shadow.dyMm}" result="shift"/>` +
+    `<feFlood flood-color="${shadow.color}" flood-opacity="${shadow.opacity}" result="color"/>` +
+    '<feComposite in="color" in2="shift" operator="in"/></filter>'
+}
+
+module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, linearEndpoints, shadowRegion, DEFAULT_FONT_STACK, LIMITS }

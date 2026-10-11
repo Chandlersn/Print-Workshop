@@ -37,7 +37,17 @@ check('透明背景选项只改变导出快照，不修改作品背景', () => {
   assert.ok(!prepared.html.includes('#abcdef'))
   assert.ok(prepared.html.includes('background:transparent'))
   assert.equal(base.artboard.background, '#abcdef')
+  const gradient = { ...base, artboard: { ...base.artboard, backgroundPaint: { type: 'linear', angle: 90, stops: [{ offset: 0, color: '#fff000', opacity: 1 }, { offset: 1, color: '#000fff', opacity: 1 }] } } }
+  assert.ok(exporter.prepareExport({ design: gradient, transparent: true }).html.includes('background:transparent'))
+  assert.ok(!exporter.prepareExport({ design: gradient, transparent: true }).html.includes('<linearGradient'))
   assert.throws(() => exporter.prepareExport({ design: base, transparent: 'yes' }), /布尔/)
+})
+check('高 DPI 大范围阴影按滤镜缓冲区预算拒绝，提示用户降低 DPI', () => {
+  const design = { ...base, artboard: { w: 100, h: 100, background: '#ffffff' }, layers: [
+    { id: 'large-shadow', type: 'rect', x: -50, y: -50, w: 250, h: 250, fill: '#ffffff', shadow: { dxMm: 5, dyMm: 5, blurMm: 10, color: '#000000', opacity: 0.5 } },
+  ] }
+  assert.throws(() => exporter.prepareExport({ design, dpi: 600 }), /工作内存.*阴影效果/)
+  assert.ok(exporter.prepareExport({ design, dpi: 150 }).html.includes('<filter'))
 })
 check('原图仅内联一次，准备后不依赖后续素材文件变化', () => {
   const asset = designs.importImageBytes({ name: 'source.png', base64: imageBytes.toString('base64') })

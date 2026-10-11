@@ -293,20 +293,40 @@ function saveDesign(input, options) {
     const previousFonts = head ? readRevision(head.id, head.revision).fontAssets || {} : {}
     canonicalFonts(doc, previousFonts)
     const now = new Date().toISOString()
-    const saved = { ...doc, id: head ? head.id : `design_${crypto.randomBytes(12).toString('hex')}`, revision: head ? head.revision + 1 : 1, createdAt: head ? head.createdAt : now, updatedAt: now }
-    const target = revisionPath(saved.id, saved.revision)
-    // An uncommitted orphan from a terminated write may be replaced; committed files never are.
-    atomicFile(target, JSON.stringify(saved, null, 2))
-    // lastUsedAt = 「用户最近一次用它的时间」，供界面上的「常用」列表排序。
-    // 用户主动保存本身就是一次使用 ⇒ 刷成 now；系统按预设自动建的工程不记（见函数头注）。
-    const summary = { id: saved.id, revision: saved.revision, name: saved.name, artboard: saved.artboard, layerCount: saved.layers.length, createdAt: saved.createdAt, updatedAt: now, lastUsedAt: recordUse ? now : null }
-    const updated = all.filter(d => d.id !== saved.id).concat(summary)
-    try { saveJson('designs', updated) } catch (err) {
-      try { fs.unlinkSync(target) } catch { /* Orphan is unreachable until a successful retry. */ }
-      throw err
-    }
-    return saved
+    const id = head ? head.id : `design_${crypto.randomBytes(12).toString('hex')}`
+    return publishRevisionLocked(doc, {
+      id, revision: head ? head.revision + 1 : 1, createdAt: head ? head.createdAt : now, recordUse,
+    })
   })
+}
+
+/**
+ * 锁内发布一个**已校验**的版本：写版本 JSON → 更新索引。
+ *
+ * ⚠️ 调用方必须已持有 `withLock`，且 doc 必须已经过 `canonicalAssets` / `canonicalFonts`
+ * （本函数不重复校验，也不再做版本冲突判断——那是 `saveDesign` 的事）。
+ *
+ * 为什么单独抽出来：工程包导入（design-package.cjs）要在**同一把锁里**完成
+ * 「发布资源 → 发布工程」，如果它调公共 `saveDesign` 会二次获取同一把锁（死锁/重入）。
+ *
+ * 顺序是刻意的：**先写版本文件，最后写索引**。中途崩溃只会留下一个索引里看不见的
+ * 孤儿目录（由恢复程序或 purgeOrphanDirs 回收），绝不会出现「索引里有、文件却不存在」。
+ */
+function publishRevisionLocked(doc, { id, revision, createdAt, recordUse }) {
+  const now = new Date().toISOString()
+  const saved = { ...doc, id, revision, createdAt, updatedAt: now }
+  const target = revisionPath(saved.id, saved.revision)
+  // An uncommitted orphan from a terminated write may be replaced; committed files never are.
+  atomicFile(target, JSON.stringify(saved, null, 2))
+  // lastUsedAt = 「用户最近一次用它的时间」，供界面上的「常用」列表排序。
+  // 用户主动保存本身就是一次使用 ⇒ 刷成 now；系统按预设自动建的工程不记（见 saveDesign 头注）。
+  const summary = { id, revision, name: saved.name, artboard: saved.artboard, layerCount: saved.layers.length, createdAt, updatedAt: now, lastUsedAt: recordUse ? now : null }
+  const updated = index().filter(d => d.id !== id).concat(summary)
+  try { saveJson('designs', updated) } catch (err) {
+    try { fs.unlinkSync(target) } catch { /* Orphan is unreachable until a successful retry. */ }
+    throw err
+  }
+  return saved
 }
 function deleteDesign(id) {
   projectId(id)
@@ -532,4 +552,4 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource, withDesignLock: withLock, publishRevisionLocked }

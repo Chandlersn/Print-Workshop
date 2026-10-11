@@ -70,6 +70,7 @@ const CONTRACT = [
   { id: 'I-35', file: 'test/ipc-hardening.cjs', anchor: '== 10. 「检查更新」必须真能触发更新（前端静态核查） ==' },
   { id: 'I-36', file: 'test/ipc-hardening.cjs', anchor: '== 11. 应用内说明与 docs/使用说明.md 的章节骨架必须一致（I-36） ==' },
   { id: 'I-37', file: 'test/designs.cjs', anchor: '清理残留：只回收「不在索引」的工程目录，索引里的与形状不符的都不动（I-37）' },
+  { id: 'I-38', file: 'test/design-package.cjs', anchor: '== ⑦ I-38 工程包：先校验后发布、路径只来自白名单、导入必是副本（静态守卫） ==' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')
