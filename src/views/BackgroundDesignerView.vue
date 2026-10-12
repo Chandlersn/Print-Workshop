@@ -4,6 +4,7 @@ import DesignSurface from '../components/DesignSurface.vue'
 import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
+import { activeDataset } from '../lib/active-dataset.js'
 import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK } from '../../electron/design-layout.cjs'
 import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
@@ -15,6 +16,87 @@ defineOptions({ name: 'BackgroundDesignerView' })
 const DRAFT_KEY = 'printpress-background-designer-draft-v1'
 const clone = (value) => JSON.parse(JSON.stringify(value))
 const uid = (prefix = 'layer') => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`
+const portraitPicker = ref(false)
+const portraitDatasets = ref([])
+const portraitDataset = ref('')
+const portraitColumns = ref([])
+const portraitColumn = ref('')
+const portraitLists = ref([])
+const portraitChecking = ref(true)
+const portraitInserting = ref(false)
+let portraitListRequest = 0
+const portraitTarget = computed(() => {
+  const id = context.value?.datasetId || activeDataset.value
+  if (id) return portraitLists.value.find(ds => ds.id === id)
+  return portraitDatasets.value.find(ds => ds.id === portraitDataset.value) || portraitDatasets.value[0]
+})
+const canAddPortrait = computed(() => !portraitChecking.value && !!portraitTarget.value?.photoMatchColumn)
+async function refreshPortraitAvailability() {
+  const token = ++portraitListRequest
+  portraitChecking.value = true
+  try {
+    const lists = await window.printpress.listDatasets()
+    if (token !== portraitListRequest || !active) return false
+    portraitLists.value = lists
+    portraitDatasets.value = lists.filter(ds => ds.photoMatchColumn)
+    return !!portraitTarget.value?.photoMatchColumn
+  } catch (err) {
+    if (token === portraitListRequest) {
+      portraitLists.value = []; portraitDatasets.value = []
+      fail(err)
+    }
+    return false
+  } finally { if (token === portraitListRequest) portraitChecking.value = false }
+}
+let portraitRequest = 0
+watch(portraitDataset, async id => {
+  const token = ++portraitRequest
+  portraitColumns.value = []; portraitColumn.value = ''
+  if (!id) return
+  try {
+    const ds = await window.printpress.getDataset(id)
+    if (token !== portraitRequest) return
+    portraitColumns.value = ds.columns
+    portraitColumn.value = ds.photoMatchColumn || ''
+  } catch (err) { fail(err) }
+})
+async function openPortraitPicker() {
+  if (busy.value || !canAddPortrait.value) return
+  try {
+    if (!await refreshPortraitAvailability()) return
+    const targetId = portraitTarget.value?.id || ''
+    portraitDataset.value = ''; portraitColumn.value = ''; portraitColumns.value = []
+    await nextTick()
+    portraitDataset.value = targetId
+    portraitPicker.value = true
+  } catch (err) { fail(err) }
+}
+async function addPortrait() {
+  if (busy.value || portraitInserting.value || !portraitColumn.value) return
+  const datasetId = portraitDataset.value
+  const session = sessionToken.value
+  portraitInserting.value = true
+  try {
+    // Recheck persisted matching before insertion; a stale dialog must not create an unbound layer.
+    const ds = await window.printpress.getDataset(datasetId)
+    if (!active || !portraitPicker.value || session !== sessionToken.value || datasetId !== portraitDataset.value) return
+    if (!ds.photoMatchColumn || !ds.columns.some(c => c.key === ds.photoMatchColumn)) {
+      portraitColumn.value = ''
+      await refreshPortraitAvailability()
+      fail('该名单已关闭配图，请先在数据页开启一个列头的“配图”开关。')
+      return
+    }
+    const id = uid('portrait')
+    commit(doc => doc.layers.push({ id, type: 'image', variable: true, name: '变量图', bindColumn: ds.photoMatchColumn, x: 10, y: 10, w: 35, h: 45, fit: 'cover', focal: { x: 0.5, y: 0.5 }, radius: 0 }))
+    selectedIds.value = [id]
+    portraitPicker.value = false
+    message.value = '已添加变量图。保存工程并应用到模板后，在打印中心按名单换图。'
+  } catch (err) { fail(err) }
+  finally { portraitInserting.value = false }
+}
+function setPhotoFocal(axis, value) {
+  commit(doc => { doc.layers.find(l => l.id === single.value.id).focal[axis] = Number(value) / 100 })
+}
 const round = (n) => Math.round(n * 1000) / 1000
 function blank(w = 297, h = 210) {
   return { schemaVersion: 1, revision: 0, name: '未命名底图', artboard: { w, h, background: '#ffffff' }, layers: [], assets: {} }
@@ -100,6 +182,9 @@ async function adoptLayerAsset(layer) {
 }
 const fonts = ref({ system: [], uploaded: [] })
 const context = ref(null)
+watch([() => context.value?.datasetId, activeDataset], () => {
+  if (active) { portraitPicker.value = false; refreshPortraitAvailability() }
+})
 const pending = ref(null)
 const stage = ref(null)
 const zoom = ref(1)
@@ -1383,6 +1468,7 @@ function onBeforeUnload() { finishTextEdit(); document.activeElement?.blur?.(); 
 function activate() {
   if (active) return
   active = true
+  refreshPortraitAvailability()
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('blur', endGesture)
@@ -1401,6 +1487,10 @@ function activate() {
 }
 function deactivate() {
   active = false
+  ++portraitListRequest
+  ++portraitRequest
+  portraitChecking.value = true
+  portraitPicker.value = false
   finishTextEdit()
   endGesture(); finishKeyboardMove(); persistDraft()
   window.removeEventListener('keydown', onKeyDown)
@@ -1452,6 +1542,17 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
 
 <template>
   <section class="designer-view">
+    <div v-if="portraitPicker" class="portrait-mask" @click.self="portraitPicker = false">
+      <section class="portrait-picker" role="dialog" aria-modal="true" aria-label="添加变量图">
+        <h3>添加变量图</h3><p>变量图跟随数据页唯一启用的“配图”列。出片时按每行的值匹配同名照片，缺图留白。</p>
+        <p v-if="!portraitDatasets.length">暂无已开启配图的名单，请先到数据页点击一个列头的“配图”开关。</p>
+        <label>参考名单<select v-model="portraitDataset" :disabled="!portraitDatasets.length"><option v-for="ds in portraitDatasets" :key="ds.id" :value="ds.id">{{ ds.name }}</option></select></label>
+        <p v-if="portraitDatasets.length">已自动选择开启配图的名单；这里只列出已开启配图的名单。</p>
+        <p>当前配图列：{{ portraitColumns.find(c => c.key === portraitColumn)?.alias || portraitColumn || '未选择，请先到数据页点击列头的“配图”' }}</p>
+        <p>默认 35 × 45 mm；添加后可拖动位置、调整尺寸、圆角和裁切焦点。</p>
+        <button class="primary" :disabled="busy || portraitInserting || !portraitColumn" @click="addPortrait">插入变量图</button> <button @click="portraitPicker = false">取消</button>
+      </section>
+    </div>
     <div class="designer-heading">
       <div><h2>底图制作</h2><p>图片、固定文字与形状分别编辑，保存后用于打印模板。</p></div>
       <div class="heading-actions">
@@ -1501,6 +1602,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
         <h3>添加内容</h3>
         <div class="tool-grid">
           <button data-testid="design-add-image" :disabled="busy" title="也可以 Ctrl+V 粘贴截图，或把图片文件拖进画布" @click="addImage">＋ 图片</button>
+          <button data-testid="design-add-portrait" :disabled="busy || !canAddPortrait" @click="openPortraitPicker">＋ 变量图</button>
           <button data-testid="design-add-text" @click="add('text')">＋ 文字</button>
           <button data-testid="design-add-rect" @click="add('rect')">＋ 矩形</button>
           <button @click="add('ellipse')">＋ 椭圆</button>
@@ -1671,6 +1773,14 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
               <label class="inline"><input type="checkbox" :checked="single.bold" @change="setLayer('bold', $event.target.checked)"> 粗体</label>
               <label>段落对齐<select :value="single.align" @change="setLayer('align', $event.target.value)"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label>
             </template>
+            <template v-else-if="single.type === 'image' && single.variable">
+              <h4>变量照片</h4>
+              <p>匹配字段跟随名单的“配图”开关。切换字段无需重新制作变量图。</p>
+              <label>适应方式<select :value="single.fit" @change="setLayer('fit', $event.target.value)"><option value="cover">铺满框（裁切边缘）</option><option value="contain">完整显示（可能留白）</option></select></label>
+              <label v-for="[axis, label] in [['x','水平焦点 %'],['y','垂直焦点 %']]" :key="axis">{{ label }}<input type="number" min="0" max="100" :value="single.focal[axis] * 100" @change="setPhotoFocal(axis, $event.target.value)"></label>
+              <label>圆角 mm<input type="number" min="0" step="0.5" :value="single.radius" @change="setLayer('radius', $event.target.value, true)"></label>
+              <p class="muted">缺图或空值时照片位置留白。同名多图、坏图仍需在照片库处理。</p>
+            </template>
             <template v-else-if="single.type === 'image'">
               <label class="inline"><input v-model="keepRatio" type="checkbox"> 缩放与裁切保持图片比例</label>
               <div class="tool-grid"><button @click="setLayer('flipX', !single.flipX)">{{ single.flipX ? '取消水平翻转' : '水平翻转' }}</button><button @click="setLayer('flipY', !single.flipY)">{{ single.flipY ? '取消垂直翻转' : '垂直翻转' }}</button></div>
@@ -1785,6 +1895,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
 </template>
 
 <style scoped>
+.portrait-mask{position:fixed;inset:0;z-index:2000;background:#17252a66;display:grid;place-items:center}.portrait-picker{width:440px;padding:24px;background:var(--paper-card);color:var(--ink);border-radius:14px;box-shadow:0 20px 60px #0003}.portrait-picker label{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:16px 0}.portrait-picker select{padding:8px;max-width:280px}.portrait-picker p{color:var(--stone);line-height:1.7}
 .designer-view { min-width: 960px; }
 .designer-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; }
 h2 { font-size: 20px; margin: 0 0 5px; } .designer-heading p { color: var(--ink-2); margin: 0; font-size: 12px; }

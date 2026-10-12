@@ -196,7 +196,7 @@ function resolveTemplateDesign(template) {
 }
 
 /** 一次批量任务共用经过校验的静态工程资源，预览与归档不重复读取大图。 */
-function prepareTemplateDesign(template) {
+function prepareTemplateDesign(template, photos = null) {
   const design = resolveTemplateDesign(template)
   if (!design) return { html: '', css: '', fontFamilies: [], info: null }
   const { renderDesign, imageDpi } = require('./design-layout.cjs')
@@ -216,10 +216,11 @@ function prepareTemplateDesign(template) {
   const rendered = renderDesign(design, renderOptions)
   // 每个实际印出的成品都需要自己的 SVG 效果 ID。图片资源和 CSS 仍只准备一次。
   const hasEffects = !!design.artboard.backgroundPaint || design.layers.some(layer => layer.visible && !layer.editorOnly && (layer.fillPaint || layer.shadow))
-  const renderInstance = hasEffects ? () => renderDesign(design, { ...renderOptions, geometryOnly: true }).html : () => rendered.html
+  const variable = design.layers.some(layer => layer.variable && layer.visible && !layer.editorOnly)
+  const renderInstance = hasEffects || variable ? record => renderDesign(design, { ...renderOptions, geometryOnly: true, requirePhotos: true, photoUrl: layer => photos?.byRecord.get(record)?.[layer.bindColumn] }).html : () => rendered.html
   // 报告只描述会印出来的东西：参考框既不该计入图层数，也不该拿它的图片去拉低最低 dpi。
   const printed = design.layers.filter((layer) => !layer.editorOnly)
-  const dpi = printed.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image')
+  const dpi = printed.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image' && !layer.variable)
     .map((layer) => imageDpi(layer, design.assets[layer.assetId]))
   return { ...rendered, renderInstance, info: { name: design.name, revision: design.revision, layerCount: printed.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
 }
@@ -332,7 +333,7 @@ function buildHtml(template, records, { withToolbar = true, preparedDesign } = {
   const layout = resolveLayout(template.layout, spec)
   const designOutput = preparedDesign || prepareTemplateDesign(template)
 
-  const fieldsHtml = (rec) => (designOutput.renderInstance ? designOutput.renderInstance() : designOutput.html) + fields
+  const fieldsHtml = (rec) => (designOutput.renderInstance ? designOutput.renderInstance(rec) : designOutput.html) + fields
     .map((f) => `<div class="pf" style="${fieldStyle(f)}">${escapeHtml(rec[f.column || f.key])}</div>`)
     .join('')
 

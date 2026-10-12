@@ -162,6 +162,9 @@ const activeTpl = ref(null)
 const activeDatasetId = ref('')
 const catalog = ref([])
 const sampleRow = ref(null)
+const sampleRowIndex = ref(0)
+const samplePhotos = ref({})
+let photoReadToken = 0
 const selectedIdx = ref(-1)
 const msg = ref('')
 const errorMsg = ref('')
@@ -169,6 +172,20 @@ const dragState = ref(null)
 const canvasEl = ref(null)
 const designs = ref([])
 const activeDesign = ref(null)
+watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value], async () => {
+  const token = ++photoReadToken
+  samplePhotos.value = {}
+  if (!activeDatasetId.value || !sampleRow.value || !activeDesign.value) return
+  const columns = [...new Set(activeDesign.value.layers.filter(l => l.variable && l.visible && !l.editorOnly).map(l => l.bindColumn))]
+  const entries = await Promise.all(columns.map(async column => {
+    try {
+      const report = await window.printpress.photoReport({ datasetId: activeDatasetId.value, column, rows: [sampleRowIndex.value] })
+      const row = report.results[0]
+      return [column, row?.status === 'matched' ? `pp://media/${row.assetId}` : '']
+    } catch { return [column, ''] }
+  }))
+  if (token === photoReadToken) samplePhotos.value = Object.fromEntries(entries)
+})
 const selectedDesignId = ref('')
 const templateKey = ref('')
 let requestedDesignNonce = null
@@ -309,6 +326,7 @@ function editBackgroundDesign() {
   }
   openDesigner({
     templateKey: templateKey.value,
+    datasetId: activeDatasetId.value,
     designRef: t.backgroundDesign ? { ...t.backgroundDesign } : undefined,
     background: t.background || undefined,
     artboard: { ...outputItemSpec.value },
@@ -571,7 +589,8 @@ async function loadCatalog(dsId) {
     ])
     if (token !== catalogReadToken || dsId !== activeDatasetId.value) return
     catalog.value = fields
-    sampleRow.value = ds.rows.find((r) => Object.values(r).some((v) => String(v).trim())) || ds.rows[0] || null
+    sampleRowIndex.value = Math.max(0, ds.rows.findIndex((r) => Object.values(r).some((v) => String(v).trim())))
+    sampleRow.value = ds.rows[sampleRowIndex.value] || null
   } catch (err) {
     if (token === catalogReadToken && dsId === activeDatasetId.value) errorMsg.value = extractError(err)
   }
@@ -1575,7 +1594,7 @@ onBeforeUnmount(() => {
               <!-- 单页：整页底图 + 字段 -->
               <template v-if="!isGrid && !isFold">
                 <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
-                  <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                  <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
                 </div>
                 <img
                   v-if="bgUrl"
@@ -1609,7 +1628,7 @@ onBeforeUnmount(() => {
               <template v-if="isFold">
                 <div class="canvas-fold-half flip">
                   <div v-if="activeDesign" class="canvas-design">
-                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
                   </div>
                   <img
                     v-if="bgUrl"
@@ -1632,7 +1651,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="canvas-fold-half fold-ref">
                   <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
-                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
                   </div>
                   <img
                     v-if="bgUrl"
@@ -1676,7 +1695,7 @@ onBeforeUnmount(() => {
                   :style="{ left: c.left + '%', top: c.top + '%', width: c.w + '%', height: c.h + '%' }"
                 >
                   <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
-                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" />
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
                   </div>
                   <img
                     v-if="bgUrl"

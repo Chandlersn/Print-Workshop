@@ -5,6 +5,7 @@
  */
 import { ref, computed, watch, onMounted } from 'vue'
 import DatasetView from './views/DatasetView.vue'
+import PhotoLibraryView from './views/PhotoLibraryView.vue'
 import TemplateView from './views/TemplateView.vue'
 import PrintCenterView from './views/PrintCenterView.vue'
 import BackgroundDesignerView from './views/BackgroundDesignerView.vue'
@@ -14,6 +15,7 @@ import { designerNav } from './lib/designer-nav.js'
 
 const TABS = [
   { id: 'dataset', label: '数据', hint: '导入名单' },
+  { id: 'photos', label: '变量照片', hint: '管理人像与名单关联' },
   { id: 'designer', label: '底图制作', hint: '编辑图片与图层' },
   { id: 'template', label: '模板', hint: '设计版式' },
   { id: 'print', label: '打印中心', hint: '批量出片' },
@@ -364,6 +366,7 @@ onMounted(async () => {
     <main class="app-main">
       <KeepAlive include="TemplateView,BackgroundDesignerView">
         <DatasetView v-if="activeTab === 'dataset'" />
+        <PhotoLibraryView v-else-if="activeTab === 'photos'" @navigate="activeTab = $event" />
         <TemplateView v-else-if="activeTab === 'template'" />
         <BackgroundDesignerView v-else-if="activeTab === 'designer'" />
         <PrintCenterView v-else />

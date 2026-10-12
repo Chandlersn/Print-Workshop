@@ -100,7 +100,7 @@ function normalizeSource(value) {
 
 function normalizeDesign(input) {
   const doc = object(input, '底图工程')
-  if (doc.schemaVersion !== undefined && ![1, 2, 3, 4].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
+  if (doc.schemaVersion !== undefined && ![1, 2, 3, 4, 5].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
   const board = object(doc.artboard, '画布')
   const layers = doc.layers === undefined ? [] : doc.layers
   if (!Array.isArray(layers) || layers.length > LIMITS.layers) throw new Error(`最多支持 ${LIMITS.layers} 个图层`)
@@ -139,7 +139,16 @@ function normalizeDesign(input) {
         // 旧工程与所有不传新选项的调用方行为完全不变。渲染侧见 renderDesign。
         editorOnly: bool(l.editorOnly, false, '仅编辑可见'),
       }
-      if (l.type === 'image') {
+      if (l.type === 'image' && l.variable === true) {
+        out.variable = true
+        out.bindColumn = string(l.bindColumn, '', 200, '照片绑定列').trim()
+        if (!out.bindColumn) throw new Error('变量图需要绑定照片文件名列')
+        out.fit = l.fit === undefined ? 'cover' : l.fit
+        if (!['cover', 'contain'].includes(out.fit)) throw new Error('照片适应方式无效')
+        const focal = l.focal === undefined ? {} : object(l.focal, '照片焦点')
+        out.focal = { x: number(focal.x, 0.5, 0, 1, '照片水平焦点'), y: number(focal.y, 0.5, 0, 1, '照片垂直焦点') }
+        out.radius = number(l.radius, 0, 0, 1000, '照片圆角')
+      } else if (l.type === 'image') {
         out.assetId = token(l.assetId, '图层素材标识')
         if (!Object.hasOwn(assets, out.assetId)) throw new Error(`图片图层缺少素材：${out.name}`)
         const crop = l.crop === undefined ? {} : object(l.crop, '裁切区域')
@@ -212,6 +221,7 @@ function normalizeDesign(input) {
   if (result.groups.length || result.guides.length) version = Math.max(version, 2)
   if (result.layers.some(layer => layer.editorOnly)) version = Math.max(version, 3)
   if (result.artboard.backgroundPaint || result.layers.some(layer => layer.fillPaint || layer.shadow)) version = Math.max(version, 4)
+  if (result.layers.some(layer => layer.variable)) version = Math.max(version, 5)
   result.schemaVersion = version
   // Record uploaded fonts so a missing file cannot silently become a system fallback.
   const fontAssets = object(doc.fontAssets === undefined ? {} : doc.fontAssets, '字体素材表')
@@ -281,7 +291,13 @@ function renderDesign(input, options = {}) {
   const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly)).map(l => {
     let body = ''
     const style = [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${l.opacity}`]
-    if (l.type === 'image') {
+    if (l.type === 'image' && l.variable) {
+      const url = options.photoUrl?.(l)
+      style.push('overflow:hidden', `border-radius:${l.radius}mm`)
+      if (url) body = `<img data-photo-column="${escapeHtml(l.bindColumn)}" src="${escapeHtml(url)}" style="display:block;width:100%;height:100%;object-fit:${l.fit};object-position:${l.focal.x * 100}% ${l.focal.y * 100}%">`
+      else if (url !== null && options.showPhotoPlaceholder) body = `<div style="box-sizing:border-box;width:100%;height:100%;border:0.3mm dashed #987b57;background:#eee7d9;display:flex;align-items:center;justify-content:center;text-align:center;color:#725a3c;font:10pt sans-serif;overflow:hidden">变量图<br>按名单配图列匹配</div>`
+      else if (url !== null && options.requirePhotos) throw new Error(`变量图未关联照片：${l.bindColumn}`)
+    } else if (l.type === 'image') {
       let cls = assetClasses.get(l.assetId)
       if (!cls) {
         cls = `${prefix}-asset-${assetClasses.size}`

@@ -67,6 +67,15 @@ contextBridge.exposeInMainWorld('printpress', {
     ipcRenderer.invoke('dataset:setColumnPrint', { datasetId, key, printOn }),
   fieldCatalog: (id) => ipcRenderer.invoke('catalog:fields', id),
 
+  importPhotoFolder: (payload) => ipcRenderer.invoke('photo:importDialog', payload),
+  photoReport: (payload) => ipcRenderer.invoke('photo:report', payload),
+  setPhotoMatchColumn: (datasetId, key) => ipcRenderer.invoke('dataset:setPhotoMatchColumn', { datasetId, key }),
+  onPhotoProgress: (cb) => {
+    const handler = (_e, progress) => cb(progress)
+    ipcRenderer.on('photo:progress', handler)
+    return () => ipcRenderer.removeListener('photo:progress', handler)
+  },
+
   // 模板
   listTemplates: () => ipcRenderer.invoke('template:list'),
   getTemplate: (id) => ipcRenderer.invoke('template:get', id),
@@ -134,6 +143,14 @@ contextBridge.exposeInMainWorld('printpress', {
   printGenerate: (payload) => ipcRenderer.invoke('print:generate', payload),
   printExportPdf: (payload) => ipcRenderer.invoke('print:exportPdf', payload),
   printSend: (payload) => ipcRenderer.invoke('print:send', payload),
+  /** 取消进行中的打印/导出（S1.3-c）：批次边界生效，见 print:cancel */
+  printCancel: (jobKey) => ipcRenderer.invoke('print:cancel', { jobKey }),
+  /** 订阅分批出片进度（jobKey / phase / index / batches / rows / pages…）；返回退订函数 */
+  onPrintProgress: (cb) => {
+    const handler = (_e, p) => cb(p)
+    ipcRenderer.on('print:progress', handler)
+    return () => ipcRenderer.removeListener('print:progress', handler)
+  },
 
   // 打印历史
   listJobs: () => ipcRenderer.invoke('job:list'),

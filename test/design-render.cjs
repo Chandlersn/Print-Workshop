@@ -257,29 +257,52 @@ Module._load = function (request, parent, isMain) {
 }
 let waitPrintResources
 try { ({ waitPrintResources } = require('../electron/printer.cjs')) } finally { Module._load = originalLoad }
-function resourceContext({ failImage = false, fontError = false, hang = false } = {}) {
+// 伪 DOM：覆盖新守卫的全部输入面——<img> 加载等待、零尺寸坏图、加载失败、
+// CSS 底图、按 src 去重抽检 3 张、顺序解码（同时只有一张在分配位图）。
+// specs: [{ src, failLoad }]；failLoad = onerror（缺原件）；naturalWidth=0 = 坏图。
+function resourceContext({ specs = [], failImage = false, fontError = false, hang = false } = {}) {
   const decoded = []
+  let inFlight = 0
+  let maxInFlight = 0
   class Image {
-    constructor() { this.naturalWidth = 2; this.naturalHeight = 1 }
+    constructor() { this._src = ''; this.complete = false; this.naturalWidth = 2; this.naturalHeight = 1 }
+    get src() { return this._src }
+    set src(v) {
+      this._src = v
+      this.complete = true // 伪 DOM：赋值即视为加载完成（加载慢/失败的路径由 specs 的 <img> 覆盖）
+    }
     async decode() {
-      if (hang) return new Promise(() => {})
-      if (failImage) throw new Error('test image decode failed')
-      await new Promise(resolve => setTimeout(resolve, 4))
-      decoded.push(this.src)
+      inFlight++; maxInFlight = Math.max(maxInFlight, inFlight)
+      try {
+        if (hang) return new Promise(() => {})
+        if (failImage) throw new Error('test image decode failed')
+        await new Promise(resolve => setTimeout(resolve, 4))
+        decoded.push(this._src)
+      } finally { inFlight-- }
     }
   }
+  const images = specs.map((spec) => {
+    const img = new Image()
+    img._src = spec.src
+    if (spec.failLoad) setTimeout(() => img.onerror && img.onerror(), 1)
+    else if (spec.broken) { img.complete = true; img.naturalWidth = 0; img.naturalHeight = 0 }
+    else setTimeout(() => { img.complete = true; img.onload && img.onload() }, 1)
+    return img
+  })
   const fonts = [{ family: 'Example', status: fontError ? 'error' : 'loaded' }]
   fonts.ready = Promise.resolve(fonts)
   return {
-    decoded, Image, setTimeout, clearTimeout,
+    decoded, Image, setTimeout, clearTimeout, images, maxInFlight: () => maxInFlight,
     document: {
       styleSheets: [{ cssRules: [{ style: { backgroundImage: 'url("data:image/png;base64,AAAA")' } }, { style: { backgroundImage: 'url("data:image/png;base64,AAAA")' } }] }],
-      querySelectorAll: () => [], images: [], fonts, body: { getBoundingClientRect: () => ({}) },
+      querySelectorAll: () => [], images, fonts, body: { getBoundingClientRect: () => ({}) },
     },
   }
 }
 async function runResources() {
-  const evaluate = context => vm.runInNewContext(`(${waitPrintResources.toString()})(35)`, context)
+  // 大作业抽检路径要跑完 20 张加载 + 3 张解码 + CSS 底图，vm 序列化有开销，
+  // 给 500ms；卡死用例单独用 30ms，不拖慢整套。
+  const evaluate = (context, timeout = 500) => vm.runInNewContext(`(${waitPrintResources.toString()})(${timeout})`, context)
   const ready = resourceContext()
   await evaluate(ready)
   check('打印等待CSS背景实际解码完成，共用URL只解码一次', () => assert.equal(ready.decoded.length, 1))
@@ -287,8 +310,23 @@ async function runResources() {
   passed++; console.log('  ok - 图片解码失败阻断打印')
   await assert.rejects(evaluate(resourceContext({ fontError: true })), /字体加载失败/)
   passed++; console.log('  ok - 字体加载失败阻断打印')
-  await assert.rejects(evaluate(resourceContext({ hang: true })), /超时/)
+  await assert.rejects(evaluate(resourceContext({ hang: true }), 30), /超时/)
   passed++; console.log('  ok - 卡住的图片解码超时退出')
+
+  // —— 大作业守卫（S1.3）：等加载 + 零尺寸兜底 + 抽检 3 张顺序解码 ——
+  const many = Array.from({ length: 20 }, (_, i) => ({ src: `pp://media/asset_${i}` }))
+  const passed20 = resourceContext({ specs: many })
+  await evaluate(passed20)
+  check('20 张大图全部加载完成才放行', () => assert.equal(passed20.images.every(i => i.complete), true))
+  const imgDecoded = passed20.decoded.filter(src => src.startsWith('pp://'))
+  check('只抽检 3 张真解码，不再强制全量 decode（S1 实测全量 decode 第 7 张必炸）',
+    () => assert.equal(imgDecoded.length, 3))
+  check('抽检解码是顺序的（同时只有一张在分配位图，避开并发解码预算墙）',
+    () => assert.equal(passed20.maxInFlight(), 1))
+  await assert.rejects(evaluate(resourceContext({ specs: [{ src: 'x', broken: true }] })), /图片解码失败/)
+  passed++; console.log('  ok - 零尺寸坏图阻断打印')
+  await assert.rejects(evaluate(resourceContext({ specs: [{ src: 'x', failLoad: true }] })), /图片加载失败/)
+  passed++; console.log('  ok - 图片加载失败（缺原件）阻断打印')
   console.log(`\n图层打印集成：${passed} 项通过`)
 }
 runResources().catch(err => { console.error(err); process.exitCode = 1 })

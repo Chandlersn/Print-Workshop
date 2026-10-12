@@ -72,15 +72,67 @@ function normalizeSelection(selection, total) {
 
 /**
  * 出片范围解析：rows 为行级勾选索引集合（null / 缺省 = 全量）。
- * 返回 { rows, selection }：selection 为规范化索引集合，全量时为 null。
+ * range 为分批导出的行区间 { from, to }（0 基，[from, to)）——S1.3-b 按整纸
+ * 切批后逐批渲染用。返回 { rows, selection, batch, rowIndexes }：
+ * - selection 保持整次出片的口径（留痕与「已打」回写判定不能被单批次
+ *   歪曲：一批 100 行不能把全量导出误判成部分出片）
+ * - rowIndexes 为本次实际出行在数据集里的行号（照片未匹配报错定位用；
+ *   非分批路径下它就是 selection，行为与以前逐字一致）
  */
-function resolveScope(ds, { rows } = {}) {
+function resolveScope(ds, { rows, range } = {}) {
+  const clipRange = (n) => {
+    const rawFrom = range && Number.isFinite(range.from) ? Math.floor(range.from) : 0
+    const rawTo = range && Number.isFinite(range.to) ? Math.floor(range.to) : n
+    const from = Math.max(0, Math.min(rawFrom, n))
+    const to = Math.max(from, Math.min(rawTo, n))
+    return { from, to }
+  }
   if (Array.isArray(rows)) {
     const selection = normalizeSelection(rows, ds.rows.length)
     if (!selection.length) throw new Error('请至少勾选一行再出片')
-    return { rows: selection.map((i) => ds.rows[i]), selection }
+    if (range) {
+      const { from, to } = clipRange(selection.length)
+      const indexes = selection.slice(from, to)
+      if (!indexes.length) throw new Error('分批区间为空：没有可出片的行')
+      return { rows: indexes.map((i) => ds.rows[i]), selection, batch: { from, to, size: to - from }, rowIndexes: indexes }
+    }
+    return { rows: selection.map((i) => ds.rows[i]), selection, rowIndexes: selection }
   }
-  return { rows: ds.rows, selection: null }
+  if (range) {
+    const { from, to } = clipRange(ds.rows.length)
+    const indexes = []
+    for (let i = from; i < to; i++) indexes.push(i)
+    if (!indexes.length) throw new Error('分批区间为空：没有可出片的行')
+    return { rows: indexes.map((i) => ds.rows[i]), selection: null, batch: { from, to, size: to - from }, rowIndexes: indexes }
+  }
+  return { rows: ds.rows, selection: null, rowIndexes: null }
+}
+
+/**
+ * 按完整物理纸张切批（S1.3-b）。
+ *
+ * 为什么不能按固定记录数硬切：多联一页 = perPage 条记录，从页中间切开会让
+ * 同一条记录裂进两个批次（拼接后花版、漏行）。批边界必须落在页边界上——
+ * 批内记录数向上取整到 perPage 的整数倍，尾批取剩余（尾批的零头页是整份
+ * 作业的最后一页，不涉及跨批拆分）。
+ *
+ * @param total 记录数
+ * @param layout buildBatchHtml 返回的 layout 摘要（enabled / fold / perPage）
+ * @param maxRows 每批目标记录数（默认 100：S1 实测 100 张照片页 ≈ 1.5GB
+ *                渲染进程，是 4GB 目标内的安全档；文字作业每批远小于此）
+ * @returns [{ start, end, rows, pages, perPage }]，行区间为 [start, end)
+ */
+function planBatches(total, layout, maxRows = 100) {
+  const perPage = layout && layout.enabled ? (layout.fold ? 1 : Math.max(1, Math.floor(layout.perPage) || 1)) : 1
+  if (!(total > 0)) return []
+  const target = Math.max(1, Math.floor(maxRows) || 100)
+  const chunk = Math.max(perPage, Math.ceil(target / perPage) * perPage)
+  const batches = []
+  for (let start = 0; start < total; start += chunk) {
+    const end = Math.min(start + chunk, total)
+    batches.push({ start, end, rows: end - start, pages: Math.ceil((end - start) / perPage), perPage })
+  }
+  return batches
 }
 
 /** 范围摘要：selected 为本次出片行数；partial 表示非全量（据此决定是否回写数据集状态） */
@@ -214,17 +266,21 @@ function validateBatch(datasetId, templateId, rows) {
   }
 }
 
-/** 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；范围由 rows（行级勾选）限定 */
-function buildBatchHtml(datasetId, templateId, rows) {
+/** 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；范围由 rows（行级勾选）限定；
+ *  range 为分批导出的行区间（S1.3-b），只影响本次渲染的行，不改 selection 口径 */
+function buildBatchHtml(datasetId, templateId, rows, { range } = {}) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
   const spec = renderEngine.pageSpec(tpl.pageSize)
-  const scope = resolveScope(ds, { rows })
+  const scope = resolveScope(ds, { rows, range })
   const list = scope.rows
   // 多联：一页装多条记录，页数 ≠ 记录数，必须分开报，否则预览会按记录数撑高
   const layout = renderEngine.resolveLayout(tpl.layout, spec)
   const pageCount = layout.enabled ? Math.ceil(list.length / layout.perPage) : list.length
-  const preparedDesign = renderEngine.prepareTemplateDesign(tpl)
+  const doc = renderEngine.resolveTemplateDesign(tpl)
+  const photoColumns = (doc?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly).map(layer => layer.bindColumn)
+  const photos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, list, scope.rowIndexes)
+  const preparedDesign = renderEngine.prepareTemplateDesign(tpl, photos)
   // 底图输出分辨率：交给界面提示「印出来够不够清」。
   // 成品口径与渲染一致——多联是单格、对折是半页、单页是整张纸。
   const itemW = layout.enabled ? layout.itemW : spec.w
@@ -242,6 +298,7 @@ function buildBatchHtml(datasetId, templateId, rows) {
     html: renderEngine.buildHtml(tpl, list, { withToolbar: false, preparedDesign }),
     snapshotHtml: renderEngine.buildHtml(tpl, list, { withToolbar: true, preparedDesign }),
     recordCount: list.length,
+    photoAssets: photos.assets,
     pageCount,
     bgDpi,
     designInfo: preparedDesign.info,
@@ -286,7 +343,7 @@ function sanitizeFilename(name) {
  * 范围字段：partial 标记部分出片（供 UI 标注「部分 N/总」并与全量区分），
  * selection 仅在部分出片时落盘（全量为 null，避免冗余）。
  */
-function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, snapshotHtml, status, detail }) {
+function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, snapshotHtml, photoAssets = [], status, detail }) {
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const jobId = `job_${now.getTime().toString(36)}${crypto.randomBytes(3).toString('hex')}`
@@ -298,7 +355,8 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     const jobDir = path.join(ARCHIVE_ROOT, month, jobId)
     fs.mkdirSync(jobDir, { recursive: true })
     snapshotRel = `archive/${month}/${jobId}/snapshot.html`
-    fs.writeFileSync(path.join(DATA_DIR, snapshotRel), snapshotHtml || '', 'utf-8')
+    const snapshot = require('./photo-output.cjs').archivePhotos(jobDir, snapshotHtml || '', photoAssets)
+    fs.writeFileSync(path.join(DATA_DIR, snapshotRel), snapshot, 'utf-8')
   }
 
   const isPartial = Boolean(partial)
@@ -346,7 +404,7 @@ function resolveSnapshot(jobId) {
 
 /**
  * 删除打印任务：元数据移除 + 归档目录清理。
- * 归档目录（archive/<月>/<jobId>/）仅含 snapshot.html 单文件，
+ * 归档目录（archive/<月>/<jobId>/）含 snapshot.html，变量图快照另含 photos/ 原件，
  * 元数据经 saveJson 原子落盘；两步都成功才算删净，目录已不存在视为已删。
  */
 function deleteJob(jobId) {
@@ -393,5 +451,6 @@ module.exports = {
   resolveScope,
   scopeInfo,
   shouldMarkPrinted,
+  planBatches,
   ARCHIVE_ROOT,
 }

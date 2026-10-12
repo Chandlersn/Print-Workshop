@@ -14,6 +14,7 @@ const props = defineProps({
    * 默认值就是安全值——漏传的后果是「参考框不显示」，而不是「参考框被当成成品预览」。
    */
   showEditorOnly: { type: Boolean, default: false },
+  photos: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['error'])
 const prefix = `design-surface-${getCurrentInstance().uid}`
@@ -37,6 +38,8 @@ const content = computed(() => {
       assetUrl,
       fontFamily: normalizeFamily,
       includeEditorOnly: props.showEditorOnly,
+      showPhotoPlaceholder: true,
+      photoUrl: layer => props.showEditorOnly ? undefined : (props.photos[layer.bindColumn] || null),
     })
   } catch (err) {
     return { html: '', css: '', error: err.message || String(err) }

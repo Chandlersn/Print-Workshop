@@ -5,13 +5,14 @@
  */
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { cellNav, ackCell } from '../lib/cell-nav.js'
+import { activeDataset, rememberDataset } from '../lib/active-dataset.js'
 import {
   sanitizeHidden, hiddenKeysOf, withHidden, visibleColumnsOf, canHideMore, pruneHidden,
 } from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const datasets = ref([])
-const activeId = ref('')
+const activeId = ref(activeDataset.value)
 const detail = ref(null)
 const importing = ref(false)
 const errorMsg = ref('')
@@ -209,6 +210,7 @@ async function refreshList(preferId) {
   } else {
     activeId.value = ''
     detail.value = null
+    if (activeDataset.value === target) rememberDataset('')
   }
 }
 
@@ -224,13 +226,16 @@ function pruneStaleHidden() {
 
 async function selectDataset(id) {
   activeId.value = id
+  rememberDataset(id)
+  detail.value = null
   closeMenus() // 菜单里记的是上一个数据集的列，留着会误操作
   // 页码必须归零：切到行数更少的数据集时，旧的 page 会让 pagedRows 直接算成空，
   // 而分页器只在 pageCount > 1 时渲染——表格空白、分页器也没了，成死路。
   // removeRow / appendRow 都会重置，唯独切换数据集这条路径漏了。
   page.value = 0
   try {
-    detail.value = await window.printpress.getDataset(id)
+    const result = await window.printpress.getDataset(id)
+    if (activeId.value === id) detail.value = result
   } catch (err) {
     errorMsg.value = extractError(err)
   }
@@ -462,6 +467,21 @@ async function togglePrint(col) {
   } catch (err) {
     errorMsg.value = extractError(err)
   }
+}
+
+const photoSwitchBusy = ref(false)
+async function togglePhotoMatch(col) {
+  if (!detail.value || photoSwitchBusy.value) return
+  const id = detail.value.id
+  const key = detail.value.photoMatchColumn === col.key ? null : col.key
+  photoSwitchBusy.value = true
+  try {
+    const result = await window.printpress.setPhotoMatchColumn(id, key)
+    if (detail.value?.id === id) detail.value.photoMatchColumn = result.photoMatchColumn
+    const summary = datasets.value.find(ds => ds.id === id)
+    if (summary) summary.photoMatchColumn = result.photoMatchColumn
+  } catch (err) { errorMsg.value = extractError(err) }
+  finally { photoSwitchBusy.value = false }
 }
 
 async function commitRename() {
@@ -727,6 +747,7 @@ watch(() => cellNav.req, async (req) => {
           <span class="grid-meta">{{ detail.rows.length }} 行 · 列头点名字改名，「印」控制字段是否进入模板设计页，「▾」控制这一列显示不显示</span>
         </h3>
         <div class="grid-toolbar">
+          <span class="muted">配图：{{ columns.find(c => c.key === detail.photoMatchColumn)?.alias || detail.photoMatchColumn || '未启用（点击列头选择）' }}</span>
           <span class="tb-hint">空值打印时留空，补齐后再打印即可通过校验</span>
           <span class="tb-spacer"></span>
           <button
@@ -772,6 +793,7 @@ watch(() => cellNav.req, async (req) => {
                     :title="isPrintOn(col) ? '已启用打印：点击取消启用' : '未启用：点击启用打印（字段将出现在模板设计页）'"
                     @click.stop="togglePrint(col)"
                   >印</button>
+                  <button class="print-toggle photo-toggle" :class="{ on: detail.photoMatchColumn === col.key }" :aria-pressed="detail.photoMatchColumn === col.key" :data-photo-key="col.key" :disabled="photoSwitchBusy" :title="detail.photoMatchColumn === col.key ? '已按此列配图，点击关闭；每份名单只能启用一列' : '按此列匹配同名照片；自动取消上一列，缺图留白'" @click.stop="togglePhotoMatch(col)">配图</button>
                   <button
                     class="col-menu-btn"
                     data-menu-trigger

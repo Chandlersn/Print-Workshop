@@ -235,6 +235,7 @@ function summary(ds) {
     columnCount: ds.columns.length,
     // 已激活打印的字段数（列头「印」开关）——模板页数据集下拉据此置顶排序
     printCols: ds.columns.filter((c) => c.printOn === true).length,
+    photoMatchColumn: ds.photoMatchColumn || null,
     // 打印/导出过的状态回写——数据页侧栏据此变色，用户一眼看出哪些工作簿还没打
     printCount: ds.printCount || 0,
     lastPrintedAt: ds.lastPrintedAt || '',
@@ -361,6 +362,17 @@ function deleteRow(id, rowIndex) {
 }
 
 /** 列级打印开关：停用的字段不出现在模板设计页字段清单（决策权在用户，渲染不受影响——已放置字段照常出图） */
+function setPhotoMatchColumn(id, key) {
+  const list = loadAll()
+  const ds = list.find(d => d.id === id)
+  if (!ds) throw new Error('所选数据集已不存在，请刷新后重新选择')
+  if (key !== null && (typeof key !== 'string' || !ds.columns.some(c => c.key === key))) throw new Error('配图列不存在')
+  // One scalar is authoritative: selecting another column atomically replaces the old one.
+  ds.photoMatchColumn = key
+  persistAll(list)
+  return { photoMatchColumn: key }
+}
+
 function setColumnPrint(id, key, on) {
   const list = loadAll()
   const ds = list.find((d) => d.id === id)
@@ -419,6 +431,7 @@ module.exports = {
   addRow,
   deleteRow,
   setColumnPrint,
+  setPhotoMatchColumn,
   markPrinted,
   fieldCatalog,
 }

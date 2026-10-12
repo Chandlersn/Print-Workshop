@@ -28,9 +28,10 @@ function outputSize(artboard, dpi) {
 function prepareExport({ design, dpi = 300, transparent = false } = {}) {
   if (typeof transparent !== 'boolean') throw new Error('PNG 透明背景选项必须为布尔值')
   const raw = normalizeDesign(design)
+  if (raw.layers.some(layer => layer.variable && layer.visible && !layer.editorOnly)) throw new Error('含变量图的工程请应用到模板，在打印中心选择名单导出 PDF；PNG 底图不包含名单照片')
   const size = outputSize(raw.artboard, dpi)
   const doc = designs.resolveDraft(raw)
-  const usedAssets = new Set(doc.layers.filter(layer => layer.visible && layer.type === 'image').map(layer => layer.assetId))
+  const usedAssets = new Set(doc.layers.filter(layer => layer.visible && layer.type === 'image' && !layer.variable).map(layer => layer.assetId))
   let estimated = size.width * size.height * 12
   for (const id of usedAssets) {
     const asset = doc.assets[id]

@@ -40,8 +40,9 @@ const dsOptions = computed(() =>
 // v0.1 起误加 hasBackground 条件把这类模板全部挡在下拉外，v0.2.3 修正
 const tplOptions = computed(() =>
   templates.value
-    .filter((t) => t.fieldCount > 0)
-    .map((t) => ({ value: t.id, label: t.datasetName ? `${t.name} × ${t.datasetName}` : t.name })))
+    .filter((t) => t.fieldCount > 0 || t.photoCount > 0)
+    .map((t) => ({ value: t.id, label: t.datasetName ? `${t.name} × ${t.datasetName}` : t.name,
+      badge: t.photoCount > 0 ? '变量图' : '' })))
 const ready = computed(() => Boolean(selDs.value && selTpl.value))
 const dsTotalRows = computed(() => datasets.value.find((d) => d.id === selDs.value)?.rowCount ?? 0)
 /** 当前选中模板（含绑定信息） */

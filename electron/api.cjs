@@ -29,6 +29,7 @@
  */
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
 const { Worker } = require('worker_threads')
 const { loadJson, saveJson } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
@@ -37,10 +38,37 @@ const designs = require('./designs.cjs')
 const designPresets = require('./design-presets.cjs')
 const fonts = require('./fonts.cjs')
 const assetLibrary = require('./asset-library.cjs')
+const photoLibrary = require('./photo-library.cjs')
 const designPackage = require('./design-package.cjs')
 const printDomain = require('./print.cjs')
+const printBatch = require('./print-batch.cjs')
 const dataDirModule = require('./data-dir.cjs')
 const cache = require('./cache.cjs')
+
+// ---------------------------------------------------------------------------
+// 分批出片任务（S1.3-b/c）：jobKey → { canceled }。
+// 取消只翻标志位——真正的停止发生在批次边界（printToPDF 进行中不可中断，
+// 这一条必须对界面诚实：见 print:progress 的阶段事件）。
+// ---------------------------------------------------------------------------
+const printTasks = new Map()
+
+function registerPrintTask(jobKey) {
+  const task = { canceled: false }
+  printTasks.set(jobKey, task)
+  return task
+}
+
+function cancelPrintTask(jobKey) {
+  const task = printTasks.get(String(jobKey))
+  if (!task) return { ok: false, reason: '任务不存在或已结束' }
+  task.canceled = true
+  return { ok: true }
+}
+
+/** jobKey 缺省生成：粒度取「一次 exportPdf/send 调用」 */
+function newJobKey() {
+  return `print_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`
+}
 
 // 工程包导出在 worker 中运行；SharedArrayBuffer 让 UI 取消在同步 ZIP 循环里也能被观察到。
 const packageExportTasks = new Map()
@@ -435,6 +463,36 @@ const OPS = {
       printOn: { required: true, desc: 'true 启用 / false 停用' },
     },
     run: (p) => dataset.setColumnPrint(String(p.datasetId), String(p.key), Boolean(p.printOn)),
+  },
+
+  'dataset:setPhotoMatchColumn': {
+    write: true,
+    params: { datasetId: { required: true, desc: '数据集 id' }, key: { required: false, desc: '唯一配图列 key；null 关闭配图' } },
+    run: p => dataset.setPhotoMatchColumn(String(p.datasetId), p.key === null ? null : p.key),
+  },
+
+  'photo:importDialog': {
+    write: true,
+    gui: 'dialog',
+    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' } },
+    run: async (p, ctx) => {
+      const selected = await ctx.dialog.openFile({ title: '选择照片文件夹', properties: ['openDirectory'] })
+      if (selected.canceled || !selected.filePaths?.length) return { canceled: true }
+      const report = await photoLibrary.importFolder({ datasetId: p.datasetId, column: p.column, folder: selected.filePaths[0] }, {
+        makeThumbnail: ctx.thumbs?.makeThumbnail,
+        onProgress: progress => ctx.emit('photo:progress', { datasetId: p.datasetId, column: p.column, ...progress }),
+      })
+      return { canceled: false, report }
+    },
+  },
+  'photo:importFolder': {
+    write: true,
+    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, folder: { required: true, desc: '受授权的本地照片目录（CLI）' } },
+    run: p => photoLibrary.importFolder(p),
+  },
+  'photo:report': {
+    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, rows: { required: false, desc: '原始行号数组（0 基）' } },
+    run: p => photoLibrary.report(p),
   },
 
   'catalog:fields': {
@@ -1055,6 +1113,11 @@ const OPS = {
    * - agent / CLI：直接给 savePath
    * 两条路径都必须有 ctx.printer（Electron 的隐藏窗口 + printToPDF），
    * 所以本操作在纯 Node 下无论如何都不可用——这是架构事实，不是缺陷。
+   *
+   * 分批（S1.3-b）：单窗口加载 500 张照片页会把渲染进程推到 7.4GB 并打挂
+   * printToPDF（S1 压测实测）。计划批数 >1 时按**完整物理纸张**切批逐批出片，
+   * 合并校验后一次性发布；≤1 批走与以往逐字节一致的单发路径（含空数据集）。
+   * 进度经 ctx.emit('print:progress', …) 推送，取消走 print:cancel（批次边界生效）。
    */
   'print:exportPdf': {
     write: true,
@@ -1064,6 +1127,8 @@ const OPS = {
       templateId: { required: true, desc: '模板 id' },
       rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
       savePath: { required: false, desc: 'PDF 保存绝对路径；缺省时经 GUI 保存对话框询问' },
+      batchRows: { required: false, desc: '每批目标记录数（分批导出）；缺省 100' },
+      jobKey: { required: false, desc: '任务键（进度/取消关联）；缺省自动生成并随结果返回' },
     },
     run: async (p, ctx) => {
       const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
@@ -1086,8 +1151,30 @@ const OPS = {
         savePath = result.filePath
       }
 
+      const jobKey = p.jobKey ? String(p.jobKey) : newJobKey()
+      const task = registerPrintTask(jobKey)
+      const onProgress = (x) => {
+        try { ctx.emit('print:progress', { jobKey, ...x }) } catch { /* 进度事件异常不阻断出片 */ }
+      }
+      const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows)
       try {
-        const r = await ctx.printer.exportPdf(built.html, savePath)
+        let r
+        if (batches.length <= 1) {
+          // 单批：一条 printToPDF 直写最终文件，与分批上线前的逐字节行为一致
+          r = await ctx.printer.exportPdf(built.html, savePath)
+        } else {
+          r = await printBatch.exportPdfBatched({
+            domain: printDomain,
+            printer: ctx.printer,
+            datasetId: String(p.datasetId),
+            templateId: String(p.templateId),
+            rows: p.rows,
+            savePath,
+            batches,
+            onProgress,
+            shouldCancel: () => task.canceled,
+          })
+        }
         // 状态回写（不变量「留痕必全，状态只认全量」）：只有全量出片才回写数据集「已打」状态；
         // 部分出片（行级勾选）照常留痕，但不改侧栏徽标与变色，避免「打了 3 个人却显示整份已打」
         if (printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'pdf')
@@ -1102,11 +1189,15 @@ const OPS = {
           partial: built.scope.partial,
           selection: built.selection,
           snapshotHtml: built.snapshotHtml,
+          photoAssets: built.photoAssets,
           status: 'ok',
-          detail: `${r.bytes} bytes → ${r.path}`,
+          detail: batches.length > 1
+            ? `${r.bytes} bytes → ${r.path}（${r.batches} 批合并，${r.pages} 页）`
+            : `${r.bytes} bytes → ${r.path}`,
         })
-        return { canceled: false, ...r, jobId: job.id, scope: built.scope }
+        return { canceled: false, ...r, jobId: job.id, jobKey, scope: built.scope }
       } catch (err) {
+        // 取消与失败都留痕，但状态不同：取消 = 用户主动叫停（无半成品、无最终文件）
         printDomain.createJob({
           templateId: String(p.templateId),
           templateName: built.templateName,
@@ -1118,10 +1209,13 @@ const OPS = {
           partial: built.scope.partial,
           selection: built.selection,
           snapshotHtml: built.snapshotHtml,
-          status: 'failed',
+          photoAssets: built.photoAssets,
+          status: err && err.canceled ? 'canceled' : 'failed',
           detail: String(err.message || err),
         })
         throw err
+      } finally {
+        printTasks.delete(jobKey)
       }
     },
   },
@@ -1130,6 +1224,10 @@ const OPS = {
    * 直接送打印机。必须留在 GUI 上下文：webContents.print 要么弹系统打印对话框
    * （silent=false，用户可确认/取消），要么静默直打（silent=true）——两者都依赖
    * 一个真实的 Electron 窗口，纯 Node 下不存在替代实现。
+   *
+   * 分批（S1.3-b）：与 PDF 同源的切批规则；非静默时**只有第一批弹系统对话框**
+   * （用户在那一弹确认的就是整份作业）。已提交系统队列的批次不承诺撤回，
+   * 失败/取消信息里带已提交数。
    */
   'print:send': {
     write: true,
@@ -1139,17 +1237,37 @@ const OPS = {
       templateId: { required: true, desc: '模板 id' },
       rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
       silent: { required: false, desc: 'true 静默直打；缺省 false 弹系统打印对话框' },
+      batchRows: { required: false, desc: '每批目标记录数（分批导出）；缺省 100' },
+      jobKey: { required: false, desc: '任务键（进度/取消关联）；缺省自动生成并随结果返回' },
     },
     run: async (p, ctx) => {
       const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
       const silent = Boolean(p && p.silent)
+      const jobKey = p.jobKey ? String(p.jobKey) : newJobKey()
+      const task = registerPrintTask(jobKey)
+      const onProgress = (x) => {
+        try { ctx.emit('print:progress', { jobKey, ...x }) } catch { /* 进度事件异常不阻断出片 */ }
+      }
+      const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows)
       // 直打失败必须留痕：打印是唯一会真正消耗纸张的出口，打印机离线、驱动报错、
       // 系统卡纸全在这里抛异常。没有 failed 记录的话，用户只看到一句报错，
       // 历史里查不到「当时出了什么、出了多少」，也无从判断该不该重打。
       // （与 print:exportPdf 的 catch 分支对称——两个出口不能一个留痕一个不留。）
       let r
       try {
-        r = await ctx.printer.sendToPrinter(built.html, { silent })
+        r = batches.length <= 1
+          ? await ctx.printer.sendToPrinter(built.html, { silent })
+          : await printBatch.sendToPrinterBatched({
+            domain: printDomain,
+            printer: ctx.printer,
+            datasetId: String(p.datasetId),
+            templateId: String(p.templateId),
+            rows: p.rows,
+            silent,
+            batches,
+            onProgress,
+            shouldCancel: () => task.canceled,
+          })
       } catch (err) {
         printDomain.createJob({
           templateId: String(p.templateId),
@@ -1162,10 +1280,13 @@ const OPS = {
           partial: built.scope.partial,
           selection: built.selection,
           snapshotHtml: built.snapshotHtml,
-          status: 'failed',
+          photoAssets: built.photoAssets,
+          status: err && err.canceled ? 'canceled' : 'failed',
           detail: String(err.message || err),
         })
         throw err
+      } finally {
+        printTasks.delete(jobKey)
       }
       // 真正送达「且为全量出片」才回写（部分出片留痕但不改数据集状态）；取消不标
       if (r.ok && printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'print')
@@ -1180,11 +1301,24 @@ const OPS = {
         partial: built.scope.partial,
         selection: built.selection,
         snapshotHtml: built.snapshotHtml,
+        photoAssets: built.photoAssets,
         status: r.ok ? 'ok' : 'canceled',
-        detail: r.ok ? (silent ? '静默直打' : '打印对话框确认') : String(r.error || ''),
+        detail: r.ok
+          ? `${silent ? '静默直打' : '打印对话框确认'}${r.batches > 1 ? `（${r.batches} 批）` : ''}`
+          : String(r.error || ''),
       })
-      return { ...r, scope: built.scope }
+      return { ...r, jobKey, scope: built.scope }
     },
+  },
+
+  /**
+   * 取消进行中的打印 / 导出（S1.3-c）。只翻标志位：printToPDF 进行中的批次
+   * 不可中断，停止发生在**批次边界**——所以取消后界面会看到最后一次
+   * batch-done 之后再无事件，随后整体以「已取消」收尾。
+   */
+  'print:cancel': {
+    params: { jobKey: { required: true, desc: 'print:exportPdf / print:send 返回的任务键' } },
+    run: (p) => cancelPrintTask(p.jobKey),
   },
 
   // ==================== 打印历史 ====================
@@ -1230,6 +1364,7 @@ function normalizeCtx(ctx) {
     app: c.app || {},
     dialog: c.dialog || null,
     printer: c.printer || null,
+    thumbs: c.thumbs || null,
     // 自动更新能力（electron-updater 在 main 侧，本层不得 require electron）
     autoUpdate: c.autoUpdate || null,
     emit: typeof c.emit === 'function' ? c.emit : () => {},

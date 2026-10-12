@@ -60,6 +60,9 @@ jobs:
       - name: PNG 像素、透明度与显示缩放（npm run test:design-export-e2e）
         shell: bash
         run: mkdir -p e2e-logs && npm run test:design-export-e2e 2>&1 | tee e2e-logs/03-design-export-e2e.log
+      - name: 照片匹配、原图 PDF 与归档回看（npm run test:photo-e2e）
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:photo-e2e 2>&1 | tee e2e-logs/04-photo-e2e.log
       # 测试自己会往 .workbuddy-ai/tmp/<…> 写失败截图与量测（design-e2e 失败时存 failure.png）。
       # 那是**隐藏目录**，而 upload-artifact 默认不收隐藏文件，所以先搬到非隐藏的 e2e-logs/ 再传。
       - name: 收拢失败现场
@@ -67,7 +70,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p e2e-logs
-          for d in design-acceptance design-png-acceptance; do
+          for d in design-acceptance design-png-acceptance photo-acceptance; do
             if [ -d ".workbuddy-ai/tmp/$d" ]; then cp -r ".workbuddy-ai/tmp/$d" "e2e-logs/"; fi
           done
           find e2e-logs -type f | head -60

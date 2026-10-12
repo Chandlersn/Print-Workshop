@@ -77,6 +77,10 @@ const LEGACY_CHANNELS = [
  * - design:touch：记一次「使用」（只刷摘要里的 lastUsedAt，供「最近使用」排序；不动版本号，见 I-29）
  */
 const ADDED_CHANNELS = [
+  'photo:importDialog',
+  'photo:importFolder',
+  'photo:report',
+  'dataset:setPhotoMatchColumn',
   'dataset:importFile',
   'dataset:deleteBatch',
   'template:uploadBackground',
@@ -122,6 +126,8 @@ const ADDED_CHANNELS = [
   'design:packageCancel',
   'design:packageCancelExport',
   'design:packagePickFont',
+  // 分批出片（S1.3-b/c）：按整纸切批的进度与取消（进度是事件，取消是操作）
+  'print:cancel',
 ]
 
 const CTX = { allowWrite: true, app: { version: 'test' }, dialog: null, printer: null }

@@ -552,4 +552,4 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource, withDesignLock: withLock, publishRevisionLocked }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource, withDesignLock: withLock, publishRevisionLocked }

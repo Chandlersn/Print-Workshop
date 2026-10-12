@@ -17,7 +17,7 @@ assert.ok(first.html.includes('stop-opacity="0.5"'))
 assert.notEqual(first.html.match(/id="(pp_effect_[^"]+)"/)[1], second.html.match(/id="(pp_effect_[^"]+)"/)[1])
 assert.throws(() => normalizeDesign({ ...base, artboard: { ...base.artboard, backgroundPaint: { ...paint, stops: [{ offset: 0.2, color: '#fff' }, { offset: 1, color: '#000' }] } } }), /首尾/)
 assert.throws(() => normalizeDesign({ ...base, layers: [{ id: 'line', type: 'line', fillPaint: paint }] }), /仅支持/)
-assert.throws(() => normalizeDesign({ ...base, schemaVersion: 5 }), /版本/)
+assert.throws(() => normalizeDesign({ ...base, schemaVersion: 6 }), /版本/)
 const shadow = { dxMm: -3, dyMm: 4, blurMm: 2, color: '#112233', opacity: 0.35 }
 const withShadow = normalizeDesign({ ...base, layers: [{ id: 'shadow-box', type: 'rect', x: 5, y: 5, w: 30, h: 12, fillPaint: paint, shadow }] })
 assert.equal(withShadow.schemaVersion, 4)

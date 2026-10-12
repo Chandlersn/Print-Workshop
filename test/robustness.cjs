@@ -178,7 +178,7 @@ console.log('== 4. 前端静态核查：模板画布与数据页 ==')
   ok(/ackCell\(\)/.test(nav), '消费后ack（否则每次进数据页重放上次跳转）')
   ok(/finally/.test(nav), 'ack 放在 finally（失败分支也要清）')
   ok(/cellNav\.req === req/.test(nav), '只 ack 同一条请求（处理期间的新请求不被吃掉）')
-  ok(/import \{ cellNav, ackCell \}/.test(dv), 'ackCell 已导入')
+  ok(/import\s*\{[^}]*\bcellNav\b[^}]*\backCell\b[^}]*\}\s*from\s*['"]\.\.\/lib\/cell-nav\.js['"]/.test(dv), 'ackCell 已从导航模块导入')
   ok(/export function ackCell/.test(src('src/lib/cell-nav.js')), 'ackCell 已导出')
 }
 

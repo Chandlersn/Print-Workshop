@@ -60,11 +60,17 @@ function listTemplates() {
   const dsList = dataset.listDatasets()
   return loadAll().map((t) => {
     const ds = dsList.find((d) => d.id === t.datasetId)
+    let photoCount = 0
+    if (t.backgroundDesign) {
+      try { photoCount = designs.getDesign(t.backgroundDesign.id, t.backgroundDesign.revision).layers.filter(l => l.variable && l.visible && !l.editorOnly).length }
+      catch { /* Missing artwork is diagnosed when the template is opened. */ }
+    }
     return {
       id: t.id,
       name: t.name,
       pageSize: t.pageSize,
       fieldCount: (t.fields || []).length,
+      photoCount,
       hasBackground: Boolean(t.background || t.backgroundDesign),
       datasetId: t.datasetId || '',
       datasetName: ds ? ds.name : '',

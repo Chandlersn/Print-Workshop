@@ -7,7 +7,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const props = defineProps({
   modelValue: { type: [String, Number], default: '' },
-  options: { type: Array, default: () => [] }, // [{ value, label, group?, disabled? }]
+  options: { type: Array, default: () => [] }, // [{ value, label, group?, disabled?, badge? }]
   placeholder: { type: String, default: '请选择' },
   width: { type: String, default: '160px' },
 })
@@ -17,10 +17,8 @@ const emit = defineEmits(['update:modelValue', 'change', 'open'])
 const open = ref(false)
 const rootEl = ref(null)
 
-const selectedLabel = computed(() => {
-  const hit = props.options.find((o) => o.value === props.modelValue)
-  return hit ? hit.label : props.placeholder
-})
+const selectedOption = computed(() => props.options.find((o) => o.value === props.modelValue))
+const selectedLabel = computed(() => selectedOption.value?.label ?? props.placeholder)
 
 // 渲染行：组标题行 + 选项行交错
 const rows = computed(() => {
@@ -72,8 +70,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootEl" class="custom-select" :style="{ width }">
-    <button type="button" class="cs-trigger" :class="{ open }" @click="toggle">
+    <button type="button" class="cs-trigger" :class="{ open, badged: selectedOption?.badge }" :title="selectedLabel" @click="toggle">
       <span class="cs-label" :class="{ placeholder: selectedLabel === placeholder }">{{ selectedLabel }}</span>
+      <span v-if="selectedOption?.badge" class="cs-badge">{{ selectedOption.badge }}</span>
       <span class="cs-arrow" :class="{ open }"></span>
     </button>
     <div v-if="open" class="cs-menu">
@@ -83,11 +82,12 @@ onBeforeUnmount(() => {
           v-else
           type="button"
           class="cs-option"
-          :class="{ selected: row.value === modelValue, disabled: row.disabled }"
+          :class="{ selected: row.value === modelValue, disabled: row.disabled, badged: row.badge }"
           :disabled="row.disabled"
           @click="pick(row)"
         >
-          {{ row.label }}
+          <span class="cs-option-label">{{ row.label }}</span>
+          <span v-if="row.badge" class="cs-badge">{{ row.badge }}</span>
         </button>
       </template>
       <div v-if="options.length === 0" class="cs-empty">暂无选项</div>
@@ -121,8 +121,34 @@ onBeforeUnmount(() => {
 }
 
 .cs-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cs-trigger.badged { border-color: var(--cinnabar); }
+.cs-trigger.badged .cs-label { flex: 1; text-align: left; }
+.cs-option.badged {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--cinnabar-soft);
+  box-shadow: inset 3px 0 var(--cinnabar);
+}
+.cs-option.badged .cs-option-label { min-width: 0; }
+.cs-badge {
+  flex-shrink: 0;
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 4px;
+  color: var(--cinnabar);
+  background: var(--paper-card);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
   white-space: nowrap;
 }
 
