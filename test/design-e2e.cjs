@@ -116,7 +116,16 @@ async function clickBlankCanvas() {
     const left = Math.max(s.left, c.left) + 4, right = Math.min(s.right, c.right) - 4
     const top = Math.max(s.top, c.top) + 4, bottom = Math.min(s.bottom, c.bottom) - 4
     for (let y = bottom; y > top; y -= 8) for (let x = right; x > left; x -= 8) {
-      if (!hits.some(r => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)) return { x: Math.round(x), y: Math.round(y) }
+      if (hits.some(r => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)) continue
+      /*
+       * 「空白」不能只按矩形算：属性面板是**浮层**（position:absolute; right:0; width:264px，
+       * z-index:40，见 I-34），它盖住画布右侧一块。只按矩形挑出来的「空白点」其实点不到画布，
+       * 会落到面板上的某个控件——曾经就因为这个静默点中过「添加参考线」，
+       * 表现为「测试自己多出一条参考线」，查了很久。
+       * 所以真正的判据是 elementFromPoint：这个点上实际能点到的是不是画布本身。
+       */
+      const hit = document.elementFromPoint(x, y)
+      if (hit && stage.contains(hit)) return { x: Math.round(x), y: Math.round(y) }
     }
     throw new Error('画布上没有找到空白处')
   })()`)
@@ -564,6 +573,151 @@ async function main() {
   await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存分组与参考线')
   const phaseTwo = designs.getDesign(saved.id)
   ok(phaseTwo.groups[0].name === '标题与边框' && phaseTwo.guides.some(g => g.axis === 'x' && g.position === 80) && phaseTwo.guides.some(g => g.axis === 'y' && g.position === 40), '工程落盘保留分组和参考线毫米位置')
+
+  // ---- v0.7 P1 §4：标尺 / 布局网格 / 吸附目标（I-45）----
+  // 这三样全在前端，所以必须走真实界面：开关、从标尺拖出参考线、以及「关掉某类目标后确实不再吸」。
+  const boardW = designs.getDesign(saved.id).artboard.w
+  const stageBox = () => evaluate(`(() => { const r = document.querySelector('[data-testid="design-stage"]').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height } })()`)
+
+  ok(await evaluate(`!document.querySelector('[data-testid="design-ruler-h"]') && !document.querySelector('[data-testid="design-grid-overlay"]')`),
+    '标尺与网格默认不显示（只想摆图层的人不被打扰）')
+  const stageBefore = await stageBox()
+  await click('[data-testid="design-rulers"]')
+  ok(await evaluate(`!!document.querySelector('[data-testid="design-ruler-h"]') && !!document.querySelector('[data-testid="design-ruler-v"]')`),
+    '打开标尺后横向与纵向两条都在')
+  const stageAfter = await stageBox()
+  ok(JSON.stringify(stageBefore) === JSON.stringify(stageAfter),
+    '开标尺不会挤动画布（标尺挂在画布外缘、绝对定位，不参与布局——I-34 的同类教训）')
+  const rulerSpan = await evaluate(`(() => {
+    const ruler = document.querySelector('[data-testid="design-ruler-h"]')
+    const stage = document.querySelector('[data-testid="design-stage"]')
+    const ticks = [...ruler.querySelectorAll('.ruler-tick')].map(el => parseFloat(el.style.left))
+    return { width: ruler.getBoundingClientRect().width, stageWidth: stage.getBoundingClientRect().width, lastTick: Math.max(...ticks), tickCount: ticks.length }
+  })()`)
+  ok(Math.abs(rulerSpan.width - rulerSpan.stageWidth) < 1
+    && rulerSpan.lastTick <= rulerSpan.stageWidth + 0.01
+    && rulerSpan.lastTick > rulerSpan.stageWidth - 40,
+    `标尺与画布等宽，刻度一直铺到画布右缘（末根刻度 ${rulerSpan.lastTick.toFixed(1)}px / 画布 ${rulerSpan.stageWidth.toFixed(1)}px，共 ${rulerSpan.tickCount} 根）`)
+
+  await click('[data-testid="design-grid"]')
+  ok(await evaluate(`!!document.querySelector('[data-testid="design-grid-overlay"]')`), '打开网格后画布上出现网格辅助层')
+  const gridPx = () => evaluate(`(() => {
+    const el = document.querySelector('[data-testid="design-grid-overlay"]')
+    const nums = (el.style.backgroundImage.match(/[0-9]+(?:\\.[0-9]+)?px/g) || []).map(parseFloat)
+    const pxPerMm = document.querySelector('[data-testid="design-stage"]').getBoundingClientRect().width / ${boardW}
+    return { nums, pxPerMm }
+  })()`)
+  const nearPx = (list, value) => list.some((v) => Math.abs(v - value) < 0.02)
+  await fill('[data-testid="design-grid-spacing"]', 10)
+  await fill('[data-testid="design-grid-subdivisions"]', 5)
+  const gridA = await gridPx()
+  ok(nearPx(gridA.nums, 10 * gridA.pxPerMm) && nearPx(gridA.nums, 2 * gridA.pxPerMm),
+    '网格按「间距 10mm / 细分数 5」画出 10mm 主格线与 2mm 次格线')
+  await fill('[data-testid="design-grid-spacing"]', 20)
+  await fill('[data-testid="design-grid-subdivisions"]', 2)
+  const gridB = await gridPx()
+  ok(nearPx(gridB.nums, 20 * gridB.pxPerMm) && nearPx(gridB.nums, 10 * gridB.pxPerMm),
+    '改成「间距 20mm / 细分数 2」后主格线变 20mm、次格线变 10mm')
+  ok(!nearPx(gridB.nums, 2 * gridB.pxPerMm), '旧配置的 2mm 次格线已消失（参数真的生效，不是画了个固定图案）')
+  await click('[data-testid="design-grid"]')
+  ok(await evaluate(`!document.querySelector('[data-testid="design-grid-overlay"]')`), '关掉网格后辅助层消失')
+
+  // 从标尺往外拖出参考线：拖动只画预览，松手才落库
+  const guideLines = () => evaluate(`document.querySelectorAll('[data-guide-line]').length`)
+  const guidesBefore = await guideLines()
+  await fill('[data-testid="design-guide-axis"]', 'x')
+  await fill('[data-testid="design-guide-position"]', 280)
+  await click('[data-testid="design-guide-add"]')
+  await waitFor(`document.querySelectorAll('[data-guide-line]').length===${guidesBefore + 1}`, '面板添加 280mm 参考线')
+  const dragOut = await evaluate(`(() => {
+    const ruler = document.querySelector('[data-testid="design-ruler-h"]')
+    const stage = document.querySelector('[data-testid="design-stage"]')
+    const rr = ruler.getBoundingClientRect(), sr = stage.getBoundingClientRect()
+    const x = sr.left + 30 * (sr.width / ${boardW})
+    // PointerEvent 的 init 只认 clientX / clientY；写成 {x, y} 会被静默忽略（clientX 恒为 0）。
+    window.__rulerDrag = { down: { clientX: x, clientY: rr.top + rr.height / 2 }, up: { clientX: x, clientY: sr.top + 40 } }
+    ruler.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, ...window.__rulerDrag.down }))
+    window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, ...window.__rulerDrag.up }))
+    return { ok: true }
+  })()`)
+  // Vue 的 DOM 更新是异步的（nextTick），必须等一拍再查预览线——同一个同步块里查必然查不到。
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  ok(dragOut.ok && await evaluate(`!!document.querySelector('[data-testid="design-ruler-drag"]')`), '从标尺往外拖时先出现预览线（拖动过程不落库）')
+  await evaluate(`(() => { window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, ...window.__rulerDrag.up })); return true })()`)
+  await waitFor(`document.querySelectorAll('[data-guide-line]').length===${guidesBefore + 2}`, '从标尺拖出的参考线落成')
+  const draggedPosition = await evaluate(`(() => {
+    const inputs = [...document.querySelectorAll('[data-testid="design-guide-edit-position"]')]
+    return inputs.length ? Number(inputs[inputs.length - 1].value) : null
+  })()`)
+  ok(draggedPosition !== null && Math.abs(draggedPosition - 30) < 0.2,
+    `拖出的参考线落在指针所在的毫米位置（期望 30mm，实得 ${draggedPosition}）`)
+  await click('[data-testid="design-undo"]')
+  await waitFor(`document.querySelectorAll('[data-guide-line]').length===${guidesBefore + 1}`, '一次撤销整条回退拖出的参考线')
+  ok(true, '一次撤销就整条回退——拖动过程没有把几十条中间态灌进撤销栈')
+
+  // 吸附目标逐类开关：新增一个矩形当探针，它的包围盒只属于它自己
+  await click('[data-testid="design-add-rect"]')
+  const probeId = await evaluate(`[...document.querySelectorAll('[data-canvas-layer-id]')].pop()?.dataset.canvasLayerId || null`)
+  ok(probeId !== null, '新增一个矩形作为吸附探针（单独选中，拖动时包围盒只属于它）')
+  const snapOn = (key) => evaluate(`document.querySelector('[data-testid="design-snap-${key}"]').checked`)
+  const setSnap = async (key, want) => { if ((await snapOn(key)) !== want) await click(`[data-testid="design-snap-${key}"]`) }
+  ok((await snapOn('artboard')) && (await snapOn('guides')) && !(await snapOn('grid')) && (await snapOn('layers')),
+    '吸附目标缺省：画布边缘 / 参考线 / 图层开，网格关（网格默认不显示，看不见的吸附线比不吸附更糟）')
+  /**
+   * 把探针矩形的**左缘**拖到距 targetMm 还差 1.5px 的地方（阈值 6px ⇒ 应当被吸住）。
+   * 分三步：按下+移动 → **等一拍**（Vue 的 DOM 更新是异步的）→ 读吸附提示线 → 松手 → 读实际位置。
+   * 在同一个同步块里读 `.snap-guide` 永远读到 null，那是测试自己的坑，不是功能没生效。
+   */
+  const probe = async (targetMm) => {
+    await evaluate(`(() => {
+      const el = document.querySelector('[data-canvas-layer-id="${probeId}"]')
+      const stage = document.querySelector('[data-testid="design-stage"]')
+      const sr = stage.getBoundingClientRect()
+      const r = el.getBoundingClientRect()
+      const p = window.__probe = {
+        x: r.left + r.width / 2, y: r.top + r.height / 2,
+        pxPerMm: sr.width / ${boardW},
+        dx: (sr.left + ${targetMm} * (sr.width / ${boardW})) - r.left - 1.5,
+      }
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: p.x, clientY: p.y }))
+      window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, clientX: p.x + p.dx, clientY: p.y }))
+      return true
+    })()`)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const snapped = await evaluate(`!!document.querySelector('.snap-guide.vertical')`)
+    const x = await evaluate(`(() => {
+      const p = window.__probe
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: p.x + p.dx, clientY: p.y }))
+      const el = document.querySelector('[data-canvas-layer-id="${probeId}"]')
+      const sr = document.querySelector('[data-testid="design-stage"]').getBoundingClientRect()
+      return (el.getBoundingClientRect().left - sr.left) / p.pxPerMm
+    })()`)
+    return { snapped, x }
+  }
+  // 只留「参考线」一类目标：这样吸没吸只可能由参考线决定，与别的图层 / 画布边缘无关
+  await setSnap('artboard', false)
+  await setSnap('layers', false)
+  const guideSnap = await probe(280)
+  ok(guideSnap.snapped && Math.abs(guideSnap.x - 280) < 0.02,
+    `只开参考线时，图层左缘精确吸到 280mm（实得 ${guideSnap.x.toFixed(3)}）`)
+  await setSnap('guides', false)
+  const noSnap = await probe(280)
+  ok(!noSnap.snapped && Math.abs(noSnap.x - 280) > 0.4,
+    `四类全关后同样的拖拽不再吸（落在 ${noSnap.x.toFixed(3)}mm，差的正是那 1.5px）`)
+  await setSnap('artboard', true)
+  const boardSnap = await probe(boardW / 2)
+  ok(boardSnap.snapped && Math.abs(boardSnap.x - boardW / 2) < 0.02,
+    `只开画布边缘时吸到画布中线 ${boardW / 2}mm（实得 ${boardSnap.x.toFixed(3)}）`)
+  await setSnap('guides', true)
+  await setSnap('layers', true)
+
+  // 收尾：删掉探针矩形与 280mm 参考线，让文档回到刚才保存的状态（后面的工程包断言依赖它）
+  await evaluate(`(() => { const rows = [...document.querySelectorAll('[data-guide-id]')]; const row = rows[rows.length - 1]; if (row) row.querySelector('[data-testid="design-guide-delete"]').click(); return true })()`)
+  await waitFor(`document.querySelectorAll('[data-guide-line]').length===${guidesBefore}`, '删除探针参考线')
+  await click(`[data-layer-id="${probeId}"]`)
+  await click('[data-testid="design-group-delete"]')
+  ok(await evaluate(`!document.querySelector('[data-canvas-layer-id="${probeId}"]')`), '删除吸附探针图层，文档回到保存态')
+  await click('[data-testid="design-rulers"]')
 
   // 工程包 M2：通过真实界面与 IPC 导出固定版本，再检查并导入新副本。
   // 只替换系统文件选择器结果；打包、检查、提交和工程读取仍走生产实现。

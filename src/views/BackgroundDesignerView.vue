@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -12,6 +12,12 @@ import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
   createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection,
 } from '../../electron/design-editor.cjs'
+// 标尺刻度 / 布局网格 / 吸附目标的纯算术都在这里——DOM 测量留在本组件，见 I-45。
+import {
+  DEFAULT_SNAP_TARGETS, rulerTicks, gridPixelSteps, snapTargets, computeSnap, guidePositionFromOffset,
+} from '../lib/designer-aids.cjs'
+// 吸附阈值只有一份定义（6px，模板页拖拽用的是同一个数），别在这里再写一个 6。
+import { SNAP_PX } from '../lib/field-edit.cjs'
 
 defineOptions({ name: 'BackgroundDesignerView' })
 
@@ -206,6 +212,25 @@ const guidesVisible = ref(true)
 const newGuideAxis = ref('x')
 const newGuidePosition = ref(50)
 const visibleGuides = computed(() => guidesVisible.value ? (design.value.guides || []).filter(guide => guide.position >= 0 && guide.position <= design.value.artboard[guide.axis === 'x' ? 'w' : 'h']) : [])
+/**
+ * 标尺与布局网格是**视图辅助**，不进工程文件、不进 `renderDesign`。
+ *
+ * 这一点必须咬死：它们一旦进了文档 schema，就有被真印到纸上的风险（I-25 的教训——
+ * 「只编辑可见」的东西漏了 `editorOnly`，参考框就被印出去了）。放在视图层，
+ * 从根上就没有「印出来」这条路径，也就不需要为它们抬工程版本号。
+ */
+const rulers = ref(false)
+const gridVisible = ref(false)
+const gridSpacing = ref(10)
+const gridSubdivisions = ref(5)
+/** 从标尺往外拖时的预览线（松手才真正落成参考线）。 */
+const rulerDrag = ref(null)
+/**
+ * 四类吸附目标各自开关（画布边缘 / 参考线 / 网格 / 图层边缘与中心）。
+ * 缺省**网格关**：网格默认不显示，而「看不见的吸附线」比不吸附更糟——用户会以为
+ * 图层拖不动了。其余三类默认开，与加这个开关之前的行为逐字一致。
+ */
+const snapTargetsOn = reactive({ ...DEFAULT_SNAP_TARGETS })
 const showExport = ref(false)
 const exportDpi = ref(300)
 const exportFormat = ref('png')
@@ -264,6 +289,26 @@ const inputEpoch = ref(0)
 const canvasWidth = computed(() => 720 * zoom.value)
 const pxPerMm = computed(() => canvasWidth.value / design.value.artboard.w)
 const canvasHeight = computed(() => design.value.artboard.h * pxPerMm.value)
+/**
+ * 标尺刻度与网格线的位置（毫米）。
+ *
+ * 刻度步长要按「每毫米占多少像素」自适应：画布放大就用更密的步长、缩小就变疏，
+ * 否则缩小时数字糊成一团、放大时又只剩几个孤零零的标号。
+ */
+const rulerTicksX = computed(() => (rulers.value ? rulerTicks(design.value.artboard.w, pxPerMm.value) : []))
+const rulerTicksY = computed(() => (rulers.value ? rulerTicks(design.value.artboard.h, pxPerMm.value) : []))
+/**
+ * 网格用 CSS 重复渐变画，而不是每格一个 div：300 图层工程里几百个额外节点会明显拖慢，
+ * 而「间距 0.5mm / 细分数 20」这种配置下按格生成会是上千个节点。
+ * 步长由纯模块的 `gridPixelSteps` 给出——界面画的线与吸附用的线必须出自同一份算术（见 I-45）。
+ * 主格线写在前面：CSS 里**先声明的背景在最上层**，反过来次格线会盖住主格线。
+ */
+const gridOverlayStyle = computed(() => {
+  const steps = gridPixelSteps(Number(gridSpacing.value), Number(gridSubdivisions.value), pxPerMm.value, design.value.artboard.w)
+  if (!steps) return { display: 'none' }
+  const band = (color, size) => `repeating-linear-gradient(to right, ${color} 0 1px, transparent 1px ${size}px), repeating-linear-gradient(to bottom, ${color} 0 1px, transparent 1px ${size}px)`
+  return { backgroundImage: `${band('rgba(38,137,201,.5)', steps.major)}, ${band('rgba(38,137,201,.16)', steps.minor)}` }
+})
 const fontNames = computed(() => [...new Set([...fonts.value.system, ...fonts.value.uploaded].map((font) => font.family))])
 const dimensionMismatch = computed(() => context.value && (
   Math.abs(context.value.artboard.w - design.value.artboard.w) > 0.01 ||
@@ -656,6 +701,53 @@ function editGuide(id, value) {
 function removeGuide(id) { commit(doc => { doc.guides = doc.guides.filter(guide => guide.id !== id) }) }
 function guideOutside(guide) {
   return guide.position < 0 || guide.position > design.value.artboard[guide.axis === 'x' ? 'w' : 'h']
+}
+/**
+ * 从标尺往外拖出一条参考线。
+ *
+ * 语义按标尺的**度量方向**定：上方标尺量的是 X（左右），所以从它往下拖出来的是
+ * 一条**垂直线**（`axis: 'x'`，位置是「距左边多少毫米」）；左侧标尺量 Y，拖出来的是水平线。
+ * 拖的时候只画预览，**松手才 `commit`**——否则整段拖拽会在撤销栈里留下几十条中间态。
+ */
+function rulerPointerDown(event, axis) {
+  const rect = stage.value?.getBoundingClientRect()
+  if (!rect) return
+  // 拖出参考线是「在标尺上按下」的手势，别让它同时触发画布上的取消选中 / 文本失焦。
+  event.preventDefault()
+  rulerDrag.value = { axis, position: mmAtPointer(event, axis, rect) }
+  window.addEventListener('pointermove', rulerPointerMove)
+  window.addEventListener('pointerup', rulerPointerUp, { once: true })
+  window.addEventListener('pointercancel', rulerPointerCancel, { once: true })
+}
+function mmAtPointer(event, axis, rect) {
+  const span = design.value.artboard[axis === 'x' ? 'w' : 'h']
+  const offset = axis === 'x' ? event.clientX - rect.left : event.clientY - rect.top
+  return guidePositionFromOffset(offset, pxPerMm.value, span)
+}
+function rulerPointerMove(event) {
+  if (!rulerDrag.value) return
+  const rect = stage.value?.getBoundingClientRect()
+  if (!rect) return
+  rulerDrag.value = { axis: rulerDrag.value.axis, position: mmAtPointer(event, rulerDrag.value.axis, rect) }
+}
+function rulerPointerUp() {
+  const pending = rulerDrag.value
+  rulerDrag.value = null
+  detachRulerDrag()
+  if (!pending) return
+  if ((design.value.guides?.length || 0) >= 100) { fail(new Error('最多支持 100 条参考线')); return }
+  commit((doc) => {
+    doc.guides = [...(doc.guides || []), { id: uid('guide'), axis: pending.axis, position: pending.position }]
+  })
+}
+function rulerPointerCancel() {
+  rulerDrag.value = null
+  detachRulerDrag()
+}
+function detachRulerDrag() {
+  window.removeEventListener('pointermove', rulerPointerMove)
+  window.removeEventListener('pointerup', rulerPointerUp)
+  window.removeEventListener('pointercancel', rulerPointerCancel)
 }
 function openExport() { if (!busy.value) { exportError.value = ''; showExport.value = true } }
 async function runExport() {
@@ -1555,26 +1647,23 @@ function pointerDown(event, layer, corner = null) {
 }
 function snapDelta(originals, dx, dy) {
   const moving = union(originals)
-  const xTargets = [0, design.value.artboard.w / 2, design.value.artboard.w]
-  const yTargets = [0, design.value.artboard.h / 2, design.value.artboard.h]
-  for (const guide of visibleGuides.value) (guide.axis === 'x' ? xTargets : yTargets).push(guide.position)
-  for (const layer of design.value.layers.filter((layer) => layer.visible && !gesture.ids.has(layer.id))) {
-    const box = bounds(layer)
-    xTargets.push(box.x, box.x + box.w / 2, box.x + box.w)
-    yTargets.push(box.y, box.y + box.h / 2, box.y + box.h)
-  }
-  function nearest(values, targets) {
-    let found = { distance: 6 / pxPerMm.value, delta: 0, guide: null }
-    for (const value of values) for (const target of targets) {
-      const delta = target - value
-      if (Math.abs(delta) < found.distance) found = { distance: Math.abs(delta), delta, guide: target }
-    }
-    return found
-  }
-  const x = nearest([moving.x + dx, moving.x + moving.w / 2 + dx, moving.x + moving.w + dx], xTargets)
-  const y = nearest([moving.y + dy, moving.y + moving.h / 2 + dy, moving.y + moving.h + dy], yTargets)
-  guides.value = { x: x.guide, y: y.guide }
-  return { dx: dx + x.delta, dy: dy + y.delta }
+  /*
+   * 四类目标按各自开关汇总（纯逻辑在 src/lib/designer-aids.cjs）：
+   * 画布边缘与中线 / 参考线 / 布局网格主格线 / 其他图层的边缘与中心。
+   * 阈值是**像素**口径（SNAP_PX / pxPerMm）：不论缩放多少，「差 6px 以内就吸」的手感恒定。
+   */
+  const targets = snapTargets({
+    artboard: design.value.artboard,
+    enabled: snapTargetsOn,
+    guides: visibleGuides.value,
+    grid: { spacing: Number(gridSpacing.value) },
+    others: design.value.layers
+      .filter((layer) => layer.visible && !gesture.ids.has(layer.id))
+      .map((layer) => bounds(layer)),
+  })
+  const result = computeSnap({ moving, dx, dy, targets, threshold: SNAP_PX / pxPerMm.value })
+  guides.value = { x: result.x, y: result.y }
+  return { dx: result.dx, dy: result.dy }
 }
 function pointerMove(event) {
   if (!gesture) return
@@ -1707,6 +1796,8 @@ function deactivate() {
   portraitPicker.value = false
   finishTextEdit()
   endGesture(); finishKeyboardMove(); persistDraft()
+  // 切走时可能正拖着一条参考线：不停掉监听，回来时指针一动就会凭空落一条线。
+  rulerPointerCancel()
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
   window.removeEventListener('blur', endGesture)
@@ -1753,7 +1844,7 @@ onMounted(async () => {
 })
 onActivated(activate)
 onDeactivated(deactivate)
-onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(messageTimer); for (const face of fontFaces) document.fonts.delete(face) })
+onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer); clearTimeout(messageTimer); for (const face of fontFaces) document.fonts.delete(face) })
 </script>
 
 <template>
@@ -1877,7 +1968,9 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
           <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" @click="reorder('down')">下移 ↓</button>
           <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" @click="reorder('top')">置顶 ⤒</button>
           <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置底'" @click="reorder('bottom')">置底 ⤓</button>
-          <label class="inline"><input v-model="snap" type="checkbox"> 吸附</label>
+          <label class="inline"><input v-model="snap" data-testid="design-snap" type="checkbox"> 吸附</label>
+          <label class="inline"><input v-model="rulers" data-testid="design-rulers" type="checkbox"> 标尺</label>
+          <label class="inline"><input v-model="gridVisible" data-testid="design-grid" type="checkbox"> 网格</label>
           <span class="toolbar-spacer"></span>
           <button title="缩小" @click="zoom = Math.max(0.25, round(zoom - 0.25))">−</button>
           <button title="恢复预览大小" @click="zoom = 1">{{ Math.round(zoom * 100) }}%</button>
@@ -1886,6 +1979,8 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
         <div class="canvas-scroll" :class="{ 'drop-active': dropActive }" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
           <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
             <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :show-editor-only="true" @error="fail" />
+            <!-- 布局网格：只是画布上的辅助层，不进工程、不进 renderDesign（见 I-45） -->
+            <div v-if="gridVisible" data-testid="design-grid-overlay" class="grid-overlay" :style="gridOverlayStyle" aria-hidden="true"></div>
             <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
               <textarea
                 ref="inlineTextEditor"
@@ -1914,6 +2009,20 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
             <div v-for="guide in visibleGuides" :key="guide.id" :data-guide-line="guide.id" class="persistent-guide" :class="guide.axis === 'x' ? 'vertical' : 'horizontal'" :style="guide.axis === 'x' ? { left: `${guide.position * pxPerMm}px` } : { top: `${guide.position * pxPerMm}px` }"></div>
             <div v-if="guides.x !== null" class="snap-guide vertical" :style="{ left: `${guides.x * pxPerMm}px` }"></div>
             <div v-if="guides.y !== null" class="snap-guide horizontal" :style="{ top: `${guides.y * pxPerMm}px` }"></div>
+            <!--
+              标尺贴在画布**外缘**（bottom/right: 100%），刻度与画布共用同一个 pxPerMm，
+              所以缩放、滚动都不会错位。从上方标尺往下拖出的是垂直线（量 X），
+              从左侧标尺往右拖出的是水平线（量 Y）——与标尺自己的度量方向一致。
+            -->
+            <template v-if="rulers">
+              <div data-testid="design-ruler-h" class="ruler ruler-h" :style="{ width: `${canvasWidth}px` }" @pointerdown="rulerPointerDown($event, 'x')">
+                <span v-for="tick in rulerTicksX" :key="`x-${tick.mm}`" class="ruler-tick" :class="{ major: tick.major }" :style="{ left: `${tick.mm * pxPerMm}px` }"><span v-if="tick.major" class="ruler-label">{{ tick.mm }}</span></span>
+              </div>
+              <div data-testid="design-ruler-v" class="ruler ruler-v" :style="{ height: `${canvasHeight}px` }" @pointerdown="rulerPointerDown($event, 'y')">
+                <span v-for="tick in rulerTicksY" :key="`y-${tick.mm}`" class="ruler-tick" :class="{ major: tick.major }" :style="{ top: `${tick.mm * pxPerMm}px` }"><span v-if="tick.major" class="ruler-label">{{ tick.mm }}</span></span>
+              </div>
+            </template>
+            <div v-if="rulerDrag" data-testid="design-ruler-drag" class="snap-guide" :class="rulerDrag.axis === 'x' ? 'vertical' : 'horizontal'" :style="rulerDrag.axis === 'x' ? { left: `${rulerDrag.position * pxPerMm}px` } : { top: `${rulerDrag.position * pxPerMm}px` }"></div>
             <div v-if="dropActive" class="drop-hint" aria-hidden="true">松开鼠标，把图片加为图层</div>
           </div>
         </div>
@@ -1937,8 +2046,26 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
           <button :disabled="design.artboard.backgroundPaint.stops.length>=8" @click="changePaintStops('artboard','add')">添加色标</button><button :disabled="design.artboard.backgroundPaint.stops.length<=2" @click="changePaintStops('artboard','remove')">移除中间色标</button>
         </div>
         <details class="guide-panel" open>
-          <summary>参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
-          <label class="inline"><input v-model="guidesVisible" data-testid="design-guides-visible" type="checkbox"> 显示并吸附参考线</label>
+          <summary>标尺 / 网格 / 参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
+          <label class="inline"><input v-model="rulers" data-testid="design-rulers-panel" type="checkbox"> 显示标尺（可从标尺拖出参考线）</label>
+          <label class="inline"><input v-model="gridVisible" data-testid="design-grid-panel" type="checkbox"> 显示布局网格</label>
+          <div v-if="gridVisible" class="property-grid">
+            <label>间距 mm<input v-model.number="gridSpacing" data-testid="design-grid-spacing" type="number" min="0.5" max="200" step="0.5"></label>
+            <label>细分数<input v-model.number="gridSubdivisions" data-testid="design-grid-subdivisions" type="number" min="1" max="20" step="1"></label>
+          </div>
+          <!--
+            吸附目标按类别各自开关。**网格主格线**只吸主格线不吸次格线：
+            默认间距 10mm、细分数 5 ⇒ 次格线 2mm 一根，而阈值约 1.7mm，
+            吸次格线会让边缘与参考线永远抢不到吸附。次格线是「看的」，主格线才是「对的」。
+          -->
+          <h4>吸附目标</h4>
+          <div class="snap-targets">
+            <label class="inline"><input v-model="snapTargetsOn.artboard" data-testid="design-snap-artboard" type="checkbox"> 画布边缘与中线</label>
+            <label class="inline"><input v-model="snapTargetsOn.guides" data-testid="design-snap-guides" type="checkbox"> 参考线</label>
+            <label class="inline"><input v-model="snapTargetsOn.grid" data-testid="design-snap-grid" type="checkbox"> 网格主格线</label>
+            <label class="inline"><input v-model="snapTargetsOn.layers" data-testid="design-snap-layers" type="checkbox"> 图层边缘与中心</label>
+          </div>
+          <label class="inline"><input v-model="guidesVisible" data-testid="design-guides-visible" type="checkbox"> 显示参考线（隐藏后也不再吸附）</label>
           <div class="property-grid">
             <label>方向<select v-model="newGuideAxis" data-testid="design-guide-axis"><option value="x">垂直线（X）</option><option value="y">水平线（Y）</option></select></label>
             <label>位置 mm<input v-model.number="newGuidePosition" data-testid="design-guide-position" type="number" min="-10000" max="10000" step="0.1"></label>
@@ -2277,6 +2404,27 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .persistent-guide { position: absolute; pointer-events: none; z-index: 9; }
 .persistent-guide.vertical { top: 0; bottom: 0; border-left: 1px solid #2689c9; }
 .persistent-guide.horizontal { left: 0; right: 0; border-top: 1px solid #2689c9; }
+/* 布局网格：只画在画布内，pointer-events:none 保证它不吃任何鼠标事件。
+   线的疏密与颜色全由 inline 的 backgroundImage 给出（见 gridOverlayStyle）。 */
+.grid-overlay { position: absolute; inset: 0; pointer-events: none; }
+/*
+ * 标尺贴在画布**外缘**（bottom/right: 100%），与画布共用同一个 pxPerMm。
+ * overflow:hidden 让超出画布末缘的半格刻度不至于糊出边界；crosshair 提示「这里可以拖」。
+ */
+.ruler { position: absolute; overflow: hidden; background: var(--paper-card); color: var(--stone); font-size: 9px; line-height: 1; cursor: crosshair; touch-action: none; user-select: none; }
+.ruler-h { left: 0; bottom: 100%; height: 18px; border-bottom: 1px solid var(--line-strong); }
+.ruler-v { top: 0; right: 100%; width: 18px; border-right: 1px solid var(--line-strong); }
+.ruler-tick { position: absolute; background: var(--line-strong); }
+.ruler-h .ruler-tick { top: 0; width: 1px; height: 4px; }
+.ruler-h .ruler-tick.major { height: 9px; }
+.ruler-v .ruler-tick { left: 0; height: 1px; width: 4px; }
+.ruler-v .ruler-tick.major { width: 9px; }
+.ruler-label { position: absolute; white-space: nowrap; }
+.ruler-h .ruler-label { left: 2px; top: 8px; }
+/* 竖排数字：18px 宽的竖条里横排数字放不下，旋转后既省地方又一眼能读 */
+.ruler-v .ruler-label { top: 10px; left: 1px; writing-mode: vertical-rl; }
+.snap-targets { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.snap-targets label.inline { margin: 3px 0; }
 .canvas-status { display: flex; justify-content: space-between; gap: 12px; padding: 9px; background: var(--paper-card); border: 1px solid var(--line); border-radius: 0 0 8px 8px; font-size: 11px; color: var(--ink-2); }
 .unsaved { color: var(--cinnabar); } .shortcut-note { font-size: 11px; color: var(--stone); line-height: 1.7; margin: 8px 0; }
 .inspector label, .tools-panel label { display: flex; flex-direction: column; gap: 5px; color: var(--ink-2); font-size: 11px; margin-bottom: 9px; }

@@ -80,7 +80,12 @@ console.log('== 6. 打包必须显式关闭 electron-builder 自身的发布（v
 const dist = (pkg.scripts && pkg.scripts.dist) || ''
 ok(dist.includes('--publish never'), 'dist 显式 --publish never', dist)
 ok(/electron-builder --win --x64/.test(dist), 'dist 仍按 win x64 打包', dist)
-ok(dist.startsWith('npm run build &&'), 'dist 先构建前端再打包（顺序不能反）', dist)
+// 意图是「前端先构建、再交给 electron-builder」，不是「build 必须是第一个 token」——
+// 前面允许挂打包前置自查（I-46 的 check-pack-root.cjs，它自己也有守卫钉住相对顺序），
+// 但 build 与 electron-builder 的先后绝不能反。
+const buildAt = dist.indexOf('npm run build')
+const packAt = dist.indexOf('electron-builder')
+ok(buildAt >= 0 && packAt > buildAt, 'dist 先构建前端再打包（顺序不能反）', dist)
 // 打包那一步不许拿到 token：electron-builder 默认 publish 策略是 onTagOrDraft，
 // 在 tag 上构建会自动尝试发布到 GitHub 并索要 GH_TOKEN，拿不到就 exit 1。
 // 发布是 release-upload.cjs 的活，两条路不能重叠。

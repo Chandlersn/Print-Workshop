@@ -77,6 +77,8 @@ const CONTRACT = [
   { id: 'I-42', file: 'test/dataset-edit.cjs', anchor: '== 11. 详情头部必须容忍整块缺失的 source（I-42，旧记录真实存在） ==' },
   { id: 'I-43', file: 'test/design-crop-presets.cjs', anchor: '== 4. I-43 静态守卫：改尺寸必须连带改裁切，规格不许抄第二份 ==' },
   { id: 'I-44', file: 'test/design-image-effects.cjs', anchor: '== 4. I-44 静态守卫：界面只写一份，关掉要删字段而不是留 0 ==' },
+  { id: 'I-45', file: 'test/designer-aids.cjs', anchor: '== 6. I-45 静态守卫：标尺与网格绝不能进工程文件，吸附阈值只有一份 ==' },
+  { id: 'I-46', file: 'test/pack-root.cjs', anchor: '== 5. I-46 静态守卫：自查必须排在 electron-builder 之前，清理只 rmdir 空树 ==' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

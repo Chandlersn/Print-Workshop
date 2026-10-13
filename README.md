@@ -219,11 +219,13 @@ npm run electron:dev  # vite + electron 热更新开发
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：42 套件，断言统计见运行结果
+npm test                        # 领域层测试：44 套件，断言统计见运行结果
 npm run test:e2e                # 端到端：120 人真实 printToPDF（经启动器摘除破坏性环境变量）
 npm run build && npm run test:design-e2e # 图层：实际 PDF 保真、三种版式及编辑器保存
 npm run test:design-export-e2e   # PNG：真实像素尺寸、透明度、资源加载与系统显示缩放
 npm run dist                    # 打 NSIS 安装包（未配证书时自动跳过签名，图标与版本信息正常写入 EXE）
+npm run pack:check              # 打包前自查根目录：有「列得出来却 stat 不了」的条目就直接拦下（I-46）
+npm run pack:purge              # 只看不动地列出根目录里的空垃圾目录；加 `-- --apply` 才删（只删空树）
 npm run release:check           # 发版体检：版本号三处一致 + tag 在位 + Release 与资产是否齐（只读）
 GH_TOKEN=<PAT> npm run release:upload   # 仅手动补发时使用；tag 自动发布无需 PAT
 ```
