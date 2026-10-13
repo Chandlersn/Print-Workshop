@@ -23,6 +23,8 @@ jobs:
   test:
     name: 领域层测试
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,6 +46,21 @@ jobs:
           path: test-logs/
           if-no-files-found: warn
           retention-days: 14
+      # artifact 匿名下载要走 API（要 token），job logs 也要 admin——都拿不到。
+      # 失败时把日志直接推到 ci-logs 分支：本地 git fetch 就能读到失败现场。
+      - name: 失败时把测试日志推到 ci-logs 分支
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "ci-logs"
+          git config user.email "ci-logs@users.noreply.github.com"
+          git fetch origin main --depth=1
+          git checkout -B ci-logs origin/main
+          git add -f test-logs/
+          git commit -m "ci test logs for ${GITHUB_SHA}"
+          git push -f origin ci-logs
 
   e2e:
     name: 端到端（120 人真实 printToPDF）
