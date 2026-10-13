@@ -22,7 +22,10 @@ try {
     .map((name) => fs.readFileSync(path.join(assetsDir, name), 'utf8')).join('\n')
   assert.ok(js.includes('内置') && js.includes('常用'), 'both category labels are in the frontend bundle')
   assert.ok(js.includes('暂无内置模板') && js.includes('暂无常用模板'), 'category-specific empty states are bundled')
+  assert.ok(js.includes('画布缩放') && js.includes('适合宽度') && js.includes('恢复画布到 100%'),
+    'canvas zoom controls are included in the frontend bundle')
   assert.ok(css.includes('tpl-tabs'), 'tab styling is bundled')
+  assert.ok(css.includes('canvas-view-toolbar') && css.includes('canvas-zoom-value'), 'canvas zoom styling is bundled')
   assert.ok(css.includes('field-dock') && css.includes('translateY(-50%)'), 'responsive right-side field dock is bundled')
 
   const seed = fs.readFileSync(path.join(tempRoot, 'electron', 'seed-demo.cjs'), 'utf8')

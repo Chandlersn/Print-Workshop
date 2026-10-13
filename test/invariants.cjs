@@ -66,7 +66,7 @@ const CONTRACT = [
   { id: 'I-31', file: 'test/asset-library.cjs', anchor: '**同一字节内容只存一份原件**' },
   { id: 'I-32', file: 'test/asset-library.cjs', anchor: 'I-32 清理未引用原件：删除前必须复核仍孤儿，绝不静默删被引用的图' },
   { id: 'I-33', file: 'test/template-asset-library.cjs', anchor: '=== I-33 模板底图走素材库原件（assetId），discard 按 source 分流，受管理件不即时删 ===' },
-  { id: 'I-34', file: 'test/ipc-hardening.cjs', anchor: '== 4f. 模板页属性面板必须是浮层，不许占列（前端静态核查） ==' },
+  { id: 'I-34', file: 'test/ipc-hardening.cjs', anchor: '== 4f. 模板字段与属性面板必须贴右浮动并适应窗口（前端静态核查） ==' },
   { id: 'I-35', file: 'test/ipc-hardening.cjs', anchor: '== 10. 「检查更新」必须真能触发更新（前端静态核查） ==' },
   { id: 'I-36', file: 'test/ipc-hardening.cjs', anchor: '== 11. 应用内说明与 docs/使用说明.md 的章节骨架必须一致（I-36） ==' },
   { id: 'I-37', file: 'test/designs.cjs', anchor: '清理残留：只回收「不在索引」的工程目录，索引里的与形状不符的都不动（I-37）' },

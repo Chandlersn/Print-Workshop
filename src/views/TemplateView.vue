@@ -14,6 +14,9 @@ import DesignSurface from '../components/DesignSurface.vue'
 import { designerNav, openDesigner } from '../lib/designer-nav.js'
 import { evenRow, anchorRatio } from '../lib/field-layout.cjs'
 import {
+  MIN_CANVAS_ZOOM, MAX_CANVAS_ZOOM, clampCanvasZoom, stepCanvasZoom, fitCanvasZoom,
+} from '../lib/canvas-zoom.cjs'
+import {
   resolveLayoutMode, resolveItemSpec, computeGridInfo, buildGridCells,
   computeBgRatioWarn, computeBgDpi, computeBgRatioDeviation,
   clampPageDim, clampItemDim, ptToPx as ptToPxOf,
@@ -24,7 +27,23 @@ import {
 } from '../lib/field-edit.cjs'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
-const CANVAS_W = 760 // 画布显示宽度 px
+const CANVAS_W = 760 // 画布基准宽度 px，缩放只改变编辑视图
+const canvasZoom = ref(1)
+const canvasViewportEl = ref(null)
+const canvasDisplayW = computed(() => Math.round(CANVAS_W * canvasZoom.value))
+const canvasZoomPercent = computed(() => Math.round(canvasZoom.value * 100))
+
+function setCanvasZoom(value) {
+  canvasZoom.value = clampCanvasZoom(value)
+}
+
+function stepCanvasZoomBy(direction) {
+  canvasZoom.value = stepCanvasZoom(canvasZoom.value, direction)
+}
+
+function fitCanvasToWidth() {
+  canvasZoom.value = fitCanvasZoom(canvasViewportEl.value?.clientWidth, CANVAS_W)
+}
 
 // ---- 多联版式 ----
 // 语义：多联模式下底图代表「单个成品图」，画布切换为**单个成品**尺寸——
@@ -205,7 +224,7 @@ const designOptions = computed(() => designs.value.map((d) => ({
 })))
 const candidateDesign = computed(() => designs.value.find((d) => d.id === selectedDesignId.value))
 const designSurfaceWidth = computed(() => activeDesign.value
-  ? CANVAS_W * activeDesign.value.artboard.w / activeTpl.value.pageSize.w : CANVAS_W)
+  ? canvasDisplayW.value * activeDesign.value.artboard.w / activeTpl.value.pageSize.w : canvasDisplayW.value)
 
 /**
  * 工程尺寸问题的唯一判据，返回 `{ kind, text }` 或 `null`。
@@ -478,13 +497,13 @@ const bgStretched = computed(() => {
 const canvasH = computed(() => {
   const t = activeTpl.value
   if (!t) return 540
-  return (CANVAS_W * t.pageSize.h) / t.pageSize.w
+  return (canvasDisplayW.value * t.pageSize.h) / t.pageSize.w
 })
 
 function ptToPx(pt) {
   const t = activeTpl.value
   if (!t) return pt
-  return ptToPxOf(pt, t.pageSize.w, CANVAS_W)
+  return ptToPxOf(pt, t.pageSize.w, canvasDisplayW.value)
 }
 
 async function refreshLists() {
@@ -1601,6 +1620,34 @@ onBeforeUnmount(() => {
           <button class="btn-ghost btn-mini" @click="alignSelected('bottom')">底对齐</button>
         </div>
 
+        <div class="canvas-view-toolbar" role="group" aria-label="画布缩放">
+          <span class="tb-label">画布缩放</span>
+          <button
+            class="btn-ghost btn-icon"
+            type="button"
+            :disabled="canvasZoomPercent <= MIN_CANVAS_ZOOM * 100"
+            title="缩小画布"
+            aria-label="缩小画布"
+            @click="stepCanvasZoomBy(-1)"
+          >−</button>
+          <button
+            class="btn-ghost canvas-zoom-value"
+            type="button"
+            title="恢复到 100%"
+            aria-label="恢复画布到 100%"
+            @click="setCanvasZoom(1)"
+          >{{ canvasZoomPercent }}%</button>
+          <button
+            class="btn-ghost btn-icon"
+            type="button"
+            :disabled="canvasZoomPercent >= MAX_CANVAS_ZOOM * 100"
+            title="放大画布"
+            aria-label="放大画布"
+            @click="stepCanvasZoomBy(1)"
+          >＋</button>
+          <button class="btn-ghost" type="button" title="按当前可用宽度缩放画布" @click="fitCanvasToWidth">适合宽度</button>
+        </div>
+
         <div class="workbench">
           <div v-if="activeDatasetId || selectedField || bgSelected" class="field-dock">
             <!-- 字段面板：固定悬浮在窗口右侧，不占画布布局空间 -->
@@ -1689,6 +1736,7 @@ onBeforeUnmount(() => {
             </aside>
           </div>
           <div
+            ref="canvasViewportEl"
             class="canvas-wrap"
             :class="{ 'drop-active': dragging }"
             @dragenter.prevent="onDragEnter"
@@ -1699,7 +1747,7 @@ onBeforeUnmount(() => {
             <div
               ref="canvasEl"
               class="canvas"
-              :style="{ height: canvasH + 'px' }"
+              :style="{ width: canvasDisplayW + 'px', height: canvasH + 'px' }"
             >
               <!-- 没有底图时，画布中央就是上传入口（原来在工具栏的「上传底图」按钮已移除）。
                    放在所有字段之前，字段在上层，不会挡住拖拽；容器本身不吃事件，
@@ -2180,6 +2228,16 @@ onBeforeUnmount(() => {
 .workbench { position: relative; display: flex; gap: 16px; align-items: flex-start; }
 
 .canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
+
+.canvas-view-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.canvas-zoom-value { min-width: 68px; font-variant-numeric: tabular-nums; }
 
 /* 拖图片进来时给明确高亮：让用户清楚「此时松手就会被当成底图」。
    用主题变量，深色模式下自动跟着变。 */

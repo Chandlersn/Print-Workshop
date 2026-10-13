@@ -25,6 +25,7 @@ const path = require('path')
 const ROOT = path.join(__dirname, '..')
 const TPL = 'src/views/TemplateView.vue'
 const ENGINE = 'electron/render-engine.cjs'
+const canvasZoom = require(path.join(ROOT, 'src/lib/canvas-zoom.cjs'))
 
 let pass = 0
 function ok(cond, label, extra) {
@@ -35,6 +36,27 @@ function ok(cond, label, extra) {
 
 const tplSrc = fs.readFileSync(path.join(ROOT, TPL), 'utf-8')
 const engineSrc = fs.readFileSync(path.join(ROOT, ENGINE), 'utf-8')
+
+console.log('== 画布缩放只改变编辑视图，并在范围内工作 ==')
+{
+  ok(canvasZoom.clampCanvasZoom(0) === 0.25, '画布缩放下限为 25%')
+  ok(canvasZoom.clampCanvasZoom(9) === 2.5, '画布缩放上限为 250%')
+  ok(canvasZoom.clampCanvasZoom('bad') === 1, '非法缩放恢复 100%')
+  ok(canvasZoom.stepCanvasZoom(1, 1) === 1.25, '放大按 25% 递增')
+  ok(canvasZoom.stepCanvasZoom(1, -1) === 0.75, '缩小按 25% 递减')
+  ok(canvasZoom.fitCanvasZoom(784) === 1, '适合宽度时为画布留出边距')
+  ok(canvasZoom.fitCanvasZoom(404) === 0.5, '窄视口自动缩到可见宽度')
+  ok(canvasZoom.fitCanvasZoom(1000) === 1.28, '适合宽度按视口比例计算')
+  ok(canvasZoom.fitCanvasZoom(100) === 0.25, '适合宽度不会低于 25%')
+  ok(/class="canvas-view-toolbar"[\s\S]*?缩小画布[\s\S]*?恢复画布到 100%[\s\S]*?放大画布[\s\S]*?适合宽度/.test(tplSrc),
+    '界面提供缩小、放大、恢复 100% 与适合宽度')
+  ok(/:style="\{ width: canvasDisplayW \+ 'px', height: canvasH \+ 'px' \}"/.test(tplSrc),
+    '画布实际宽高按视图缩放同步')
+  ok(/ptToPxOf\(pt, t\.pageSize\.w, canvasDisplayW\.value\)/.test(tplSrc),
+    '字段预览字号跟随画布缩放显示')
+  ok(/\.canvas-wrap\s*\{[^}]*overflow:\s*auto/.test(tplSrc),
+    '放大后可滚动查看画布细节')
+}
 
 console.log('== 0. 新字段固定左端，文字长度增加时只向右延伸 ==')
 {
