@@ -79,6 +79,7 @@ const CONTRACT = [
   { id: 'I-44', file: 'test/design-image-effects.cjs', anchor: '== 4. I-44 静态守卫：界面只写一份，关掉要删字段而不是留 0 ==' },
   { id: 'I-45', file: 'test/designer-aids.cjs', anchor: '== 6. I-45 静态守卫：标尺与网格绝不能进工程文件，吸附阈值只有一份 ==' },
   { id: 'I-46', file: 'test/pack-root.cjs', anchor: '== 5. I-46 静态守卫：自查必须排在 electron-builder 之前，清理只 rmdir 空树 ==' },
+  { id: 'I-47', file: 'test/design-blend-adjust.cjs', anchor: '== 7. I-47 静态守卫：滑杆的百分比换算必须与 schema 的取值口径成对 ==' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

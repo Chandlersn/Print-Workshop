@@ -179,4 +179,63 @@ check('恢复原始颜色是真删除 adjust（渲染侧少一个 filter）', ()
   assert.ok(/delete layer\.adjust/.test(resetBody), '重置走 delete，而不是写入一组恒等值')
 })
 
+console.log('\n== 7. I-47 静态守卫：滑杆的百分比换算必须与 schema 的取值口径成对 ==')
+check('行为证明：schema 只收 0~1 且越界**抛错**——界面发 0~100 时整条滑杆都用不了', () => {
+  const doc = normalizeDesign(designDoc([imageLayer({ adjust: { grayscale: 0.5, invert: 0.25 } })]))
+  assert.equal(doc.layers[0].adjust.grayscale, 0.5, '0.5 原样保留 ⇒ 中间档位是合法的')
+  assert.equal(doc.layers[0].adjust.invert, 0.25)
+  assert.ok(renderHtml(designDoc([imageLayer({ adjust: { grayscale: 0.5 } })])).includes('grayscale(0.5)'),
+    'CSS filter 按 0~1 输出，中间档位真的会渲染成半灰')
+  // 反证：界面曾经把百分比直接当 schema 值发出去（0~100）。`number()` 对越界是**抛错**而不是夹取，
+  // 于是画布渲染与松手提交都会抛 ⇒ 滑杆被整体回滚并报「去色超出有效范围（0–1）」，
+  // 而滑杆 step=1 意味着 0 以外全是整数 ⇒ **除 0（恒等）之外没有任何档位可用**。
+  assert.throws(() => normalizeDesign(designDoc([imageLayer({ adjust: { grayscale: 50 } })])), /去色超出有效范围/,
+    '发 0~100 会被判非法：这就是「拖了没反应 / 画布闪空 / 弹回去报错」的机制')
+  assert.throws(() => normalizeDesign(designDoc([imageLayer({ adjust: { invert: 30 } })])), /反相超出有效范围/)
+})
+check('界面字段表的「上限 ÷ 100」与「恒等值 ÷ 100」必须等于 schema 的 max 与默认值', () => {
+  const view = read('src/views/BackgroundDesignerView.vue')
+  const tableSrc = view.slice(view.indexOf('const ADJUST_FIELDS'), view.indexOf('const ADJUST_PERCENT ='))
+  const rows = [...tableSrc.matchAll(/\['(\w+)',\s*'([^']+)',\s*(\d+),\s*(\d+)\]/g)]
+    .map((m) => ({ key: m[1], label: m[2], max: Number(m[3]), identity: Number(m[4]) }))
+  assert.equal(rows.length, 5, `字段表应有 5 行（亮度/对比度/饱和度/去色/反相），实得 ${rows.length}`)
+  const percent = Number((view.match(/const ADJUST_PERCENT = (\d+)/) || [])[1])
+  assert.equal(percent, 100, '界面百分比 → schema 一律 ÷100，且只有这一处定义')
+
+  const layout = read('electron/design-layout.cjs')
+  for (const row of rows) {
+    // schema 的权威写法：`<key>: number(adj.<key>, <默认值>, <min>, <max>, '<标签>')`
+    const m = layout.match(new RegExp(`\\b${row.key}: number\\(adj\\.${row.key}, ([\\d.]+), ([\\d.]+), ([\\d.]+),`))
+    assert.ok(m, `schema 的 imageAdjust 里必须能查到 ${row.key}`)
+    const [def, min, max] = m.slice(1).map(Number)
+    assert.equal(min, 0, `${row.key} 的 schema 下限是 0，滑杆 min=0 才成立`)
+    assert.equal(row.max / percent, max,
+      `${row.key}：滑杆上限 ${row.max}% ÷100 应等于 schema 上限 ${max}（实得 ${row.max / percent}）——口径不一致时中间档位会被静默夹掉`)
+    assert.equal(row.identity / percent, def,
+      `${row.key}：恒等值 ${row.identity}% ÷100 应等于 schema 默认值 ${def}（实得 ${row.identity / percent}）`)
+  }
+  // 去色/反相的恒等值是 0（不是 100）：写成 100 会让面板一打开就整张图变灰/反相
+  assert.equal(rows.find((r) => r.key === 'grayscale').identity, 0, '去色的恒等值是 0%')
+  assert.equal(rows.find((r) => r.key === 'invert').identity, 0, '反相的恒等值是 0%')
+  assert.equal(rows.find((r) => r.key === 'brightness').identity, 100, '亮度（乘数类）的恒等值是 100%')
+  assert.ok(rows.every((r) => r.identity === 0 || r.identity === 100), '恒等值只允许 0%（比例类）或 100%（乘数类）')
+})
+check('换算只有一处：不许再有按字段分叉的除数，上限由字段表传进来', () => {
+  const view = read('src/views/BackgroundDesignerView.vue')
+  assert.ok(!/ADJUST_PERCENT_DIVISOR/.test(view), '按字段配除数的表必须删掉（去色/反相曾被配成 ÷1）')
+  const body = view.slice(view.indexOf('function adjustInput('), view.indexOf('function adjustChange('))
+  assert.ok(!/grayscale|invert|brightness/.test(body), '换算函数里不许再按字段名分叉——上限与恒等值都来自字段表')
+  assert.ok(/Number\(max\)/.test(body) && /ADJUST_PERCENT/.test(body), '上限与除数都从参数/常量取')
+  assert.ok(/@input="adjustInput\(key, \$event\.target\.value, max\)"/.test(view),
+    '模板必须把字段表的上限传给换算函数（漏传会让上限变成 NaN，滑杆彻底不能拖）')
+  assert.ok(/:max="max"/.test(view), '滑杆自身的 max 也来自同一张表')
+  assert.ok(/adjustPercent\(key, identity\)/.test(view), '恒等值同样由字段表传进 adjustPercent')
+})
+check('滑杆旁回显当前百分比，能看清调到哪一档', () => {
+  const view = read('src/views/BackgroundDesignerView.vue')
+  assert.ok(/design-adjust-\$\{key\}-value/.test(view), '每条滑杆都要有数值回显（与导出质量滑杆同一套做法）')
+  assert.ok(/<output[^>]*design-adjust-\$\{key\}-value[^>]*>\{\{ adjustPercent\(key, identity\) \}\}%<\/output>/.test(view),
+    '回显的就是滑杆当前值')
+})
+
 console.log(`\n混合模式与颜色调整：${passed} 项通过`)

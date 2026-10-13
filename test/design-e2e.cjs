@@ -943,6 +943,65 @@ async function main() {
   const leftovers = ['stroke', 'strokeWidth', 'shadow'].filter((key) => key in clearedLayer)
   ok(leftovers.length === 0, `关掉后字段被真删除（实得残留 ${JSON.stringify(leftovers)}）`)
 
+  /*
+   * 颜色调整滑杆：界面百分比 → schema 的换算必须**按每个字段自己的口径**来。
+   * 这里真踩过一次：去色/反相的除数写成 1（把 schema 里的「取值 0~1」错当成「除以 1」），
+   * 于是滑杆拖到 50 时写进 schema 的是 50。`normalizeDesign` 对越界是**抛错**而不是夹取
+   * ⇒ 画布渲染与松手提交都会抛，滑杆被回滚并报「去色超出有效范围（0–1）」，
+   * 而 step=1 意味着 0 以外全是整数 ⇒ 这两个滑杆除 0 之外没有任何档位可用。
+   * 单测只覆盖领域层，这条「界面换算」的路径原本无人守。
+   * 放在这里而不是前面：本段会给工程写入 adjust（把版本抬到 6），而版本号是 Math.max 语义、
+   * 抬上去就不会降——前面 543 / 825 两条「保存为格式版本 2 / 3」的断言会被它带红。
+   */
+  await click(`[data-layer-id="${croppedLayer.id}"]`)
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-adjust-grayscale"]'))`, '选中图片图层后显示颜色调整滑杆')
+  const adjustSliders = await evaluate(`Object.fromEntries([...document.querySelectorAll('[data-testid^="design-adjust-"]')].filter(el=>el.type==='range').map(el=>[el.dataset.testid,{max:el.max,value:el.value}]))`)
+  ok(adjustSliders['design-adjust-grayscale']?.max === '100' && adjustSliders['design-adjust-invert']?.max === '100'
+    && adjustSliders['design-adjust-brightness']?.max === '300' && adjustSliders['design-adjust-saturate']?.max === '300',
+    `滑杆上限与 schema 的取值口径一致：去色/反相是 0~1 ⇒ 100%，乘数类是 0~3 ⇒ 300%（实得 ${JSON.stringify(adjustSliders)}）`)
+  ok(adjustSliders['design-adjust-grayscale']?.value === '0' && adjustSliders['design-adjust-brightness']?.value === '100',
+    '没调过时滑杆停在各自字段的**恒等值**（去色 0%、亮度 100%——去色的恒等值是 0 而不是 100）')
+
+  await fill('[data-testid="design-adjust-grayscale"]', 50)
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.grayscale === 0.5`, '去色 50% 写进 schema 是 0.5')
+  ok(await evaluate(`document.querySelector('[data-testid="design-adjust-grayscale-value"]')?.textContent.trim() === '50%'`),
+    '滑杆旁回显当前百分比，能看清调到哪一档（去色 50%）')
+  ok(await evaluate(`[...document.querySelectorAll('[data-design-asset="${croppedLayer.assetId}"]')].some(el=>String(el.getAttribute('style')).includes('grayscale(0.5)'))`),
+    '画布上的图片真的带上了 grayscale(0.5)（画布与出片同源，不是只在状态里改了数）')
+
+  await fill('[data-testid="design-adjust-invert"]', 30)
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.invert === 0.3`, '反相 30% 写进 schema 是 0.3')
+  await fill('[data-testid="design-adjust-brightness"]', 120)
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.brightness === 1.2`, '亮度 120% 写进 schema 是 1.2')
+  ok(true, '中间档位都能落进 schema，两个滑杆不再是「只有关和拉满」（反相 0.3、亮度 1.2）')
+  ok(await evaluate(`(() => {const el=document.querySelector('.design-surface-content');return Boolean(el && el.innerHTML.length > 0 && !document.querySelector('.notice.error'))})()`),
+    '画布仍在正常渲染且没有报错（口径不一致时 renderDesign 会抛错、画布直接变空）')
+
+  // 「预览→确认」：一次手势里的连续拖动只留一条撤销，否则连续拖会把撤销栈塞满。
+  await evaluate(`(() => {const el=document.querySelector('[data-testid="design-adjust-grayscale"]');for(const v of [10,20,30,40,60]){el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))}el.dispatchEvent(new Event('change',{bubbles:true}))})()`)
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.grayscale === 0.6`, '一次手势内的多次拖动只落到最终值 0.6')
+  await click('[data-testid="design-undo"]')
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.grayscale === 0.5`, '一次撤销就回到拖动前')
+  ok(true, '滑杆类控件一次手势只留一条撤销（拖动过程不进撤销栈）')
+
+  await click('[data-testid="design-save"]')
+  await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存颜色调整')
+  const adjustSaved = designs.getDesign(saved.id)
+  const adjustLayer = adjustSaved.layers.find(layer => layer.id === croppedLayer.id)
+  assert.deepEqual(adjustLayer.adjust, { brightness: 1.2, contrast: 1, saturate: 1, grayscale: 0.5, invert: 0.3 })
+  ok(true, `颜色调整以 schema 口径落盘（${JSON.stringify(adjustLayer.adjust)}）`)
+  ok(adjustSaved.schemaVersion === 7, `颜色调整不会把已经是 7 的工程降回 6（版本号 Math.max 语义，实得 ${adjustSaved.schemaVersion}）`)
+
+  await click('[data-testid="design-adjust-reset"]')
+  await waitFor(`!(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust`, '恢复原始颜色')
+  ok(true, '「恢复原始颜色」把整块 adjust 删掉，而不是把各项写回默认值（渲染侧少一个 filter）')
+  ok(await evaluate(`![...document.querySelectorAll('[data-design-asset="${croppedLayer.assetId}"]')].some(el=>String(el.getAttribute('style')).includes('grayscale('))`),
+    '重置后画布上不再有 grayscale（回到与升级前逐字节一致的渲染）')
+  // 收尾必须落盘：留下未保存草稿的话，往下切走会弹「确认切换」挡住模板往返
+  // （上面描边/投影那一段也是以保存收尾的）。
+  await click('[data-testid="design-save"]')
+  await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存重置结果')
+
   // Round trip through the template UI, followed by actual print rendering of its fixed revision.
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('模板')).click()`)
   await waitFor(`Boolean([...document.querySelectorAll('.tpl-name')].find(el=>el.textContent==='图层single'))`, '模板工程清单')

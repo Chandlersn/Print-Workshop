@@ -1184,34 +1184,46 @@ const BLEND_LABELS = {
 const blendOptions = BLEND_MODES.map((mode) => ({ value: mode, label: BLEND_LABELS[mode] || mode }))
 
 /**
- * 图片颜色调整字段表：`[key, 标签, 滑杆上限%]`。
- * brightness/contrast/saturate 在 schema 里是 1=原样的乘数，grayscale/invert 是 0~1，
- * 界面上统一折算成百分比（100% = 原样），与 adjustDraft 的换算成对，改一处要改另一处。
+ * 图片颜色调整字段表：`[key, 标签, 滑杆上限%, 恒等值%]`。
+ *
+ * schema 里两种口径（权威在 `electron/design-layout.cjs` 的 `imageAdjust`）：
+ * brightness/contrast/saturate 是「**1 = 原样**」的乘数（0~3），
+ * grayscale/invert 是「**0 = 原样**、1 = 拉满」的比例（0~1）。
+ * 界面一律用「0 ~ 上限」的百分比表示，写回时**统一 ÷100**（`ADJUST_PERCENT`），
+ * 所以两类的差别只在**上限**和**恒等值**这两列上——都放在这张表里，别在换算函数里另写一份。
+ *
+ * ⚠️ 去色/反相的恒等值是 **0 而不是 100**。这里真踩过一次：曾经按字段配「除数」，
+ * 去色/反相写成 ÷1（把 schema 里的「取值 0~1」错当成「除以 1」），于是滑杆拖到 50 时
+ * 写进 schema 的是 **50**。而 `normalizeDesign` 对越界是**抛错**而不是夹取 ⇒ 画布渲染
+ * （`renderDesign`）与松手提交（`adjustChange`）都会抛，滑杆被整体回滚并报
+ * 「去色超出有效范围（0–1）」；滑杆 step=1 意味着 0 以外全是整数 ⇒ **除 0 之外没有任何档位可用**。
+ * 改这张表时务必连着 `adjustPercent` / `adjustInput` 一起看。
  */
 const ADJUST_FIELDS = Object.freeze([
-  ['brightness', '亮度 %', 300],
-  ['contrast', '对比度 %', 300],
-  ['saturate', '饱和度 %', 300],
-  ['grayscale', '去色 %', 100],
-  ['invert', '反相 %', 100],
+  ['brightness', '亮度 %', 300, 100],
+  ['contrast', '对比度 %', 300, 100],
+  ['saturate', '饱和度 %', 300, 100],
+  ['grayscale', '去色 %', 100, 0],
+  ['invert', '反相 %', 100, 0],
 ])
-const ADJUST_PERCENT_DIVISOR = { grayscale: 1, invert: 1 }
+/** 界面百分比 → schema 值：所有字段一律 ÷100（见上面字段表的说明） */
+const ADJUST_PERCENT = 100
 /**
  * 「预览→确认」两步：拖动滑杆只改模型（画布即时变），**不进撤销栈**；
  * 松手（change）时把拖动前的快照记成**一条**撤销。整套语义与 colorDraft 相同——
  * 滑杆类控件一次手势只允许留一条历史，否则连续拖动会塞满撤销栈。
  */
 const adjustDraft = ref(null)
-function adjustPercent(key) {
+/** 滑杆显示值：没调过时用该字段的恒等值（亮度类是 100%，去色/反相是 0%） */
+function adjustPercent(key, identity) {
   const value = single.value?.adjust?.[key]
-  if (value === undefined) return key === 'grayscale' || key === 'invert' ? 0 : 100
-  return Math.round(value * 100)
+  if (value === undefined) return identity
+  return Math.round(value * ADJUST_PERCENT)
 }
-function adjustInput(key, percent) {
+/** 上限由字段表传进来——换算函数里不许再写一份，否则改了表会被静默夹到旧上限 */
+function adjustInput(key, percent, max) {
   if (!single.value || singleBlocked.value || single.value.type !== 'image') return
-  const divisor = ADJUST_PERCENT_DIVISOR[key] ?? 100
-  const max = key === 'grayscale' || key === 'invert' ? 100 : 300
-  const value = Math.min(Math.max(Number(percent) || 0, 0), max) / divisor
+  const value = Math.min(Math.max(Number(percent) || 0, 0), Number(max)) / ADJUST_PERCENT
   if (!adjustDraft.value) adjustDraft.value = { before: clone(design.value) }
   const layer = design.value.layers.find((item) => item.id === single.value.id)
   if (layer) layer.adjust = { ...(layer.adjust || {}), [key]: value }
@@ -2112,7 +2124,7 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
               <h4>颜色调整</h4>
               <p class="muted">拖动即时预览，松手只记一步撤销；打印、PDF 与导出的图片同效。</p>
               <div class="property-grid">
-                <label v-for="[key, label, max] in ADJUST_FIELDS" :key="key">{{ label }}<input type="range" min="0" :max="max" step="1" :value="adjustPercent(key)" :data-testid="`design-adjust-${key}`" @input="adjustInput(key, $event.target.value)" @change="adjustChange()"></label>
+                <label v-for="[key, label, max, identity] in ADJUST_FIELDS" :key="key">{{ label }}<input type="range" min="0" :max="max" step="1" :value="adjustPercent(key, identity)" :data-testid="`design-adjust-${key}`" @input="adjustInput(key, $event.target.value, max)" @change="adjustChange()"><output :data-testid="`design-adjust-${key}-value`">{{ adjustPercent(key, identity) }}%</output></label>
               </div>
               <button data-testid="design-adjust-reset" :disabled="!single.adjust" @click="resetAdjust">恢复原始颜色</button>
             </div>
