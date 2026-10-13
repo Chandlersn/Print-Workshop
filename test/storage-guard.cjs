@@ -156,6 +156,14 @@ console.log('== 4. JSON 损坏 / null 兜底 ==')
   fs.writeFileSync(jobsJson, '{"not":"array"}', 'utf-8')
   throws(() => printDomain.listJobs(), '期望数组但读到对象 → 抛错')
 
+  for (const invalidBackup of ['null', '{"not":"array"}', '42']) {
+    reset()
+    fs.writeFileSync(jobsJson, '[broken', 'utf-8')
+    fs.writeFileSync(`${jobsJson}.bak`, invalidBackup, 'utf-8')
+    throws(() => printDomain.listJobs(), `恢复副本类型不合法时拒绝顶包：${invalidBackup}`)
+    ok(!fs.existsSync(jobsJson), '无效备份不写回主文件，原损坏文件留存')
+  }
+
   // 场景 F：文件不存在 → 返回 null，上层按首次运行处理
   reset()
   ok(store.loadJson('never-existed-store') === null, '不存在的库返回 null（首次运行）')

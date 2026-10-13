@@ -37,6 +37,13 @@ function survey(root) {
   const stack = [rootBuf]
   while (stack.length) {
     const cur = stack.pop()
+    // lstat 不跟随链接，禁止空目录扫描越过 junction 或进入链接环。
+    try {
+      const stat = fs.lstatSync(cur)
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        return { dirs: [], files: 0, error: Object.assign(new Error('拒绝链接或非目录'), { code: 'UNSAFE_DIR' }) }
+      }
+    } catch (err) { return { dirs: [], files: 0, error: err } }
     dirs.push(cur)
     let kids
     try {
@@ -48,9 +55,12 @@ function survey(root) {
       const abs = join(cur, kid)
       let st
       try {
-        st = fs.statSync(abs)
+        st = fs.lstatSync(abs)
       } catch (err) {
         return { dirs: [], files: 0, error: err }
+      }
+      if (st.isSymbolicLink()) {
+        return { dirs: [], files: 0, error: Object.assign(new Error('拒绝包含链接的目录树'), { code: 'UNSAFE_DIR' }) }
       }
       if (st.isDirectory()) stack.push(abs)
       else files += 1
@@ -77,12 +87,12 @@ function main() {
     if (isAscii(text)) continue
     let st
     try {
-      st = fs.statSync(join(ROOT, buf))
+      st = fs.lstatSync(join(ROOT, buf))
     } catch (err) {
       targets.push({ buf, text, hex: buf.toString('hex'), error: err.code })
       continue
     }
-    if (!st.isDirectory()) {
+    if (st.isSymbolicLink() || !st.isDirectory()) {
       targets.push({ buf, text, hex: buf.toString('hex'), error: 'NOT_A_DIR' })
       continue
     }
@@ -103,7 +113,7 @@ function main() {
       skipped += 1
       continue
     }
-    const { dirs, files, error } = survey(item.buf)
+    const { dirs, files, error } = survey(join(ROOT, item.buf))
     if (error) {
       console.log(`  跳过 ${item.hex}  遍历失败（${error.code}）—— 需要手工处理`)
       skipped += 1
@@ -121,6 +131,8 @@ function main() {
     let ok = 0
     for (const dir of dirs) {
       try {
+        const stat = fs.lstatSync(dir)
+        if (stat.isSymbolicLink() || !stat.isDirectory()) throw Object.assign(new Error('目录已变化'), { code: 'UNSAFE_DIR' })
         fs.rmdirSync(dir)
         ok += 1
       } catch (err) {

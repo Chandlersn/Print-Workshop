@@ -66,17 +66,17 @@ function loadJson(name, { expect = null } = {}) {
     parsed = JSON.parse(raw)
   } catch (err) {
     // why 会拼进下面给用户看的句子，所以只留中文结论，不带引擎原文
-    return recoverCorrupt(name, fp, 'JSON 解析失败')
+    return recoverCorrupt(name, fp, 'JSON 解析失败', expect)
   }
   // null 是合法 JSON 但不是合法数据（一号文件就是 null 一定是坏了）
   if (parsed === null || (expect === 'array' && !Array.isArray(parsed))) {
-    return recoverCorrupt(name, fp, expect === 'array' ? '内容不是数组' : '内容为 null')
+    return recoverCorrupt(name, fp, expect === 'array' ? '内容不是数组' : '内容为 null', expect)
   }
   return parsed
 }
 
 /** 损坏兜底：留存 .corrupt-<ts> → 试 .bak → 都不行才抛错（宁可报错也不静默清空用户数据） */
-function recoverCorrupt(name, fp, why) {
+function recoverCorrupt(name, fp, why, expect) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const corruptPath = `${fp}.corrupt-${ts}`
   try {
@@ -90,6 +90,10 @@ function recoverCorrupt(name, fp, why) {
   if (fs.existsSync(bak)) {
     try {
       const back = JSON.parse(fs.readFileSync(bak, 'utf-8'))
+      // 恢复副本须满足与主文件相同的类型约束，不能把合法 JSON 当成有效领域数据。
+      if (back === null || (expect === 'array' && !Array.isArray(back))) {
+        throw new Error('恢复副本类型不合法')
+      }
       fs.writeFileSync(fp, JSON.stringify(back, null, 2), 'utf-8')
       console.warn(`[store] ${name}.json 损坏（${why}），已从 .bak 恢复；原文件留存为 ${path.basename(corruptPath)}`)
       return back

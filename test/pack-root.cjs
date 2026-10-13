@@ -104,6 +104,21 @@ check('嵌了一层有文件就不算空（宁可不报，也不能报成垃圾�
 })
 
 console.log('\n== 3. 集成：真实工程根目录必须是干净的 ==')
+check('入口、图标与四张内置底图缺失时准确报出，恢复后自查通过', () => {
+  const dir = makeTmp()
+  const missing = checkRoot.findMissingRequiredFiles(dir)
+  assert.equal(missing.length, 6)
+  assert.ok(missing.includes('bin/pp.cjs') && missing.includes('build/icon.png'))
+  for (const name of missing) {
+    const target = path.join(dir, name)
+    fs.mkdirSync(path.dirname(target), { recursive: true })
+    fs.copyFileSync(path.join(ROOT, name), target)
+  }
+  assert.deepEqual(checkRoot.findMissingRequiredFiles(dir), [])
+  fs.unlinkSync(path.join(dir, 'build/icon.png'))
+  assert.deepEqual(checkRoot.findMissingRequiredFiles(dir), ['build/icon.png'])
+  assert.deepEqual(checkRoot.findMissingRequiredFiles(ROOT), [], '实际工程恢复后六个文件都在')
+})
 check('工程根目录里没有任何「列得出来、stat 解析不了」的条目', () => {
   const { entries, readError } = checkRoot.findUnreadableEntries(ROOT)
   assert.equal(readError, null, `读不了工程根目录：${readError && readError.message}`)
@@ -135,6 +150,43 @@ check('全空的树数出 0 个文件，才允许删', () => {
   const { dirs, files } = purge.survey(dir)
   assert.equal(files, 0, '空树必须是 0 个文件')
   assert.equal(dirs.length, 3, '自己 + 2 层')
+})
+
+check('清理扫描拒绝根目录 junction，不进入目标目录', () => {
+  const dir = makeTmp()
+  const target = path.join(dir, 'target')
+  fs.mkdirSync(path.join(target, 'keep-empty'), { recursive: true })
+  const link = path.join(dir, '链接')
+  fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+  const result = purge.survey(link)
+  assert.ok(result.error, '链接必须拒绝扫描')
+  assert.deepEqual(result.dirs, [], '不能返回外部目录的待删除路径')
+  assert.deepEqual(checkRoot.findEmptyForeignDirs(dir), [], '不能把链接当成空树建议删除')
+})
+
+check('清理扫描拒绝嵌套 junction，自查不递归链接环', () => {
+  const dir = makeTmp()
+  const tree = path.join(dir, '空树')
+  fs.mkdirSync(tree)
+  fs.symlinkSync(tree, path.join(tree, 'loop'), process.platform === 'win32' ? 'junction' : 'dir')
+  assert.ok(purge.survey(tree).error, '遇到链接环应立即停止')
+  assert.deepEqual(checkRoot.findEmptyForeignDirs(dir), [], '有链接不能判为纯空目录树')
+})
+
+check('清理路径以工程根目录解析，不随终端 cwd 改变', () => {
+  const dir = makeTmp()
+  const project = path.join(dir, 'project')
+  const elsewhere = path.join(dir, 'elsewhere')
+  const target = path.join(project, '待清理')
+  const unrelated = path.join(elsewhere, '待清理')
+  fs.mkdirSync(path.join(project, 'scripts'), { recursive: true })
+  fs.mkdirSync(path.join(target, 'empty-child'), { recursive: true })
+  fs.mkdirSync(path.join(unrelated, 'keep-child'), { recursive: true })
+  const script = path.join(project, 'scripts', 'purge-broken-root-entries.cjs')
+  fs.writeFileSync(script, read('scripts/purge-broken-root-entries.cjs'))
+  require('child_process').execFileSync(process.execPath, [script, '--apply'], { cwd: elsewhere, windowsHide: true })
+  assert.ok(!fs.existsSync(target), '应清理脚本所在工程的空目录')
+  assert.ok(fs.existsSync(path.join(unrelated, 'keep-child')), '终端 cwd 下同名目录必须保留')
 })
 
 check('清理脚本默认不删：必须显式 --apply 才动手', () => {

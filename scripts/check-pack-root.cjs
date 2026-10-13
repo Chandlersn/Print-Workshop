@@ -24,6 +24,14 @@ const path = require('path')
 
 const ROOT = path.resolve(__dirname, '..')
 const MAX_LIST = 20
+// 本次实际误删的入口与发布资源；自查不能只检查存在的条目，还须检查必需文件是否缺失。
+const REQUIRED_FILES = [
+  'bin/pp.cjs', 'build/icon.png',
+  'build/seed/print-bg/demo-award-landscape.svg',
+  'build/seed/print-bg/demo-cert-landscape.svg',
+  'build/seed/print-bg/demo-cert-portrait.svg',
+  'build/seed/print-bg/demo-invite-landscape.svg',
+]
 
 const SEP = Buffer.from([path.sep.charCodeAt(0)])
 const isAscii = (text) => /^[\x20-\x7e]+$/.test(text)
@@ -32,11 +40,21 @@ const defaultIo = {
   // 以 Buffer 取名字：非法 UTF-8 的目录名只有原始字节还认得出来，
   // 走 utf8 会被替换成 U+FFFD，连 stat 都对不上（这正是打包报错里那串 `���`）。
   listRaw: (dir) => fs.readdirSync(dir, { encoding: 'buffer' }),
-  statPath: (abs) => fs.statSync(abs),
+  statPath: (abs) => fs.lstatSync(abs),
 }
 
 function join(rootDir, name) {
   return Buffer.concat([Buffer.from(rootDir), SEP, Buffer.isBuffer(name) ? name : Buffer.from(String(name))])
+}
+
+function findMissingRequiredFiles(rootDir) {
+  const missing = []
+  for (const name of REQUIRED_FILES) {
+    try {
+      if (!fs.statSync(path.join(rootDir, name)).isFile()) missing.push(name)
+    } catch { missing.push(name) }
+  }
+  return missing
 }
 
 /**
@@ -88,7 +106,8 @@ function countFilesUnder(rootBuf, io = defaultIo) {
       } catch (err) {
         return { files: 0, error: err }
       }
-      if (st.isDirectory()) stack.push(abs)
+      if (st.isSymbolicLink?.()) files += 1 // 链接不视为可清理的空目录，也不跟随。
+      else if (st.isDirectory()) stack.push(abs)
       else files += 1
     }
   }
@@ -115,7 +134,8 @@ function findEmptyForeignDirs(rootDir, io = defaultIo) {
     if (isAscii(text)) continue
     const abs = join(rootDir, name)
     try {
-      if (!statPath(abs, buf).isDirectory()) continue
+      const stat = statPath(abs, buf)
+      if (stat.isSymbolicLink?.() || !stat.isDirectory()) continue
     } catch (err) {
       // stat 不了的已经在 findUnreadableEntries 里报过，这里不重复
       continue
@@ -135,6 +155,12 @@ function main() {
   }
 
   const junk = findEmptyForeignDirs(ROOT)
+  const missing = findMissingRequiredFiles(ROOT)
+  if (missing.length) {
+    console.error(`[pack:check] 缺少 ${missing.length} 个必需文件，请恢复后再打包：`)
+    for (const name of missing) console.error(`             ${name}`)
+    process.exitCode = 1
+  }
 
   if (entries.length) {
     console.error(`[pack:check] 工程根目录有 ${entries.length} 个「列得出来、stat 解析不了」的条目，`)
@@ -157,7 +183,7 @@ function main() {
     console.warn('             清理：npm run pack:purge（只看）→ npm run pack:purge -- --apply')
   }
 
-  if (!entries.length) {
+  if (!entries.length && !missing.length) {
     console.log(junk.length
       ? `[pack:check] 没有会阻断打包的条目，但有 ${junk.length} 个空的非 ASCII 目录（见上）。`
       : `[pack:check] 工程根目录可读，条目名全部能解析（${ROOT}）`)
@@ -166,4 +192,4 @@ function main() {
 
 if (require.main === module) main()
 
-module.exports = { ROOT, findUnreadableEntries, findEmptyForeignDirs }
+module.exports = { ROOT, findUnreadableEntries, findEmptyForeignDirs, findMissingRequiredFiles }
