@@ -19,6 +19,7 @@ function ok(cond, name, extra) {
 }
 
 const print = require('../electron/print.cjs')
+const store = require('../electron/store.cjs')
 
 function main() {
   console.log('== createJob / listJobs ==')
@@ -47,11 +48,22 @@ function main() {
 
   console.log('== deleteJob ==')
   const jobDir = path.join(TMP, path.dirname(job.snapshot))
+  fs.mkdirSync(path.join(jobDir, 'photos'))
+  fs.writeFileSync(path.join(jobDir, 'photos', 'portrait.jpg'), 'ARCHIVE COPY')
+  const protectedFiles = ['export.pdf', 'datasets.json', 'templates.json', 'photo-bindings.json', 'design-assets/original.jpg', 'design-thumbnails/thumb.png', 'asset-library.json', 'designs/project.json']
+  for (const rel of protectedFiles) {
+    fs.mkdirSync(path.dirname(path.join(TMP, rel)), { recursive: true })
+    fs.writeFileSync(path.join(TMP, rel), rel === 'datasets.json' ? '[{"id":"ds_d1","printCount":2}]' : 'KEEP')
+  }
   ok(fs.existsSync(jobDir), '删除前归档目录存在')
   const r = print.deleteJob(job.id)
   ok(r.ok && r.archiveRemoved, '删除返回 ok', r)
   ok(!fs.existsSync(jobDir), '归档目录已清理')
   ok(print.listJobs().length === 0, '元数据已移除')
+  ok(!fs.existsSync(path.join(jobDir, 'photos', 'portrait.jpg')), '归档照片副本已释放')
+  ok(protectedFiles.every(rel => fs.existsSync(path.join(TMP, rel))), '外部 PDF、名单、模板、照片绑定、共享原件和缩略图均保留')
+  ok(store.loadJson('datasets')[0].printCount === 2, '删除历史不回退名单累计已打状态')
+  ok(r.backupUpdated && JSON.parse(fs.readFileSync(path.join(TMP, 'print-jobs.json.bak'), 'utf8')).length === 0, '恢复备份也不残留已删记录')
 
   // 快照已被手动清理时也能删（只删元数据）
   const job2 = print.createJob({ templateName: 't2', mode: 'print', recordCount: 1, status: 'failed' })
@@ -88,6 +100,63 @@ function main() {
   const rc = print.deleteJob(jc.id)
   ok(rc.ok && rc.archiveRemoved, '取消态删除仍成功（无归档目录）', rc)
   ok(!print.listJobs().some((j) => j.id === jc.id), '取消记录元数据已移除')
+
+  console.log('== 失败重试及任务目录归属 ==')
+  const locked = print.createJob({ templateName: 'locked', status: 'ok', snapshotHtml: 'retry' })
+  const lockedDir = path.join(TMP, path.dirname(locked.snapshot))
+  const originalRm = fs.rmSync
+  try {
+    fs.rmSync = function (target, options) {
+      if (target === lockedDir) throw new Error('模拟文件占用')
+      return originalRm.call(fs, target, options)
+    }
+    let err
+    try { print.deleteJob(locked.id) } catch (e) { err = e }
+    ok(err?.message.includes('记录已保留') && print.listJobs().some(j => j.id === locked.id), '归档删除失败时保留历史并明确报错')
+    ok(fs.existsSync(path.join(TMP, locked.snapshot)), '清理失败没有误删快照')
+  } finally { fs.rmSync = originalRm }
+  ok(print.deleteJob(locked.id).archiveRemoved && !fs.existsSync(lockedDir), '解锁后重试准确清理')
+
+  const owner = print.createJob({ templateName: 'owner', status: 'ok', snapshotHtml: 'OWNER' })
+  for (const snapshot of ['design-assets/snapshot.html', `archive/${owner.snapshot.split('/')[1]}/${owner.id}/snapshot.html`, 'archive/2026-99/job_intruder/snapshot.html', 'archive/2026-10/job_intruder/../snapshot.html']) {
+    const intruder = { id: 'job_intruder', snapshot }
+    store.saveJson('print-jobs', [intruder, ...print.listJobs().filter(j => j.id !== intruder.id)])
+    let err
+    try { print.deleteJob(intruder.id) } catch (e) { err = e }
+    ok(!!err && fs.existsSync(path.join(TMP, owner.snapshot)) && fs.existsSync(path.join(TMP, 'design-assets/original.jpg')), `拒绝其他任务、共享目录及非法归档路径：${snapshot}`)
+  }
+  store.saveJson('print-jobs', print.listJobs().filter(j => j.id !== 'job_intruder'))
+
+  const linked = { id: 'job_linked', snapshot: 'archive/2026-10/job_linked/snapshot.html' }
+  const linkedDir = path.join(TMP, 'archive', '2026-10', linked.id)
+  fs.mkdirSync(path.dirname(linkedDir), { recursive: true })
+  fs.symlinkSync(path.dirname(path.join(TMP, owner.snapshot)), linkedDir, 'junction')
+  store.saveJson('print-jobs', [linked, ...print.listJobs()])
+  let linkErr
+  try { print.deleteJob(linked.id) } catch (e) { linkErr = e }
+  ok(!!linkErr && fs.existsSync(path.join(TMP, owner.snapshot)), '拒绝任务目录 junction，目标归档完整保留')
+  fs.unlinkSync(linkedDir)
+  store.saveJson('print-jobs', print.listJobs().filter(j => j.id !== linked.id))
+
+  // id 重复的合法目录全部清理；任一异常路径则应在任何清理开始前拒绝。
+  const duplicate = { ...owner, snapshot: `archive/2020-01/${owner.id}/snapshot.html` }
+  const duplicateDir = path.join(TMP, path.dirname(duplicate.snapshot))
+  fs.mkdirSync(duplicateDir, { recursive: true })
+  fs.writeFileSync(path.join(duplicateDir, 'snapshot.html'), 'OLD COPY')
+  store.saveJson('print-jobs', [duplicate, ...print.listJobs()])
+  ok(print.deleteJob(owner.id).archiveRemoved && !fs.existsSync(duplicateDir) && !fs.existsSync(path.join(TMP, owner.snapshot)), '重复 id 的两份合法归档均释放，其他记录保留')
+
+  const backupFail = print.createJob({ status: 'canceled' })
+  const originalCopy = fs.copyFileSync
+  let backupResult
+  try {
+    fs.copyFileSync = function (source, target, ...args) {
+      if (target === path.join(TMP, 'print-jobs.json.bak')) throw new Error('模拟备份被占用')
+      return originalCopy.call(fs, source, target, ...args)
+    }
+    backupResult = print.deleteJob(backupFail.id)
+  } finally { fs.copyFileSync = originalCopy }
+  ok(backupResult.backupUpdated === false && !print.listJobs().some(j => j.id === backupFail.id), '恢复副本更新失败准确返回，界面可提示残留')
 
   rmDeep(TMP)
   console.log(`\n结果: ${passed} 项断言通过, ${failed} 项失败`)

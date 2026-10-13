@@ -5,7 +5,9 @@ import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
 import { activeDataset } from '../lib/active-dataset.js'
-import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK } from '../../electron/design-layout.cjs'
+import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, BLEND_MODES, CROP_RATIOS, fitCropToRatio } from '../../electron/design-layout.cjs'
+// 格式表与体积估算在纯模块里——出图实现读的是同一份，界面不抄第二遍（见 I-41）。
+import { FORMATS, normalizeQuality, estimateOutputBytes } from '../../electron/export-formats.cjs'
 import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
   createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection,
@@ -190,6 +192,15 @@ const stage = ref(null)
 const zoom = ref(1)
 const snap = ref(true)
 const keepRatio = ref(true)
+/**
+ * 证件照与卡片的**成品尺寸**预设（毫米）——由主进程下发，不在这里抄一份。
+ *
+ * 来源是 `templates.cjs` 的 `ITEM_SIZES`，多联拼版的「成品尺寸」下拉用的是同一份
+ * （经 `app:env` 下发）。同一个「1 寸 = 25×35」只能有一个定义，否则改一处必漏另一处。
+ */
+const itemSizes = ref([])
+/** 尺寸/比例下拉的当前值。选完立刻回位成空串，好让同一个预设能连点两次。 */
+const sizePreset = ref('')
 const guides = ref({ x: null, y: null })
 const guidesVisible = ref(true)
 const newGuideAxis = ref('x')
@@ -197,13 +208,27 @@ const newGuidePosition = ref(50)
 const visibleGuides = computed(() => guidesVisible.value ? (design.value.guides || []).filter(guide => guide.position >= 0 && guide.position <= design.value.artboard[guide.axis === 'x' ? 'w' : 'h']) : [])
 const showExport = ref(false)
 const exportDpi = ref(300)
+const exportFormat = ref('png')
+const exportQuality = ref(FORMATS.jpeg.quality)
 const exportTransparent = ref(false)
 const exportError = ref('')
+const exportFormatInfo = computed(() => FORMATS[exportFormat.value])
+/** 只有有损格式才谈得上质量；PNG 是无损的，滑杆对它没有任何意义。 */
+const exportLossy = computed(() => exportFormatInfo.value.quality !== null)
+/**
+ * 切换格式时把质量拉回该格式的默认值——JPEG 的 90 与 WebP 的 80 不是一个量纲，
+ * 沿用上一个格式的数字会让用户以为「同一个 90 在两个格式里等价」。
+ */
+function pickExportFormat() {
+  exportQuality.value = normalizeQuality(undefined, exportFormat.value)
+  // JPEG 没有 alpha 通道，勾着透明是自相矛盾的：直接清掉，让界面与最终产物一致。
+  if (!exportFormatInfo.value.transparent) exportTransparent.value = false
+}
 /**
  * 最近一次成功导出的结果（含绝对路径），用来给出「打开所在文件夹 / 用系统程序打开」。
  *
  * 存结果、不存路径字符串本身：这两个动作**不接受参数**，真正被打开的路径由主进程
- * 记着（最近一次写出的 PNG）。渲染层手里这份只用于显示与按钮开关。
+ * 记着（最近一次写出的图片）。渲染层手里这份只用于显示与按钮开关。
  */
 const lastExport = ref(null)
 const exportSize = computed(() => ({
@@ -216,6 +241,25 @@ const exportSizeError = computed(() => {
   if (width * height > 40000000) return '输出不能超过 4,000 万像素，请降低 DPI 或缩小画布。'
   return ''
 })
+/**
+ * 体积预估——**只对有损格式给**，而且一律写「约」。
+ *
+ * PNG 是无损的，体积由内容复杂度决定（矢量文字与照片能差几十倍），估出来既不准
+ * 也帮不了用户做决定；给个像模像样的假数字比不给更糟。导出完成后用真实字节数覆盖。
+ */
+const exportEstimate = computed(() => {
+  if (!exportLossy.value || exportSizeError.value) return null
+  return estimateOutputBytes({
+    width: exportSize.value.width, height: exportSize.value.height,
+    format: exportFormat.value, quality: exportQuality.value,
+  })
+})
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
 const inputEpoch = ref(0)
 const canvasWidth = computed(() => 720 * zoom.value)
 const pxPerMm = computed(() => canvasWidth.value / design.value.artboard.w)
@@ -351,6 +395,11 @@ async function refreshProjects() {
 }
 async function refreshPresets() {
   presets.value = await window.printpress.listDesignPresets()
+}
+/** 成品尺寸预设（证件照 / 卡片，毫米）——主进程下发，与多联拼版共用同一份定义。 */
+async function loadItemSizes() {
+  const env = await window.printpress.getEnv()
+  itemSizes.value = env.itemSizes || []
 }
 /**
  * 「常用模板」下拉里的「常用」：**用户自己保存过的**工程，按最近使用倒序，最多 8 个。
@@ -609,14 +658,20 @@ function guideOutside(guide) {
   return guide.position < 0 || guide.position > design.value.artboard[guide.axis === 'x' ? 'w' : 'h']
 }
 function openExport() { if (!busy.value) { exportError.value = ''; showExport.value = true } }
-async function exportPng() {
+async function runExport() {
   if (busy.value || exportSizeError.value) return
   endGesture(); finishKeyboardMove()
   busy.value = true
   exportError.value = ''
   try {
     const result = await window.printpress.exportDesignPng({
-      design: normalizeDesign(clone(design.value)), dpi: Number(exportDpi.value), transparent: exportTransparent.value,
+      design: normalizeDesign(clone(design.value)),
+      dpi: Number(exportDpi.value),
+      // JPEG 没有 alpha 通道：勾选框在切到 JPEG 时已被清掉，这里再兜一次，
+      // 免得渲染层与主进程对「到底铺不铺底」各说各话。
+      transparent: exportFormatInfo.value.transparent && exportTransparent.value,
+      format: exportFormat.value,
+      quality: exportLossy.value ? Number(exportQuality.value) : undefined,
     })
     if (result.canceled) return
     showExport.value = false
@@ -628,7 +683,7 @@ async function exportPng() {
   finally { busy.value = false }
 }
 /**
- * 打开刚导出的 PNG。
+ * 打开刚导出的图片。
  *
  * 两个动作都不传参数——路径由主进程记着。这是安全边界，不是省事：
  * 渲染进程若能指定路径，`shell.openPath` 就等于「以当前用户身份打开任意本地文件」。
@@ -940,11 +995,31 @@ function setShadow(key, value) {
   if (!id || singleBlocked.value) return
   commit((doc) => {
     const layer = doc.layers.find(item => item.id === id)
-    if (!layer || !['rect', 'ellipse'].includes(layer.type)) return
+    // 图片图层同样支持投影（渲染走 CSS drop-shadow，见 design-layout.cjs）。
+    if (!layer || !['rect', 'ellipse', 'image'].includes(layer.type)) return
     if (key === 'enabled') {
       if (value) layer.shadow = { dxMm: 1, dyMm: 1.5, blurMm: 1, color: '#000000', opacity: 0.2 }
       else delete layer.shadow
     } else if (layer.shadow) layer.shadow[key] = value
+  })
+}
+/**
+ * 图片图层的描边（证件照衬边）。
+ *
+ * 与形状的描边**语义不同**：形状天生带一圈描边（`stroke`/`strokeWidth` 有默认值），
+ * 图片的描边是「用户主动加」的。所以关掉时要把字段**删掉**，而不是留一个 0 宽度——
+ * `strokeWidth: 0` 也会把工程标成版本 7（旧应用明确拒绝），却没给用户任何视觉差别。
+ */
+function setStroke(key, value) {
+  const id = single.value?.id
+  if (!id || singleBlocked.value) return
+  commit((doc) => {
+    const layer = doc.layers.find(item => item.id === id)
+    if (!layer || layer.type !== 'image') return
+    if (key === 'enabled') {
+      if (value) { layer.stroke = '#ffffff'; layer.strokeWidth = 1 }
+      else { delete layer.stroke; delete layer.strokeWidth }
+    } else if (layer.strokeWidth !== undefined) layer[key] = value
   })
 }
 function adoptTemplateSize() {
@@ -1002,6 +1077,101 @@ function colorChange(key, value, scope = 'layer') {
     fail(err)
   }
 }
+
+// ---- 图层混合模式 / 图片颜色调整 / 组透明度（v0.7 第一批）----
+// 渲染与校验的权威实现在 electron/design-layout.cjs（BLEND_MODES、imageAdjust、
+// renderDesign 的 filterOf / mix-blend-mode / 组透明度乘算）。这里只做界面与撤销语义。
+
+/** 混合模式中文名——与 BLEND_MODES 一一对应，顺序即下拉顺序 */
+const BLEND_LABELS = {
+  normal: '正常（不混合）', multiply: '正片叠底', screen: '滤色', overlay: '叠加',
+  darken: '变暗', lighten: '变亮', 'color-dodge': '颜色减淡', 'color-burn': '颜色加深',
+  'hard-light': '强光', 'soft-light': '柔光', difference: '差值', exclusion: '排除',
+  hue: '色相', saturation: '饱和度', color: '颜色', luminosity: '明度',
+}
+const blendOptions = BLEND_MODES.map((mode) => ({ value: mode, label: BLEND_LABELS[mode] || mode }))
+
+/**
+ * 图片颜色调整字段表：`[key, 标签, 滑杆上限%]`。
+ * brightness/contrast/saturate 在 schema 里是 1=原样的乘数，grayscale/invert 是 0~1，
+ * 界面上统一折算成百分比（100% = 原样），与 adjustDraft 的换算成对，改一处要改另一处。
+ */
+const ADJUST_FIELDS = Object.freeze([
+  ['brightness', '亮度 %', 300],
+  ['contrast', '对比度 %', 300],
+  ['saturate', '饱和度 %', 300],
+  ['grayscale', '去色 %', 100],
+  ['invert', '反相 %', 100],
+])
+const ADJUST_PERCENT_DIVISOR = { grayscale: 1, invert: 1 }
+/**
+ * 「预览→确认」两步：拖动滑杆只改模型（画布即时变），**不进撤销栈**；
+ * 松手（change）时把拖动前的快照记成**一条**撤销。整套语义与 colorDraft 相同——
+ * 滑杆类控件一次手势只允许留一条历史，否则连续拖动会塞满撤销栈。
+ */
+const adjustDraft = ref(null)
+function adjustPercent(key) {
+  const value = single.value?.adjust?.[key]
+  if (value === undefined) return key === 'grayscale' || key === 'invert' ? 0 : 100
+  return Math.round(value * 100)
+}
+function adjustInput(key, percent) {
+  if (!single.value || singleBlocked.value || single.value.type !== 'image') return
+  const divisor = ADJUST_PERCENT_DIVISOR[key] ?? 100
+  const max = key === 'grayscale' || key === 'invert' ? 100 : 300
+  const value = Math.min(Math.max(Number(percent) || 0, 0), max) / divisor
+  if (!adjustDraft.value) adjustDraft.value = { before: clone(design.value) }
+  const layer = design.value.layers.find((item) => item.id === single.value.id)
+  if (layer) layer.adjust = { ...(layer.adjust || {}), [key]: value }
+}
+function adjustChange() {
+  const draft = adjustDraft.value
+  adjustDraft.value = null
+  if (!draft) return
+  try {
+    design.value = normalizeDesign(design.value)
+    record(draft.before)
+    clearFeedback()
+  } catch (err) {
+    design.value = draft.before
+    inputEpoch.value++
+    fail(err)
+  }
+}
+/** 恢复原始颜色：整块 adjust 删掉，渲染侧少一个 filter，与从没调过逐字节一致 */
+function resetAdjust() {
+  if (!single.value || singleBlocked.value || single.value.type !== 'image') return
+  adjustDraft.value = null
+  const id = single.value.id
+  commit((doc) => {
+    const layer = doc.layers.find((item) => item.id === id)
+    if (layer) delete layer.adjust
+  })
+}
+
+/** 组透明度：与图片调整同款的「预览→确认」——整组滑块一次拖动只记一条撤销 */
+const groupOpacityDraft = ref(null)
+function groupOpacityInput(percent) {
+  if (!selectedGroup.value) return
+  const value = Math.min(Math.max(Number(percent) || 0, 0), 100) / 100
+  if (!groupOpacityDraft.value) groupOpacityDraft.value = { before: clone(design.value) }
+  const group = design.value.groups.find((item) => item.id === selectedGroup.value.id)
+  if (group) group.opacity = value
+}
+function groupOpacityChange() {
+  const draft = groupOpacityDraft.value
+  groupOpacityDraft.value = null
+  if (!draft) return
+  try {
+    design.value = normalizeDesign(design.value)
+    record(draft.before)
+    clearFeedback()
+  } catch (err) {
+    design.value = draft.before
+    inputEpoch.value++
+    fail(err)
+  }
+}
 /**
  * 整块颜色控件都能唤起取色器。
  *
@@ -1046,6 +1216,50 @@ function resetCrop() {
     }
   })
 }
+/**
+ * 套用「成品尺寸 / 比例」预设。
+ *
+ * 两件事**必须同时做**，只做一件都是错的：
+ * 1. 把图层尺寸改成目标毫米（证件照的意义就在于成品恰好是 25×35 mm，不能靠手输）；
+ * 2. 把静态图片的 `crop` 调成同一长宽比——只改尺寸不改裁切，换来的是**被拉长的脸**。
+ *
+ * 变量图没有 `crop`（取景由 `cover` + 焦点决定），帧尺寸本身就是成品尺寸，所以只做第 1 件。
+ * 比例类预设「保持当前宽度、只改高度」，尺寸类预设两轴都定死。
+ */
+function applySizePreset(value) {
+  if (!single.value || singleBlocked.value) return
+  if (single.value.type !== 'image') return
+  // 只按**第一个**冒号切分：比例预设的 id 本身含冒号（`1:1` / `9:16`），
+  // 用 `split(':')` 解构会把 `ratio:1:1` 读成 id `1` ⇒ 找不到预设 ⇒ **静默无操作**。
+  const raw = String(value)
+  const sep = raw.indexOf(':')
+  if (sep < 0) return
+  const kind = raw.slice(0, sep)
+  const id = raw.slice(sep + 1)
+  const preset = kind === 'size'
+    ? itemSizes.value.find((item) => item.id === id)
+    : CROP_RATIOS.find((item) => item.id === id)
+  if (!preset) return
+  const layerId = single.value.id
+  commit((doc) => {
+    const layer = doc.layers.find((item) => item.id === layerId)
+    const width = kind === 'size' ? preset.w : layer.w
+    const height = kind === 'size' ? preset.h : round(width * preset.h / preset.w)
+    layer.w = round(width)
+    layer.h = round(height)
+    if (!layer.variable && layer.assetId) {
+      const asset = doc.assets[layer.assetId]
+      // 传的是**取整后的实际毫米**，不是预设的名义值：这样裁切比例与真实帧比例严格一致。
+      if (asset) layer.crop = fitCropToRatio(layer.crop, layer.w, layer.h, asset.width, asset.height)
+    }
+  })
+}
+// 选完立刻回位到「自定义」：不回位的话同一个预设点第二次不会触发 change（值没变）。
+watch(sizePreset, (value) => {
+  if (!value) return
+  sizePreset.value = ''
+  applySizePreset(value)
+})
 function toggleLayer(layer, key) { commit((doc) => { const target = doc.layers.find((item) => item.id === layer.id); target[key] = !target[key] }) }
 function removeSelected() {
   if (!editable.value.length) return
@@ -1526,10 +1740,12 @@ onMounted(async () => {
     // activate() 里那句被 initialized 门控的 refreshPresets 会被整个跳过——
     // 结果是「常用模板」下拉一直空着且禁用，用户以为没有这个功能，
     // 得先切到别的页再切回来才出现。属于「看不见的失败」。
-    const results = await Promise.allSettled([refreshProjects(), refreshFonts(), refreshPresets()])
+    const results = await Promise.allSettled([refreshProjects(), refreshFonts(), refreshPresets(), loadItemSizes()])
     if (results[0].status === 'rejected') fail(results[0].reason)
     if (results[1].status === 'rejected') fail(results[1].reason)
     if (results[2].status === 'rejected') fail(results[2].reason)
+    // 成品尺寸拿不到不阻断编辑：比例类预设不依赖它，只是少了一组证件照规格。
+    if (results[3].status === 'rejected') itemSizes.value = []
   } catch (err) { fail(err) }
   initialized = true
   refreshAdopted()
@@ -1571,7 +1787,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
         </label>
         <button data-testid="design-copy" :disabled="busy" @click="save(true)">另存副本</button>
         <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets">素材库</button>
-        <button data-testid="design-export-png" :disabled="busy" @click="openExport">导出 PNG</button>
+        <button data-testid="design-export-png" :disabled="busy" title="导出 PNG / JPEG / WebP 图片" @click="openExport">导出图片</button>
         <button data-testid="design-export-package" :disabled="busy" title="把已保存的这一版连图带字体打包成 .ppdesign，可在另一台电脑上继续编辑（导出的是已保存版本，不是当前未保存的修改）" @click="openPackageExport">导出工程包</button>
         <button data-testid="design-import-package" :disabled="busy" title="从 .ppdesign 导入一份可编辑副本；同名工程不会被覆盖" @click="importPackage">导入工程包</button>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
@@ -1586,7 +1802,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
       它说的是「磁盘上那个文件」，所以不跟编辑状态走：改了工程也不消失，直到下次导出或手动关掉。
     -->
     <div v-if="lastExport" class="notice success export-done" role="status">
-      <span class="export-done-text">PNG 已导出：{{ lastExport.width }} × {{ lastExport.height }} px · {{ lastExport.dpi }} DPI<code class="export-done-path" :title="lastExport.filePath">{{ lastExport.filePath }}</code></span>
+      <span class="export-done-text">{{ FORMATS[lastExport.format]?.label || '图片' }} 已导出：{{ lastExport.width }} × {{ lastExport.height }} px · {{ lastExport.dpi }} DPI<template v-if="lastExport.bytes"> · {{ formatBytes(lastExport.bytes) }}</template><code class="export-done-path" :title="lastExport.filePath">{{ lastExport.filePath }}</code></span>
       <button data-testid="design-reveal-export" :disabled="busy" title="在文件管理器里选中这个文件，双击就能用系统看图器打印" @click="revealExport">打开所在文件夹</button>
       <button data-testid="design-open-export" :disabled="busy" title="用系统默认程序（看图器）打开" @click="openExportedFile">用系统程序打开</button>
       <button data-testid="design-export-done-close" title="只关掉这条提示，不影响已导出的文件" @click="lastExport = null">关闭</button>
@@ -1635,7 +1851,7 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
             <div v-else :data-layer-id="row.id" class="layer-row" :class="{ selected: selectedIds.includes(row.id), hidden: !row.layer.visible, 'group-member': !!row.group }" @click="selectLayer(row.layer, $event, true)">
               <button class="icon-button" :title="row.layer.visible ? '隐藏图层' : '显示图层'" :aria-label="row.layer.visible ? '隐藏图层' : '显示图层'" @click.stop="toggleLayer(row.layer, 'visible')">{{ row.layer.visible ? '◉' : '○' }}</button>
               <span class="layer-name" :title="row.layer.name">{{ row.layer.name }}</span>
-              <span v-if="row.layer.editorOnly" class="layer-flag" title="仅编辑可见：打印、PDF 与 PNG 导出里都不会出现">仅编辑</span>
+              <span v-if="row.layer.editorOnly" class="layer-flag" title="仅编辑可见：打印、PDF 与导出的图片里都不会出现">仅编辑</span>
               <span class="layer-row-actions" @click.stop>
                 <template v-if="row.layer.type === 'image' && row.layer.assetId">
                   <button v-if="!adoptedIds.has(row.layer.assetId)" class="icon-button" title="加入素材库：收藏这张原图，之后删除图层不会清理它" @click.stop="adoptLayerAsset(row.layer)">＋</button>
@@ -1742,6 +1958,8 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
         <h3>{{ selectedGroup ? '分组属性' : selected.length > 1 ? `多选 ${selected.length} 个图层` : single ? '图层属性' : '排版属性' }}</h3>
         <template v-if="selectedGroup">
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
+          <label>组透明度 %<input data-testid="design-group-opacity" type="number" min="0" max="100" step="1" :value="Math.round((selectedGroup.opacity ?? 1) * 100)" @input="groupOpacityInput($event.target.value)" @change="groupOpacityChange()"></label>
+          <p class="muted">组透明度会乘算到组内每一个图层（与该图层自身的不透明度叠加）。拖动即时预览，松手才记一步撤销；打印与 PDF 同效。</p>
           <p class="muted">{{ selectedGroup.layerIds.length }} 个图层整体移动与对齐。分组不支持整体缩放或旋转；请在列表选择成员分别调整。</p>
           <p v-if="groupHas(selectedGroup, 'locked')" class="locked-note">组内存在锁定图层，整组无法移动、排序或删除。</p>
         </template>
@@ -1761,6 +1979,16 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
               <label>旋转 °<input type="number" step="1" :value="single.rotation" @change="setLayer('rotation', $event.target.value, true)"></label>
               <label>不透明度 %<input type="number" min="0" max="100" step="1" :value="Math.round(single.opacity * 100)" @change="setLayer('opacity', Number($event.target.value) / 100, true)"></label>
             </div>
+            <label>混合模式<select data-testid="design-layer-blend" :value="single.blend || 'normal'" @change="setLayer('blend', $event.target.value)"><option v-for="opt in blendOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></label>
+            <p v-if="(single.blend || 'normal') !== 'normal'" class="muted">混合模式决定这个图层如何与下方内容叠色，画布、打印与 PDF 同源；不确定就选「正常」。</p>
+            <div v-if="single.type === 'image'">
+              <h4>颜色调整</h4>
+              <p class="muted">拖动即时预览，松手只记一步撤销；打印、PDF 与导出的图片同效。</p>
+              <div class="property-grid">
+                <label v-for="[key, label, max] in ADJUST_FIELDS" :key="key">{{ label }}<input type="range" min="0" :max="max" step="1" :value="adjustPercent(key)" :data-testid="`design-adjust-${key}`" @input="adjustInput(key, $event.target.value)" @change="adjustChange()"></label>
+              </div>
+              <button data-testid="design-adjust-reset" :disabled="!single.adjust" @click="resetAdjust">恢复原始颜色</button>
+            </div>
             <template v-if="single.type === 'text'">
               <label>固定文字<textarea data-testid="design-text" rows="4" :value="single.text" @change="setLayer('text', $event.target.value)"></textarea></label>
               <label>字体<select :value="single.fontFamily" @change="setLayer('fontFamily', $event.target.value)"><option value="">默认字体</option><option v-for="name in fontNames" :key="name" :value="name">{{ name }}</option><option v-if="single.fontFamily && !fontNames.includes(single.fontFamily)" :value="single.fontFamily">{{ single.fontFamily }}（当前未找到）</option></select></label>
@@ -1776,6 +2004,18 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
             <template v-else-if="single.type === 'image' && single.variable">
               <h4>变量照片</h4>
               <p>匹配字段跟随名单的“配图”开关。切换字段无需重新制作变量图。</p>
+              <label>成品尺寸 / 比例
+                <select v-model="sizePreset" data-testid="design-size-preset" :disabled="singleBlocked">
+                  <option value="">自定义（不改动）</option>
+                  <optgroup v-if="itemSizes.length" label="证件照与卡片（毫米）">
+                    <option v-for="size in itemSizes" :key="size.id" :value="`size:${size.id}`">{{ size.name }}</option>
+                  </optgroup>
+                  <optgroup label="仅比例（保持当前宽度）">
+                    <option v-for="ratio in CROP_RATIOS" :key="ratio.id" :value="`ratio:${ratio.id}`">{{ ratio.name }}</option>
+                  </optgroup>
+                </select>
+              </label>
+              <p class="muted">选尺寸会把框设成该毫米成品（如 1 寸 = 25×35 mm）；取景由「适应方式 + 焦点」决定，不会把脸拉长。</p>
               <label>适应方式<select :value="single.fit" @change="setLayer('fit', $event.target.value)"><option value="cover">铺满框（裁切边缘）</option><option value="contain">完整显示（可能留白）</option></select></label>
               <label v-for="[axis, label] in [['x','水平焦点 %'],['y','垂直焦点 %']]" :key="axis">{{ label }}<input type="number" min="0" max="100" :value="single.focal[axis] * 100" @change="setPhotoFocal(axis, $event.target.value)"></label>
               <label>圆角 mm<input type="number" min="0" step="0.5" :value="single.radius" @change="setLayer('radius', $event.target.value, true)"></label>
@@ -1783,6 +2023,18 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
             </template>
             <template v-else-if="single.type === 'image'">
               <label class="inline"><input v-model="keepRatio" type="checkbox"> 缩放与裁切保持图片比例</label>
+              <label>成品尺寸 / 比例
+                <select v-model="sizePreset" data-testid="design-size-preset" :disabled="singleBlocked">
+                  <option value="">自定义（不改动）</option>
+                  <optgroup v-if="itemSizes.length" label="证件照与卡片（毫米）">
+                    <option v-for="size in itemSizes" :key="size.id" :value="`size:${size.id}`">{{ size.name }}</option>
+                  </optgroup>
+                  <optgroup label="仅比例（保持当前宽度）">
+                    <option v-for="ratio in CROP_RATIOS" :key="ratio.id" :value="`ratio:${ratio.id}`">{{ ratio.name }}</option>
+                  </optgroup>
+                </select>
+              </label>
+              <p class="muted">选尺寸会把图层设成该毫米成品（如 1 寸 = 25×35 mm），并同时把裁切调成同一长宽比——只改尺寸不改裁切会把照片拉长。</p>
               <div class="tool-grid"><button @click="setLayer('flipX', !single.flipX)">{{ single.flipX ? '取消水平翻转' : '水平翻转' }}</button><button @click="setLayer('flipY', !single.flipY)">{{ single.flipY ? '取消垂直翻转' : '垂直翻转' }}</button></div>
               <h4>裁切范围（原图百分比）</h4>
               <div class="property-grid"><label v-for="[key, label] in [['x','左侧 %'],['y','顶部 %'],['w','宽度 %'],['h','高度 %']]" :key="key">{{ label }}<input :data-testid="`design-crop-${key}`" type="number" min="0" max="100" step="1" :value="round(single.crop[key] * 100)" @change="setCrop(key, $event.target.value)"></label></div>
@@ -1811,6 +2063,27 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
               <div class="property-grid"><label class="color-field" @click="openColorPicker"><span>描边颜色</span><span class="color-control"><input type="color" :value="single.stroke === 'transparent' ? '#000000' : single.stroke" aria-label="选择描边颜色" @input="colorInput('stroke', $event.target.value)" @change="colorChange('stroke', $event.target.value)"><code class="color-value">{{ formatColor(single.stroke) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label><label>描边 mm<input type="number" min="0" step="0.1" :value="single.strokeWidth" @change="setLayer('strokeWidth', $event.target.value, true)"></label></div>
               <label v-if="single.type === 'rect'">圆角 mm<input type="number" min="0" step="0.5" :value="single.radius" @change="setLayer('radius', $event.target.value, true)"></label>
             </template>
+            <!-- 图片图层的描边与投影（v0.7 §6）。放在两支图片分支**之外**共用一份：
+                 静态图与变量图要的是同一个功能，写两遍必然走偏（形状那套两套按钮已经吃过这个亏）。 -->
+            <template v-if="single.type === 'image'">
+              <h4>描边（衬边）</h4>
+              <label class="inline"><input data-testid="design-layer-stroke" type="checkbox" :checked="single.strokeWidth !== undefined" @change="setStroke('enabled', $event.target.checked)"> 使用描边</label>
+              <div v-if="single.strokeWidth !== undefined" class="property-grid">
+                <label>宽度 mm<input data-testid="design-stroke-width" type="number" min="0" max="100" step="0.1" :value="single.strokeWidth" @change="setStroke('strokeWidth', Number($event.target.value))"></label>
+                <label>描边颜色<input data-testid="design-stroke-color" type="color" :value="single.stroke === 'transparent' ? '#ffffff' : single.stroke" @change="setStroke('stroke', $event.target.value)"></label>
+              </div>
+              <p v-if="single.strokeWidth !== undefined" class="muted">描边画在框的内侧，<strong>不改变成品的毫米尺寸</strong>，也不会把照片拉长。</p>
+              <h4>投影</h4>
+              <label class="inline"><input data-testid="design-layer-shadow" type="checkbox" :checked="!!single.shadow" @change="setShadow('enabled', $event.target.checked)"> 使用投影</label>
+              <div v-if="single.shadow" class="property-grid">
+                <label>水平偏移 mm<input data-testid="design-shadow-dx" type="number" min="-50" max="50" step="0.1" :value="single.shadow.dxMm" @change="setShadow('dxMm', Number($event.target.value))"></label>
+                <label>垂直偏移 mm<input data-testid="design-shadow-dy" type="number" min="-50" max="50" step="0.1" :value="single.shadow.dyMm" @change="setShadow('dyMm', Number($event.target.value))"></label>
+                <label>模糊 mm<input data-testid="design-shadow-blur" type="number" min="0" max="10" step="0.1" :value="single.shadow.blurMm" @change="setShadow('blurMm', Number($event.target.value))"></label>
+                <label>透明度 %<input data-testid="design-shadow-opacity" type="number" min="0" max="100" step="1" :value="Math.round(single.shadow.opacity * 100)" @change="setShadow('opacity', Number($event.target.value) / 100)"></label>
+                <label>阴影颜色<input data-testid="design-shadow-color" type="color" :value="single.shadow.color" @change="setShadow('color', $event.target.value)"></label>
+              </div>
+              <p v-if="single.shadow" class="muted">投影跟着图片的<strong>实际轮廓</strong>走（抠过底的 PNG 只投轮廓，不会投出一个方盒）；<strong>不会</strong>被框裁掉。</p>
+            </template>
           </fieldset>
         </template>
         </template>
@@ -1818,14 +2091,20 @@ onBeforeUnmount(() => { deactivate(); clearTimeout(draftTimer); clearTimeout(mes
     </div>
     <div v-if="showExport" class="export-mask" @click.self="!busy && (showExport = false)">
       <section data-testid="design-export-dialog" class="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-heading">
-        <h3 id="export-heading">导出 PNG 底图</h3>
+        <h3 id="export-heading">导出图片底图</h3>
         <p>导出当前编辑内容，包含所有可见图层（「仅编辑可见」的参考框不会导出，和打印保持一致）。</p>
+        <label>图片格式<select v-model="exportFormat" data-testid="design-export-format" :disabled="busy" @change="pickExportFormat">
+          <option v-for="(info, key) in FORMATS" :key="key" :value="key">{{ info.label }}</option>
+        </select></label>
         <label>输出分辨率<select v-model.number="exportDpi" data-testid="design-export-dpi" :disabled="busy"><option :value="150">150 DPI</option><option :value="300">300 DPI</option><option :value="600">600 DPI</option></select></label>
-        <label class="inline"><input v-model="exportTransparent" data-testid="design-export-transparent" type="checkbox" :disabled="busy"> 透明背景（不绘制画布背景色）</label>
-        <p class="export-dimensions" data-testid="design-export-size">{{ exportSize.width.toLocaleString() }} × {{ exportSize.height.toLocaleString() }} 像素 · {{ (exportSize.width * exportSize.height / 1000000).toFixed(1) }} 百万像素</p>
+        <label v-if="exportLossy">图片质量<input v-model.number="exportQuality" data-testid="design-export-quality" type="range" min="1" max="100" :disabled="busy"><output data-testid="design-export-quality-value">{{ exportQuality }}</output></label>
+        <label class="inline"><input v-model="exportTransparent" data-testid="design-export-transparent" type="checkbox" :disabled="busy || !exportFormatInfo.transparent"> 透明背景（不绘制画布背景色）</label>
+        <p v-if="!exportFormatInfo.transparent" class="muted" data-testid="design-export-flatten-hint">JPEG 没有透明通道，会铺上画布自己的底色导出。</p>
+        <p class="export-dimensions" data-testid="design-export-size">{{ exportSize.width.toLocaleString() }} × {{ exportSize.height.toLocaleString() }} 像素 · {{ (exportSize.width * exportSize.height / 1000000).toFixed(1) }} 百万像素<template v-if="exportEstimate !== null"> · 约 {{ formatBytes(exportEstimate) }}</template></p>
         <p class="muted">图片保持现有可见细节；提高 DPI 不会增加原图细节。图层工程可继续编辑。</p>
+        <p v-if="exportFormatInfo.dpi === 'none'" class="muted" data-testid="design-export-dpi-hint">WebP 没有公认的分辨率元数据，文件里不会写入 DPI；要按物理尺寸打印请选 PNG 或 JPEG。</p>
         <p v-if="exportSizeError || exportError" class="export-error" role="alert">{{ exportSizeError || exportError }}</p>
-        <div class="export-actions"><button :disabled="busy" @click="showExport = false">取消</button><button data-testid="design-export-confirm" class="primary" :disabled="busy || !!exportSizeError" @click="exportPng">{{ busy ? '正在导出…' : '选择位置并导出' }}</button></div>
+        <div class="export-actions"><button :disabled="busy" @click="showExport = false">取消</button><button data-testid="design-export-confirm" class="primary" :disabled="busy || !!exportSizeError" @click="runExport">{{ busy ? '正在导出…' : '选择位置并导出' }}</button></div>
       </section>
     </div>
     <!--

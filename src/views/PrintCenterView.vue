@@ -19,6 +19,36 @@ const previewHtml = ref('')
 const previewInfo = ref(null)
 const zoom = ref('75')
 const busy = ref(false)
+const previewPage = ref(0)
+const previewLoading = ref(false)
+const activeJobKey = ref('')
+const taskProgress = ref(null)
+const cancelRequested = ref(false)
+const cancelable = computed(() => activeJobKey.value && !cancelRequested.value && !['single', 'merge', 'publish', 'finished'].includes(taskProgress.value?.phase))
+const progressText = computed(() => {
+  const p = taskProgress.value
+  if (cancelRequested.value) return '正在取消，等待当前批次结束；已提交的打印内容无法撤回。'
+  if (!p) return '正在准备出片…'
+  if (p.phase === 'merge') return '正在合并 PDF…'
+  if (p.phase === 'publish') return 'PDF 已生成，正在保存归档…'
+  if (p.phase === 'single') return '正在输出当前批次…'
+  if (p.phase === 'batch-start') return `正在导出第 ${p.index} / ${p.batches} 批`
+  if (p.phase === 'batch-done') return `已完成 ${p.index} / ${p.batches} 批`
+  if (p.phase === 'submit-start') return `正在提交第 ${p.index} / ${p.batches} 批打印`
+  if (p.phase === 'submit-done') return `已提交 ${p.submitted} 批打印`
+  return '正在准备出片…'
+})
+const offPrintProgress = window.printpress.onPrintProgress(p => {
+  if (p.jobKey === activeJobKey.value) taskProgress.value = p
+})
+onBeforeUnmount(offPrintProgress)
+async function cancelOutput() {
+  if (!cancelable.value) return
+  try {
+    const r = await window.printpress.printCancel(activeJobKey.value)
+    if (r.ok) cancelRequested.value = true
+  } catch (err) { say(`取消失败：${err.message || err}`) }
+}
 const toast = ref('')
 /** 预览请求序号：晚到的旧响应据此丢弃（见 rebuildPreview） */
 let previewSeq = 0
@@ -204,7 +234,7 @@ const frameW = computed(() => previewInfo.value ? Math.round(previewInfo.value.p
 const frameH = computed(() => previewInfo.value ? Math.round(previewInfo.value.page.h * 96 / 25.4) : 1123)
 // iframe 高度铺满全部页数 +8px 余量：内部出现任何滚动条都会吃掉宽度造成横向裁边。
 // 注意用 pageCount（纸张页数）而非 recordCount——多联下一页装多条记录，用记录数会把 iframe 撑高
-const frameTotalH = computed(() => frameH.value * (previewInfo.value?.pageCount || 1) + 8)
+const frameTotalH = computed(() => frameH.value * (previewInfo.value?.renderedPageCount || 1) + 8)
 
 /**
  * 多联回退提示文案。仅在 layout.enabled === false 且原mode 是 grid/fold 时给文案：
@@ -241,17 +271,19 @@ async function refreshAll() {
 }
 
 async function rebuildPreview() {
+  const seq = ++previewSeq
   if (!ready.value) {
     previewHtml.value = ''
     previewInfo.value = null
+    previewLoading.value = false
     return
   }
   // 竞态守卫：快速连切模板/数据集时，先发的请求可能后到，不做序号校验就会
   // 让旧模板的预览盖掉新选择——用户看到的是A 模板的版式，导出的却是 B。
   // 同文件 matchDataset 的 mismatchSeq 是同一范式。
-  const seq = ++previewSeq
+  previewLoading.value = true
   try {
-    const built = await window.printpress.printGenerate(buildPayload())
+    const built = await window.printpress.printGenerate({ ...buildPayload(), previewPage: previewPage.value })
     if (seq !== previewSeq) return
     previewHtml.value = built.html
     previewInfo.value = built
@@ -262,7 +294,7 @@ async function rebuildPreview() {
     previewHtml.value = ''
     previewInfo.value = null
     say(`预览失败：${err.message || err}`)
-  }
+  } finally { if (seq === previewSeq) previewLoading.value = false }
 }
 
 /** 统一的打印请求载荷：数据集 × 模板 × 出片范围（rows=null 即全量，作用于全部行） */
@@ -341,7 +373,11 @@ watch(selDs, async () => {
   await loadDetail()
 })
 // 范围变化同样要重建预览（预览与出片共用同一份范围）
-watch([selDs, selTpl, selRows], rebuildPreview)
+watch([selDs, selTpl, selRows], () => {
+  if (previewPage.value !== 0) previewPage.value = 0
+  else rebuildPreview()
+})
+watch(previewPage, rebuildPreview)
 
 /** 校验 → 有空值先弹窗（可中断可放行），字段缺失不可放行；无问题直接执行 */
 async function runAction(action) {
@@ -365,6 +401,7 @@ async function runAction(action) {
 }
 
 async function confirmProceed() {
+  if (busy.value || !pendingAction.value) return
   showValidate.value = false
   const action = pendingAction.value
   pendingAction.value = ''
@@ -422,6 +459,10 @@ function goDupRow(rowIndex) {
 
 async function execute(action) {
   const payload = buildPayload()
+  activeJobKey.value = `ui-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  payload.jobKey = activeJobKey.value
+  taskProgress.value = null
+  cancelRequested.value = false
   try {
     if (action === 'pdf') {
       const r = await window.printpress.printExportPdf(payload)
@@ -433,8 +474,8 @@ async function execute(action) {
       else say(`打印未完成：${r.error || ''}`)
     }
   } catch (err) {
-    say(`执行失败：${err.message || err}`)
-  }
+    say(`${String(err.message || err).includes('已取消') ? '' : '执行失败：'}${err.message || err}`)
+  } finally { activeJobKey.value = ''; taskProgress.value = null; cancelRequested.value = false }
   // 成功打印/导出会回写数据集状态（侧栏「已打 N」变色），两处清单都要刷新。
   // 刷新放回 try里：这两行原本在 try 之外，一次刷新失败（IPC 断开/库被锁）
   // 就会变成未处理的 rejection，顶掉上面刚报给用户的执行结果——
@@ -461,7 +502,7 @@ const pendingDelete = ref(null)
 /** 删除打印任务：元数据 + 磁盘归档目录一并清理，不可恢复，先过确认弹窗 */
 function deleteJob(job) {
   pendingDelete.value = {
-    message: `删除打印任务「${job.templateName} × ${job.recordCount} 份（${fmtTime(job.createdAt)}）」？\n其归档快照也会一并删除，该操作不可恢复。`,
+    message: `删除打印任务「${job.templateName} × ${job.recordCount} 份（${fmtTime(job.createdAt)}）」？\n其归档快照及归档照片副本会一并删除，该操作不可恢复。已导出的 PDF、照片库原件和名单打印状态保留。`,
     job,
   }
 }
@@ -470,9 +511,13 @@ async function confirmDelete() {
   const job = pendingDelete.value.job
   pendingDelete.value = null
   try {
-    await window.printpress.deleteJob(job.id)
+    const result = await window.printpress.deleteJob(job.id)
     jobs.value = await window.printpress.listJobs()
-    say('已删除该打印记录及归档件')
+    say(result.archiveRemoved === false
+      ? '打印记录已删除，但归档文件未清理完成'
+      : result.backupUpdated === false
+        ? '已删除记录及归档件，但历史恢复副本更新失败'
+        : '已删除该打印记录及归档件')
   } catch (err) {
     say(`删除失败：${err.message || err}`)
   }
@@ -513,7 +558,7 @@ onMounted(refreshAll)
 
     <div class="toolbar">
       <span class="tb-label">模板</span>
-      <CustomSelect v-model="selTpl" :options="tplOptions" placeholder="选择模板" width="240px" />
+      <CustomSelect v-model="selTpl" :disabled="busy" :options="tplOptions" placeholder="选择模板" width="240px" />
       <!-- 模板已绑定数据集：直接显示关联关系，不可错配 -->
       <template v-if="boundTpl && boundTpl.datasetId">
         <span class="bound-ds">关联数据集：{{ boundTpl.datasetName || '（已删除）' }}（{{ dsTotalRows }} 行）</span>
@@ -522,7 +567,7 @@ onMounted(refreshAll)
       <!-- 旧模板未绑定：兼容路径，允许临时选择 -->
       <template v-else-if="selTpl">
         <span class="tb-label">数据集</span>
-        <CustomSelect v-model="selDs" :options="dsOptions" placeholder="选择数据集" width="200px" />
+        <CustomSelect v-model="selDs" :disabled="busy" :options="dsOptions" placeholder="选择数据集" width="200px" />
         <span class="scope-note">旧模板未绑定数据集，建议回模板工坊保存一次完成绑定</span>
       </template>
       <span class="tb-spacer"></span>
@@ -570,6 +615,10 @@ onMounted(refreshAll)
     </div>
 
     <div v-else class="preview-wrap">
+      <div v-if="activeJobKey" class="output-progress" role="status" data-testid="print-progress">
+        <span>{{ progressText }}</span>
+        <button class="btn" :disabled="!cancelable" data-testid="print-cancel" @click="cancelOutput">{{ cancelRequested ? '正在取消…' : '取消出片' }}</button>
+      </div>
       <div class="preview-bar">
         <span v-if="previewInfo" class="preview-meta">
           {{ previewInfo.templateName }} × {{ previewInfo.datasetName }}
@@ -581,12 +630,17 @@ onMounted(refreshAll)
           · {{ previewInfo.page.name }}
         </span>
         <span class="tb-spacer"></span>
-        <span v-if="previewInfo.designInfo" class="preview-dpi" :class="previewInfo.designInfo.minDpi == null ? '' : dpiClass(previewInfo.designInfo.minDpi)">
+        <div v-if="previewInfo" class="preview-paging" data-testid="print-preview-paging">
+          <button class="btn" :disabled="busy || previewLoading || previewPage === 0" @click="previewPage--">上一页</button>
+          <span>第 {{ (previewInfo.previewPage ?? previewPage) + 1 }} / {{ previewInfo.pageCount || 1 }} 页</span>
+          <button class="btn" :disabled="busy || previewLoading || previewPage + 1 >= previewInfo.pageCount" @click="previewPage++">下一页</button>
+        </div>
+        <span v-if="previewInfo?.designInfo" class="preview-dpi" :class="previewInfo.designInfo.minDpi == null ? '' : dpiClass(previewInfo.designInfo.minDpi)">
           图层底图「{{ previewInfo.designInfo.name }}」· 第 {{ previewInfo.designInfo.revision }} 版 · {{ previewInfo.designInfo.layerCount }} 个图层
           <template v-if="previewInfo.designInfo.minDpi != null"> · 图片最低约 {{ Math.round(previewInfo.designInfo.minDpi) }} dpi</template>
           <template v-else> · 文字与形状直接输出</template>
         </span>
-        <span v-if="previewInfo.bgDpi" class="preview-dpi" :class="dpiClass(previewInfo.bgDpi.dpi)">
+        <span v-if="previewInfo?.bgDpi" class="preview-dpi" :class="dpiClass(previewInfo.bgDpi.dpi)">
           底图 {{ previewInfo.bgDpi.width }}×{{ previewInfo.bgDpi.height }}px · 输出约 {{ Math.round(previewInfo.bgDpi.dpi) }} dpi
           <template v-if="previewInfo.bgDpi.stretched"> · 比例不符，会被拉伸</template>
         </span>
@@ -830,6 +884,8 @@ onMounted(refreshAll)
 </template>
 
 <style scoped>
+.output-progress{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 16px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
+.preview-paging{display:flex;gap:8px;align-items:center;font-size:12px}
 .page-title {
   margin: 0 0 16px;
   font-size: 18px;

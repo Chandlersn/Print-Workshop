@@ -168,13 +168,15 @@ console.log('== 4. 静态核查：print:send 必须有失败留痕分支 ==')
   ok(start > 0, '定位到 print:send 操作定义')
   const body = src.slice(start, src.indexOf("'job:list': {", start))
   ok(/catch\s*\(/.test(body), 'print:send 包了 try/catch（异常不再静默）')
-  ok(/status:\s*'failed'/.test(body), 'print:send 失败时写 failed 留痕')
-  ok(body.indexOf("status: 'failed'") < body.indexOf('return {'), '失败留痕发生在 return 之前')
+  const failureStatus = /status:\s*(?:'failed'|err\s*&&\s*err\.canceled\s*\?\s*'canceled'\s*:\s*'failed')/
+  ok(failureStatus.test(body), 'print:send 失败时写 failed 留痕')
+  const match = failureStatus.exec(body)
+  ok(match && match.index < body.indexOf('return {'), '失败留痕发生在 return 之前')
   // 对称性：PDF 出口也必须有，两个出口不能一个留痕一个不留
   const pdfStart = src.indexOf("'print:exportPdf': {")
   ok(pdfStart > 0, '定位到 print:exportPdf 操作定义')
   const pdfBody = src.slice(pdfStart, start)
-  ok(/status:\s*'failed'/.test(pdfBody), 'print:exportPdf 同样有 failed 留痕（两出口对称）')
+  ok(failureStatus.test(pdfBody), 'print:exportPdf 同样有 failed 留痕（两出口对称）')
 }
 
 rmDeep(TMP)

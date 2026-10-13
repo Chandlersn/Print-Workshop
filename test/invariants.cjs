@@ -71,6 +71,12 @@ const CONTRACT = [
   { id: 'I-36', file: 'test/ipc-hardening.cjs', anchor: '== 11. 应用内说明与 docs/使用说明.md 的章节骨架必须一致（I-36） ==' },
   { id: 'I-37', file: 'test/designs.cjs', anchor: '清理残留：只回收「不在索引」的工程目录，索引里的与形状不符的都不动（I-37）' },
   { id: 'I-38', file: 'test/design-package.cjs', anchor: '== ⑦ I-38 工程包：先校验后发布、路径只来自白名单、导入必是副本（静态守卫） ==' },
+  { id: 'I-39', file: 'test/dataset-edit.cjs', anchor: '配图置顶排序（I-39，前端静态核查）' },
+  { id: 'I-40', file: 'test/design-blend-adjust.cjs', anchor: 'I-40 静态守卫：一份实现、四处同源、界面不得绕过撤销语义' },
+  { id: 'I-41', file: 'test/design-export.cjs', anchor: '== I-41 静态守卫：格式表单一权威源，透明能力与 DPI 元数据不得各写一份 ==' },
+  { id: 'I-42', file: 'test/dataset-edit.cjs', anchor: '== 11. 详情头部必须容忍整块缺失的 source（I-42，旧记录真实存在） ==' },
+  { id: 'I-43', file: 'test/design-crop-presets.cjs', anchor: '== 4. I-43 静态守卫：改尺寸必须连带改裁切，规格不许抄第二份 ==' },
+  { id: 'I-44', file: 'test/design-image-effects.cjs', anchor: '== 4. I-44 静态守卫：界面只写一份，关掉要删字段而不是留 0 ==' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

@@ -369,13 +369,16 @@ const pageSizeOptions = computed(() => {
   return opts
 })
 
-// 数据集下拉：已激活打印字段的表自动置顶（用户在数据页列头点过「印」的），
-// 置顶组内按激活数降序——每次点印/取消都产生可见的位置变化，其余保持导入顺序
+// 数据集下拉：已配图（列头「配图」开关）的名单最优先置顶，其后是已激活打印字段的
+//（用户在数据页列头点过「印」的，组内按激活数降序），其余保持导入顺序——
+// 与数据页侧栏（DatasetView.shownDatasets）同一套规则，配图名单要被「＋ 变量图」用到
 const datasetOptions = computed(() => {
-  const ready = datasets.value.filter((d) => d.printCols > 0).sort((a, b) => b.printCols - a.printCols)
-  const rest = datasets.value.filter((d) => !(d.printCols > 0))
-  const label = (d) => (d.printCols > 0 ? `${d.name}（${d.printCols} 个打印字段）` : d.name)
-  return [...ready, ...rest].map((d) => ({ value: d.id, label: label(d) }))
+  const photo = datasets.value.filter((d) => !!d.photoMatchColumn)
+  const ready = datasets.value.filter((d) => !d.photoMatchColumn && d.printCols > 0).sort((a, b) => b.printCols - a.printCols)
+  const rest = datasets.value.filter((d) => !d.photoMatchColumn && !(d.printCols > 0))
+  const label = (d) => (d.photoMatchColumn ? `${d.name}（已配图）`
+    : d.printCols > 0 ? `${d.name}（${d.printCols} 个打印字段）` : d.name)
+  return [...photo, ...ready, ...rest].map((d) => ({ value: d.id, label: label(d) }))
 })
 
 const fieldOptions = computed(() =>

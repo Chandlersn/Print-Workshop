@@ -10,6 +10,7 @@ const props = defineProps({
   options: { type: Array, default: () => [] }, // [{ value, label, group?, disabled?, badge? }]
   placeholder: { type: String, default: '请选择' },
   width: { type: String, default: '160px' },
+  disabled: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update:modelValue', 'change', 'open'])
@@ -38,13 +39,14 @@ const rows = computed(() => {
 })
 
 function pick(opt) {
-  if (opt.disabled) return
+  if (props.disabled || opt.disabled) return
   emit('update:modelValue', opt.value)
   emit('change', opt.value)
   open.value = false
 }
 
 function toggle() {
+  if (props.disabled) return
   open.value = !open.value
   if (open.value) emit('open')
 }
@@ -70,7 +72,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootEl" class="custom-select" :style="{ width }">
-    <button type="button" class="cs-trigger" :class="{ open, badged: selectedOption?.badge }" :title="selectedLabel" @click="toggle">
+    <button type="button" class="cs-trigger" :disabled="disabled" :class="{ open, badged: selectedOption?.badge }" :title="selectedLabel" @click="toggle">
       <span class="cs-label" :class="{ placeholder: selectedLabel === placeholder }">{{ selectedLabel }}</span>
       <span v-if="selectedOption?.badge" class="cs-badge">{{ selectedOption.badge }}</span>
       <span class="cs-arrow" :class="{ open }"></span>

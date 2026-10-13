@@ -9,17 +9,18 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const { pathToFileURL } = require('url')
-const { BrowserWindow, shell } = require('electron')
+const { BrowserWindow, shell, session } = require('electron')
 
 /**
  * 隐藏窗口（不出现在任务栏，不抢焦点）。
  * partition：分批导出时给每批一个独立内存 session（S1.3-b）——Chromium 会
  * 复用同源 file:// 页面的渲染进程，批间解码缓存只累不释（S1 实测批间
  * 3.4→5.5GB）；temp: 前缀是内存型 session，随最后一个窗口销毁即回收，
- * 等于逼出「一批一个渲染进程」。pp:// 全局协议处理器对所有 session 生效，
+ * 会话与进程回收另行实测。pp:// 处理器须在每个实际 session 注册，
  * 照片原件引用不受影响。
  */
 function offscreenWindow(capture = false, partition = null) {
+  if (partition) require('./media-protocol.cjs').registerMediaProtocol(session.fromPartition(partition))
   return new BrowserWindow({
     show: false,
     skipTaskbar: true,
@@ -83,8 +84,8 @@ function defaultResourceTimeout(html) {
  * 折中（本版）：
  *   ① 等所有 <img> 加载完成——缺原件/坏图在这一步暴露，与旧版语义等价
  *   ② naturalWidth>0 兜底：加载成功但零尺寸的坏图
- *   ③ CSS 底图全部解码（数量少，且打印时背景同样要解码，语义保留）
- *   ④ 按 src 去重后**顺序**抽检前 3 张 <img> 真解码（证明解码链路通；
+ *   ③ CSS 底图全部加载并检查自然尺寸
+ *   ④ 按 src 去重后**顺序**抽检前 3 张图片（含 CSS 底图）真解码（证明解码链路通；
  *      顺序 = 同时只有一张在分配位图，3×34MB 也远低于 231MB 的墙）
  */
 async function waitPrintResources(timeoutMs = 20000) {
@@ -109,7 +110,7 @@ async function waitPrintResources(timeoutMs = 20000) {
       // ② 零尺寸 = 解码失败的坏图（data: 损坏、文件被截断等都走到这）
       const broken = imgs.filter((img) => !img.naturalWidth || !img.naturalHeight)
       if (broken.length) throw new Error(`图片解码失败，请检查底图素材（共 ${broken.length} 张）`)
-      // ③ CSS 底图：共享样式里的 url() 去重后逐个加载 + 解码
+      // ③ CSS 底图：共享样式里的 url() 去重后逐个加载并检查尺寸
       const urls = new Set()
       const collectUrls = (value) => {
         const re = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/g
@@ -126,6 +127,7 @@ async function waitPrintResources(timeoutMs = 20000) {
       for (const sheet of document.styleSheets) scanRules(sheet.cssRules)
       for (const el of document.querySelectorAll('[style]')) collectUrls(el.style.backgroundImage)
       urls.delete('')
+      const backgrounds = []
       for (const url of urls) {
         const bg = new Image()
         bg.src = url
@@ -134,13 +136,13 @@ async function waitPrintResources(timeoutMs = 20000) {
           bg.onload = () => resolve()
           bg.onerror = () => reject(new Error('图片加载失败，请检查底图素材'))
         })
-        if (typeof bg.decode === 'function') await bg.decode()
         if (!bg.naturalWidth || !bg.naturalHeight) throw new Error('图片解码失败，请检查底图素材')
+        if (backgrounds.length < 3) backgrounds.push(bg)
       }
       // ④ 抽检：按 src 去重取前 3 张顺序真解码（不碰预算墙，又能抓住「能加载不能解码」）
       const sample = []
       const seen = new Set()
-      for (const img of imgs) {
+      for (const img of [...imgs, ...backgrounds]) {
         const key = img.currentSrc || img.src || ''
         if (seen.has(key)) continue
         seen.add(key)
@@ -227,7 +229,7 @@ async function sendToPrinter(html, { silent = false, partition } = {}) {
 }
 
 /**
- * 最近一次**成功**导出的 PNG 绝对路径。
+ * 最近一次**成功**导出的图片绝对路径（PNG / JPEG / WebP 共用）。
  *
  * 为什么记在主进程、而不是让渲染进程把路径传进来：`shell.openPath` /
  * `shell.showItemInFolder` 会拿这个字符串去**启动系统程序**，渲染进程若能传任意
@@ -238,7 +240,7 @@ async function sendToPrinter(html, { silent = false, partition } = {}) {
 let lastDesignPng = null
 
 async function exportDesignPng(prepared, filePath) {
-  const result = await require('./design-export.cjs').exportPng(prepared, filePath)
+  const result = await require('./design-export.cjs').exportImage(prepared, filePath)
   // 只在真写出文件之后才更新：渲染失败 / 用户取消都不能让「打开」指向上一次的文件。
   if (result && !result.canceled && result.filePath) lastDesignPng = result.filePath
   return result
@@ -251,19 +253,19 @@ async function exportDesignPng(prepared, filePath) {
  * `openPath` 只回一句英文系统错误——用户看到的是「点了没反应」。这里一律抛出中文原因。
  */
 function requireLastDesignPng() {
-  if (!lastDesignPng) throw new Error('还没有导出过 PNG，请先导出一次。')
-  if (!fs.existsSync(lastDesignPng)) throw new Error('刚导出的 PNG 已被移动或删除，请重新导出。')
+  if (!lastDesignPng) throw new Error('还没有导出过图片，请先导出一次。')
+  if (!fs.existsSync(lastDesignPng)) throw new Error('刚导出的图片已被移动或删除，请重新导出。')
   return lastDesignPng
 }
 
-/** 在系统文件管理器里定位刚导出的 PNG（选中它），用户双击就能用系统看图器打印。 */
+/** 在系统文件管理器里定位刚导出的图片（选中它），用户双击就能用系统看图器打印。 */
 function revealLastDesignPng() {
   const filePath = requireLastDesignPng()
   shell.showItemInFolder(filePath)
   return { ok: true, filePath }
 }
 
-/** 用系统默认程序打开刚导出的 PNG。 */
+/** 用系统默认程序打开刚导出的图片。 */
 async function openLastDesignPng() {
   const filePath = requireLastDesignPng()
   const failure = await shell.openPath(filePath)

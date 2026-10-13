@@ -32,6 +32,28 @@ const pageStart = computed(() => page.value * PAGE_SIZE)
 const pagedRows = computed(() =>
   detail.value ? detail.value.rows.slice(pageStart.value, pageStart.value + PAGE_SIZE) : [])
 
+/**
+ * 详情头部的「来源 / 导入时间」——**必须容忍整块缺失的 `source`**。
+ *
+ * `source` 是导入时写进记录的元数据，**旧数据可能整块没有**（侧栏批次分组早就按
+ * `ds.source || {}` 兜底了，见 batchKeyOf）。早先模板里直接写 `detail.source.type`，
+ * 一旦选中这类旧记录，整个详情区渲染抛错、右侧变空白——这不是「少显示一行字」，
+ * 是整页打不开，而且只在老数据上复现。同理 `lastPrintedAt` 也可能是空串。
+ */
+const detailSource = computed(() => detail.value?.source || {})
+const detailSourceText = computed(() => {
+  const source = detailSource.value
+  const importedAt = typeof source.importedAt === 'string' ? source.importedAt.slice(0, 10) : ''
+  const kind = typeof source.type === 'string' && source.type ? source.type.toUpperCase() : ''
+  if (!kind && !importedAt) return '来源未知（旧版本导入）'
+  if (!kind) return `导入于 ${importedAt}`
+  return importedAt ? `${kind} · 导入于 ${importedAt}` : kind
+})
+const detailLastPrintedAt = computed(() => {
+  const value = detail.value?.lastPrintedAt
+  return typeof value === 'string' && value ? value.slice(0, 10) : '未知时间'
+})
+
 // 拖拽导入（dragenter/dragleave 计数防抖，子元素进出不会误熄遮罩）
 const dragDepth = ref(0)
 
@@ -48,6 +70,12 @@ const IMPORT_EXTS_TEXT = IMPORT_EXTS.join(' / ')
 
 // 数据集列表检索（一次导入上百个分表后的通用需求）
 const dsSearch = ref('')
+const printStatus = ref('all')
+const PRINT_STATUS_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'printed', label: '已打' },
+  { value: 'unprinted', label: '未打' },
+]
 
 // ---- 导入会话（批次）：一次导入 = 一个管理单元，可整批切换与删除 ----
 // 同一次导入（split 出 N 个工作簿）共享 source.batchId；旧数据没有 batchId，
@@ -182,18 +210,40 @@ const filteredSheets = computed(() => {
   return sheetItems.value.filter((s) => s.name.toLowerCase().includes(kw))
 })
 const checkedCount = computed(() => sheetItems.value.filter((s) => s.checked).length)
-const shownDatasets = computed(() => {
+const searchedDatasets = computed(() => {
   if (!activeBatch.value) return []
   const inBatch = new Set(activeBatch.value.ids)
   const kw = dsSearch.value.trim().toLowerCase()
-  const list = datasets.value.filter(
+  return datasets.value.filter(
     (d) => inBatch.has(d.id) && (!kw || d.name.toLowerCase().includes(kw))
   )
-  // 已激活打印字段的数据集置顶，组内按激活数降序（稳定排序）——
-  // 点印/取消时激活数变化，位置随之可见地移动；未激活的保持导入顺序
-  const ready = list.filter((d) => d.printCols > 0).sort((a, b) => b.printCols - a.printCols)
-  const rest = list.filter((d) => !(d.printCols > 0))
-  return [...ready, ...rest]
+})
+const printStatusCounts = computed(() => ({
+  all: searchedDatasets.value.length,
+  printed: searchedDatasets.value.filter(d => d.printCount > 0).length,
+  unprinted: searchedDatasets.value.filter(d => !(d.printCount > 0)).length,
+}))
+const shownDatasets = computed(() => {
+  const list = searchedDatasets.value.filter(d => printStatus.value === 'all'
+    || (printStatus.value === 'printed' ? d.printCount > 0 : !(d.printCount > 0)))
+  // 置顶分三档：已配图（列头「配图」开关，照片库自动跟随，最优先）→ 已激活打印字段的
+  // （组内按激活数降序）→ 其余保持导入顺序。点配图/点印时产生可见的位置变化，
+  // 未触发的档位顺序不变——与模板页数据集下拉（TemplateView）同一套规则
+  const photo = list.filter((d) => !!d.photoMatchColumn)
+  const ready = list.filter((d) => !d.photoMatchColumn && d.printCols > 0).sort((a, b) => b.printCols - a.printCols)
+  const rest = list.filter((d) => !d.photoMatchColumn && !(d.printCols > 0))
+  return [...photo, ...ready, ...rest]
+})
+
+// 筛选后详情跟随可见名单，避免左侧已隐藏的名单仍可被右侧编辑、删除。
+watch(shownDatasets, (list) => {
+  if (!datasets.value.length || list.some(d => d.id === activeId.value)) return
+  if (list.length) selectDataset(list[0].id)
+  else {
+    activeId.value = ''
+    detail.value = null
+    closeMenus()
+  }
 })
 
 function extractError(err) {
@@ -202,10 +252,17 @@ function extractError(err) {
 }
 
 async function refreshList(preferId) {
+  if (preferId) {
+    printStatus.value = 'all'
+    dsSearch.value = ''
+  }
   datasets.value = await window.printpress.listDatasets()
   pruneStaleHidden()
-  const target = preferId || activeId.value
-  if (target && datasets.value.some((d) => d.id === target)) {
+  const preferred = preferId && datasets.value.find(d => d.id === preferId)
+  if (preferred) activeBatchKey.value = batchKeyOf(preferred)
+  const target = shownDatasets.value.some(d => d.id === (preferId || activeId.value))
+    ? (preferId || activeId.value) : shownDatasets.value[0]?.id
+  if (target) {
     await selectDataset(target)
   } else {
     activeId.value = ''
@@ -225,6 +282,8 @@ function pruneStaleHidden() {
 }
 
 async function selectDataset(id) {
+  const summary = datasets.value.find(d => d.id === id)
+  if (summary) activeBatchKey.value = batchKeyOf(summary)
   activeId.value = id
   rememberDataset(id)
   detail.value = null
@@ -623,6 +682,8 @@ watch(() => cellNav.req, async (req) => {
     // 隐藏状态来自落盘，必须先读到再判断「目标列是不是被藏了」——
     // 读盘是 setup 阶段发起的，这里等它落地（详见 prefsReady）
     await prefsReady
+    printStatus.value = 'all'
+    dsSearch.value = ''
     if (activeId.value !== req.datasetId || !detail.value) {
       await selectDataset(req.datasetId)
     }
@@ -698,6 +759,17 @@ watch(() => cellNav.req, async (req) => {
             </option>
           </select>
         </label>
+        <div class="ds-status-filter" role="group" aria-label="按打印状态筛选名单">
+          <button
+            v-for="option in PRINT_STATUS_OPTIONS"
+            :key="option.value"
+            type="button"
+            :data-print-status="option.value"
+            :aria-pressed="printStatus === option.value"
+            :class="{ selected: printStatus === option.value }"
+            @click="printStatus = option.value"
+          >{{ option.label }} <span>{{ printStatusCounts[option.value] }}</span></button>
+        </div>
         <input
           v-if="datasets.length > 6"
           v-model="dsSearch"
@@ -716,10 +788,11 @@ watch(() => cellNav.req, async (req) => {
             <span class="ds-name">{{ ds.name }}</span>
             <span v-if="ds.printCount > 0" class="ds-printed-flag" title="该工作簿已打印/导出过">已打 {{ ds.printCount }}</span>
             <span v-if="ds.printCols > 0" class="ds-print-flag" title="已激活的打印字段数">印 {{ ds.printCols }}</span>
+            <span v-if="ds.photoMatchColumn" class="ds-photo-mark" title="已开启配图，自动置顶">图</span>
           </span>
           <span class="ds-meta">{{ ds.rowCount }} 行 × {{ ds.columnCount }} 列</span>
         </button>
-        <p v-if="!shownDatasets.length" class="ds-none">无匹配的数据集</p>
+        <p v-if="!shownDatasets.length" class="ds-none">当前批次没有符合筛选条件的名单</p>
         <button class="ds-dropzone" :disabled="importing" @click="startImport">
           <span class="ds-dropzone-main">{{ importing ? '导入中…' : '拖入文件到页面，或点击导入' }}</span>
           <span class="ds-dropzone-sub">.xlsx / .xls / .csv · 多工作表可选</span>
@@ -731,9 +804,9 @@ watch(() => cellNav.req, async (req) => {
           <div>
             <div class="detail-title">{{ activeSummary.name }}</div>
             <div class="detail-sub">
-              来源 {{ detail.source.type.toUpperCase() }} · 导入于 {{ detail.source.importedAt.slice(0, 10) }}
+              {{ detailSourceText }}
               · 共 {{ detail.rowCount }} 行
-              · <span v-if="detail.printCount > 0" class="printed-note">已打印 {{ detail.printCount }} 次，最近 {{ detail.lastPrintedAt.slice(0, 10) }}</span>
+              · <span v-if="detail.printCount > 0" class="printed-note">已打印 {{ detail.printCount }} 次，最近 {{ detailLastPrintedAt }}</span>
               <span v-else>尚未打印</span>
             </div>
           </div>
@@ -1298,6 +1371,23 @@ watch(() => cellNav.req, async (req) => {
   font-size: 12px;
 }
 
+.ds-status-filter { display: flex; gap: 4px; }
+.ds-status-filter button {
+  flex: 1;
+  padding: 6px 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.ds-status-filter button span { font-size: 11px; opacity: 0.75; }
+.ds-status-filter button.selected {
+  border-color: var(--cinnabar);
+  background: var(--cinnabar-soft);
+  color: var(--cinnabar);
+}
+
 .batch-row {
   display: flex;
   flex-direction: column;
@@ -1394,6 +1484,14 @@ watch(() => cellNav.req, async (req) => {
   color: #fff;
   background: var(--cinnabar);
   line-height: 1.5;
+}
+
+/* 已配图标记：名字后就显示一个「图」字，与「印 N」同一行，不另起 pill */
+.ds-photo-mark {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
 }
 
 .ds-meta { font-size: 11px; color: var(--stone); }

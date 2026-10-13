@@ -64,6 +64,7 @@ async function exportPdfBatched(o) {
     if (shouldCancel()) throw canceledError('pdf')
     const totalRows = batches.reduce((s, b) => s + b.rows, 0)
     for (let i = 0; i < batches.length; i++) {
+      if (shouldCancel()) throw canceledError('pdf')
       const b = batches[i]
       onProgress({ phase: 'batch-start', index: i + 1, batches: batches.length, start: b.start, end: b.end, rows: b.rows, pages: b.pages })
       const built = domain.buildBatchHtml(datasetId, templateId, rows, { range: { from: b.start, to: b.end } })
@@ -82,11 +83,13 @@ async function exportPdfBatched(o) {
     }
     const expectPages = totalPagesOf(batches)
     onProgress({ phase: 'merge', pages: expectPages, files: partPaths.length })
+    if (shouldCancel()) throw canceledError('pdf')
     mergedTmp = path.join(dir, `.printpress-tmp-${stamp}-merged.pdf`)
-    const merged = mergePdfs(partPaths, mergedTmp)
+    const merged = await mergePdfs(partPaths, mergedTmp)
     if (merged.pages !== expectPages) {
       throw new Error(`合并页数不符：计划 ${expectPages} 页，实际 ${merged.pages} 页（未产出最终文件）`)
     }
+    if (shouldCancel()) throw canceledError('pdf')
     // 发布：同目录 rename（原子覆盖）；此前任何一步失败都没碰过最终文件
     fs.renameSync(mergedTmp, savePath)
     mergedTmp = ''
@@ -101,8 +104,8 @@ async function exportPdfBatched(o) {
 
 /**
  * 分批直接送打印。没有临时文件（纸不经过磁盘），失败/取消只涉及未提交的批。
- * 非静默时**只有第一批弹系统对话框**：用户在那一次确认的就是整份作业，
- * 之后逐批再弹只会被当成 bug；静默批次沿用系统默认打印机设置。
+ * 非静默时每批由系统对话框确认设备和设置；Electron 不返回对话框选中的设备，
+ * 不能把后续批次改为静默默认设备。silent=true 时各批沿用调用者指定的静默行为。
  */
 async function sendToPrinterBatched(o) {
   const {
@@ -117,7 +120,7 @@ async function sendToPrinterBatched(o) {
     onProgress({ phase: 'submit-start', index: i + 1, batches: batches.length, start: b.start, end: b.end, rows: b.rows, pages: b.pages })
     const built = domain.buildBatchHtml(datasetId, templateId, rows, { range: { from: b.start, to: b.end } })
     const r = await printer.sendToPrinter(built.html, {
-      silent: silent || i > 0,
+      silent: Boolean(silent),
       partition: `temp:print-batch-${i + 1}-${tempStamp()}`,
     })
     if (!r || !r.ok) {

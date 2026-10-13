@@ -120,6 +120,16 @@ function main() {
   const sumFresh = dataset.listDatasets().find((s) => s.id === fresh.id)
   ok(sumFresh.printCols === 0, '新导入数据集 printCols=0（默认全停）')
 
+  // 摘要携带 photoMatchColumn（数据页/模板页「已配图置顶」排序的数据源，与 printCols 并列）
+  const sumPhoto0 = dataset.listDatasets().find((s) => s.id === ds.id)
+  ok(sumPhoto0.photoMatchColumn === null, '默认未配图：photoMatchColumn=null')
+  dataset.setPhotoMatchColumn(ds.id, '姓名')
+  const sumPhoto1 = dataset.listDatasets().find((s) => s.id === ds.id)
+  ok(sumPhoto1.photoMatchColumn === '姓名', '摘要暴露当前配图列（置顶排序数据源）')
+  dataset.setPhotoMatchColumn(ds.id, null)
+  const sumPhoto2 = dataset.listDatasets().find((s) => s.id === ds.id)
+  ok(sumPhoto2.photoMatchColumn === null, '关闭配图后摘要同步为 null')
+
   console.log('== 9. 打印状态回写（工作簿级，侧栏变色数据源） ==')
   ok(sum2.printCount === 0 && !sum2.lastPrintedAt, '未打印数据集 printCount=0 且无时间')
   const m1 = dataset.markPrinted(ds.id, 'pdf')
@@ -129,6 +139,53 @@ function main() {
   ok(sum3.printCount === 2 && sum3.lastPrintedAt && sum3.lastPrintMode === 'print', '重复回写累加且记录最近方式')
   ok(sum3.lastPrintedAt.length >= 19 && sum3.lastPrintedAt.includes('T'), 'lastPrintedAt 为 ISO 时间戳')
   throws(() => dataset.markPrinted('ds_none', 'pdf'), '不存在的数据集回写抛错')
+
+  console.log('== 10. 配图置顶排序（I-39，前端静态核查） ==')
+  {
+    const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8')
+    const dsView = read('src/views/DatasetView.vue')
+    const tplView = read('src/views/TemplateView.vue')
+    // 排序档位必须是「已配图 → 已印 → 其余」：只把配图名单并进旧档位会漏掉「立即置顶」
+    ok(/const photo = list\.filter\(\(d\) => !!d\.photoMatchColumn\)/.test(dsView)
+      && /\.\.\.photo, \.\.\.ready, \.\.\.rest/.test(dsView),
+      '数据页侧栏：已配图名单独立置顶档，先于已印档位（I-39）')
+    ok(/const photo = datasets\.value\.filter\(\(d\) => !!d\.photoMatchColumn\)/.test(tplView)
+      && /\.\.\.photo, \.\.\.ready, \.\.\.rest/.test(tplView),
+      '模板页数据集下拉：与数据页同一套「已配图最优先」置顶规则（I-39）')
+    ok(/ds\.photoMatchColumn" class="ds-photo-mark" title="已开启配图，自动置顶">图<\/span>/.test(dsView),
+      '已配图名单有一个「图」字标记，置顶不是因为 bug（I-39）')
+    // 点配图后本地同步摘要是即时置顶的前提：不同步就要重进页面才动
+    ok(/summary\.photoMatchColumn = result\.photoMatchColumn/.test(dsView),
+      '列头点配图后即时同步侧栏摘要，置顶当场生效（I-39）')
+  }
+
+  console.log('== 11. 详情头部必须容忍整块缺失的 source（I-42，旧记录真实存在） ==')
+  {
+    const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8')
+    const dsView = read('src/views/DatasetView.vue')
+    // 先剥掉注释行：守卫要钉的是**代码**里的解引用，注释里提到这个反例是正常的。
+    const dsCode = dsView.split('\n').filter((line) => !/^\s*(\*|\/\/)/.test(line)).join('\n')
+    /*
+     * 旧版本导入的记录可能**整块没有 `source`**；侧栏批次分组早就 `ds.source || {}` 兜底了，
+     * 详情头部却直接解引用过——选中这类记录时整个右侧渲染抛错、页面变空白，
+     * 而且**只在老数据上复现**（`test:design-e2e` 就是这么红起来的：它手工写了一条无 source 的记录）。
+     * 「少显示一行字」和「整页打不开」是两回事，这条守卫钉住后者。
+     */
+    ok(!/detail\.source\./.test(dsCode), '详情头部不得直接解引用 detail.source')
+    ok(!/detail\.lastPrintedAt\.slice/.test(dsCode), '详情头部不得直接对 lastPrintedAt 取切片（可能是空串）')
+    ok(/const detailSource = computed\(\(\) => detail\.value\?\.source \|\| \{\}\)/.test(dsCode),
+      '来源信息统一走 detailSource 兜底')
+    ok(/来源未知（旧版本导入）/.test(dsCode), '缺 source 时给出可读文案，而不是留空或抛错')
+    // 这条记录不是假设：真写一条没有 source 的进去，数据层照样要能读出来
+    const { loadJson, saveJson } = require('../electron/store.cjs')
+    saveJson('datasets', [
+      ...loadJson('datasets', []),
+      { id: 'legacy-no-source', name: '旧记录', columns: [{ key: 'name', alias: '姓名', type: 'text' }], rows: [{ name: '甲' }] },
+    ])
+    const legacy = dataset.getDataset('legacy-no-source')
+    ok(legacy.source === undefined && legacy.rowCount === 1 && legacy.lastPrintedAt === '',
+      '没有 source 的记录仍可读取，且 lastPrintedAt 为空串——前端必须容忍这种形状')
+  }
 
   console.log(`\n共 ${passCount + failCount} 项断言：${passCount} 通过，${failCount} 失败`)
   if (failCount) process.exit(1)

@@ -208,7 +208,7 @@ async function main() {
   // 所以就地编辑的收尾走「捕获阶段 pointerdown」这条不依赖焦点事件的路（见 finishTextEdit 注释），
   // 靠 blur 的那条另用派发 FocusEvent 验连线。
   const errors = []
-  ui.webContents.on('console-message', (_event, level, message) => { if (level >= 3) { errors.push(message); console.log('PAGE-ERR:', message) } })
+  ui.webContents.on('console-message', (_event, level, message, line, sourceId) => { if (level >= 3) { errors.push(message); console.log('PAGE-ERR:', message, '@', sourceId, line) } })
   await ui.loadFile(path.join(ROOT, 'dist', 'index.html'))
   await waitFor(`Boolean([...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')))`, '底图导航')
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')).click()`)
@@ -446,6 +446,33 @@ async function main() {
   await click(`[data-layer-id="${croppedLayer.id}"]`)
   ok(await evaluate(`document.querySelector('[data-testid="design-crop-x"]').value==='25' && document.querySelector('[data-testid="design-crop-w"]').value==='50'`), '重开工程恢复裁切属性')
 
+  // I-43：「选 1 寸」必须是「改尺寸 + 改裁切」的同一个动作——只改尺寸，打印出来就是一张被拉长的脸。
+  const sizePresetValues = await evaluate(`[...document.querySelectorAll('[data-testid="design-size-preset"] option')].map(o=>o.value)`)
+  ok(sizePresetValues.includes('size:photo-1') && sizePresetValues.includes('ratio:1:1') && sizePresetValues[0] === '',
+    `尺寸/比例预设下拉同时给出证件照毫米规格与纯比例，首项是「自定义」（实得 ${JSON.stringify(sizePresetValues.slice(0, 3))}…）`)
+  await fill('[data-testid="design-size-preset"]', 'size:photo-1')
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.w === 25`, '套用 1 寸预设把图层改成 25mm 宽')
+  const presetDoc = await evaluate(draftDesign)
+  const presetLayer = presetDoc.layers.find((layer) => layer.id === croppedLayer.id)
+  const presetAsset = presetDoc.assets[presetLayer.assetId]
+  const printedAspect = (presetAsset.width * presetLayer.crop.w) / (presetAsset.height * presetLayer.crop.h)
+  ok(presetLayer.w === 25 && presetLayer.h === 35, `套用 1 寸预设后图层是 25×35mm 成品尺寸（实得 ${presetLayer.w}×${presetLayer.h}）`)
+  ok(Math.abs(printedAspect - 25 / 35) < 1e-4,
+    `裁切跟着改成同一长宽比，脸不会被拉长（可见源区域比例 ${printedAspect.toFixed(4)} vs 目标 ${(25 / 35).toFixed(4)}）`)
+  ok(presetLayer.crop.x >= 0 && presetLayer.crop.y >= 0 && presetLayer.crop.x + presetLayer.crop.w <= 1 && presetLayer.crop.y + presetLayer.crop.h <= 1,
+    '重新裁切仍落在原图内（浮点尾巴会让 normalizeDesign 拒绝整份工程）')
+  ok(await evaluate(`document.querySelector('[data-testid="design-size-preset"]').value === ''`), '套用后下拉回位成「自定义」，同一个预设能再点一次')
+  await fill('[data-testid="design-size-preset"]', 'ratio:1:1')
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.h === 25`, '套用 1:1 比例预设只改高度')
+  const squareLayer = (await evaluate(draftDesign)).layers.find((layer) => layer.id === croppedLayer.id)
+  ok(squareLayer.w === 25 && squareLayer.h === 25, `比例预设保持宽度 25mm、只把高度改成 25mm（实得 ${squareLayer.w}×${squareLayer.h}）`)
+  await click('[data-testid="design-undo"]')
+  await click('[data-testid="design-undo"]')
+  // 撤销回退到保存态后草稿会被清掉（不再是「未保存」），所以这一条必须看 DOM 而不是草稿。
+  await waitFor(`Number(document.querySelector('[data-testid="design-layer-w"]').value) === ${croppedLayer.w}`, '撤销可完整回退尺寸')
+  ok(await evaluate(`document.querySelector('[data-testid="design-crop-x"]').value==='25' && document.querySelector('[data-testid="design-crop-w"]').value==='50'`),
+    '撤销连带把裁切也回退（尺寸与裁切是同一个动作，撤销也必须是）')
+
   // Phase 2 uses actual controls and pointer input, then reopens the persisted schema.
   const titleLayer = cropped.layers.find(layer => layer.type === 'text')
   await click(`[data-layer-id="${titleLayer.id}"]`)
@@ -631,6 +658,52 @@ async function main() {
   ok(fs.readFileSync(path.join(DATA, phaseTwo.assets[croppedLayer.assetId].path)).equals(jpeg), 'PNG导出后原始图片字节保持不变')
 
   /*
+   * 下面那条 JPEG 导出会把「最近一次导出」换成 .jpg，所以 I-28 那一组断言
+   * 一律读这个变量、不写死 pngPath——它要守的是「打开的就是**最近一次**导出的那个文件」，
+   * 而不是「打开的一定是 PNG」。写死会让这两段互相绊倒。
+   */
+  let lastExportPath = pngPath
+
+  /*
+   * ---- 界面驱动 JPEG 导出（v0.7 P1 多格式）----
+   *
+   * 上面那条验的是 PNG 老路径；这里**从界面选格式**一路走到真实文件，
+   * 证明「下拉 → 预检 → IPC → 主进程编码器 → 落盘」这条链没有断在中间某一环
+   * （纯 Node 套件只覆盖到格式表与字节改写，真实编码器在 design-export-e2e 里验）。
+   */
+  const jpegPath = path.join(OUTPUT, 'editor-quality.jpg')
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: jpegPath })
+  try {
+    await click('[data-testid="design-export-png"]')
+    await waitFor(`Boolean(document.querySelector('[data-testid="design-export-dialog"]'))`, '多格式导出配置')
+    await fill('[data-testid="design-export-format"]', 'jpeg')
+    ok(await evaluate(`document.querySelector('[data-testid="design-export-transparent"]').disabled`),
+      '切到 JPEG 后「透明背景」勾选框置灰（没有 alpha 通道）')
+    ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-export-flatten-hint"]'))`),
+      '界面明确写出 JPEG 会铺画布底色，而不是静默丢掉透明层')
+    ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-export-quality"]'))`),
+      '有损格式才出现质量滑杆')
+    ok(await evaluate(`document.querySelector('[data-testid="design-export-size"]').textContent.includes('约')`),
+      '面板给出体积预估并标明是估算值')
+    await fill('[data-testid="design-export-quality"]', 60)
+    await fill('[data-testid="design-export-dpi"]', 150)
+    await click('[data-testid="design-export-confirm"]')
+    await waitFor(`!document.querySelector('[data-testid="design-export-dialog"]')`, 'JPEG导出完成', 30000)
+  } finally { dialog.showSaveDialog = originalSaveDialog }
+  assert.ok(fs.existsSync(jpegPath), 'JPEG文件真实写入')
+  const exportedJpeg = fs.readFileSync(jpegPath)
+  ok(exportedJpeg[0] === 0xff && exportedJpeg[1] === 0xd8, '界面导出的确实是 JPEG（不是改了扩展名的 PNG）')
+  const exportedJpegSize = require('../electron/images.cjs').imageSizeFromBuffer(exportedJpeg)
+  ok(exportedJpegSize.width === Math.round(297 * 150 / 25.4) && exportedJpegSize.height === Math.round(210 * 150 / 25.4),
+    '界面导出JPEG得到指定DPI的精确像素')
+  ok(exportedJpeg.subarray(6, 11).toString('latin1') === 'JFIF\0' && exportedJpeg.readUInt16BE(14) === 150,
+    '界面导出JPEG写入了 150 dpi 的 JFIF 密度')
+  ok(nativeImage.createFromPath(jpegPath).toBitmap().at(-1) === 255, 'JPEG 空白角落是不透明底色（没有 alpha 通道）')
+  ok(await evaluate(`document.querySelector('.export-done-text')?.textContent.includes('JPEG') === true`),
+    '完成条标明导出的是 JPEG')
+  lastExportPath = jpegPath
+
+  /*
    * ---- 导出后「脱离本系统打印」----
    * 真点这两个按钮会弹出资源管理器 / 看图器，所以把 shell 的方法换成记录器：
    * printer.cjs 解构拿到的是 shell 这个**对象**的引用，改它的属性对调用方可见。
@@ -644,14 +717,14 @@ async function main() {
   shell.openPath = async (p) => { opened.push({ how: 'open', path: p }); return '' }
   try {
     ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-reveal-export"]')) && Boolean(document.querySelector('[data-testid="design-open-export"]'))`), '导出成功后给出「打开所在文件夹 / 用系统程序打开」两个动作')
-    ok(await evaluate(`document.querySelector('.export-done-path')?.textContent === ${JSON.stringify(pngPath)}`), '完成条里带完整导出路径，用户照着就能找到文件')
+    ok(await evaluate(`document.querySelector('.export-done-path')?.textContent === ${JSON.stringify(lastExportPath)}`), '完成条里带完整导出路径，用户照着就能找到文件')
     ok(await evaluate(`window.printpress.revealDesignExport.length === 0 && window.printpress.openDesignExport.length === 0`), '渲染层暴露的这两个方法是零参的（界面上无处传路径）')
     await click('[data-testid="design-reveal-export"]')
     await waitNode(() => opened.length >= 1, '主进程收到「打开所在文件夹」')
-    ok(opened.at(-1).how === 'reveal' && opened.at(-1).path === pngPath, '「打开所在文件夹」定位到刚导出的 PNG（按钮真的接到了主进程）')
+    ok(opened.at(-1).how === 'reveal' && opened.at(-1).path === lastExportPath, '「打开所在文件夹」定位到刚导出的文件（按钮真的接到了主进程）')
     await click('[data-testid="design-open-export"]')
     await waitNode(() => opened.length >= 2, '主进程收到「用系统程序打开」')
-    ok(opened.at(-1).how === 'open' && opened.at(-1).path === pngPath, '「用系统程序打开」打开的是刚导出的 PNG')
+    ok(opened.at(-1).how === 'open' && opened.at(-1).path === lastExportPath, '「用系统程序打开」打开的是刚导出的文件')
     await click('[data-testid="design-export-done-close"]')
     ok(await evaluate(`!document.querySelector('[data-testid="design-reveal-export"]')`) && fs.existsSync(pngPath), '「关闭」只收起完成条，磁盘上的导出文件不受影响')
   } finally {
@@ -671,8 +744,50 @@ async function main() {
   await click(`[data-layer-id="${croppedLayer.id}"]`)
   ok(await evaluate(`document.querySelector('[data-testid="design-layer-x"]').value==='21'`), '重启恢复未保存的位置修改')
   ok(await evaluate(`document.querySelectorAll('[data-group-id]').length===1 && document.querySelectorAll('[data-guide-line]').length===2`), '重新载入后恢复图层组与参考线')
+
+  // 图片图层的描边与投影（v0.7 §6 / I-44）：开关 → 画布 → 落盘 → 关掉要真删字段。
+  const canvasLayerStyle = `document.querySelector('.design-stage [data-design-layer="${croppedLayer.id}"]')?.getAttribute('style') || ''`
+  const canvasStrokeStyle = `document.querySelector('.design-stage [data-design-stroke="${croppedLayer.id}"]')?.getAttribute('style') || ''`
+  ok(await evaluate(`Boolean(document.querySelector('[data-testid="design-layer-stroke"]')) && Boolean(document.querySelector('[data-testid="design-layer-shadow"]'))`),
+    '选中图片图层时给出「描边（衬边）」与「投影」两个开关')
+  ok(await evaluate(`!document.querySelector('[data-testid="design-stroke-width"]') && !document.querySelector('[data-testid="design-shadow-dx"]')`),
+    '未开启时不展开具体参数（不白占版面）')
+  await click('[data-testid="design-layer-stroke"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-stroke-width"]'))`, '开启描边后出现宽度与颜色')
+  await fill('[data-testid="design-stroke-width"]', 1.2)
+  await waitFor(`(${canvasStrokeStyle}).includes('box-shadow:inset 0 0 0 1.2mm #ffffff')`, '画布上的图片框内侧出现白色描边叠层')
+  ok(await evaluate(`(${canvasLayerStyle}).includes('width:${croppedLayer.w}mm') && (${canvasLayerStyle}).includes('height:${croppedLayer.h}mm')`),
+    '描边不改变框的毫米尺寸（用 border 会挤掉内容盒 ⇒ 等于把照片拉长）')
+  ok(await evaluate(`!(${canvasLayerStyle}).includes('outline')`),
+    '描边不用 outline（Chromium 把它画在图片之下，整圈会被盖住）')
+  await click('[data-testid="design-layer-shadow"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-shadow-dx"]'))`, '开启投影后出现偏移 / 模糊 / 透明度 / 颜色')
+  await waitFor(`(${canvasLayerStyle}).includes('drop-shadow')`, '画布上的图片框带上投影')
+  await fill('[data-testid="design-shadow-blur"]', 2)
+  await waitFor(`(${canvasLayerStyle}).includes('drop-shadow(1mm 1.5mm 2mm')`, '改模糊后画布即时跟着变')
+  ok(await evaluate(`!(${canvasLayerStyle}).includes('box-shadow')`), '投影走 drop-shadow（按轮廓）而不是 box-shadow（按包围盒投出一个方盒）')
+  // 草稿写入有 250ms 防抖，必须等（直接读会读到还没落盘的旧值）。
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.strokeWidth === 1.2`, '描边与投影写进草稿')
+  const effectsDraft = await evaluate(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})`)
+  ok(effectsDraft?.strokeWidth === 1.2 && effectsDraft?.stroke === '#ffffff' && effectsDraft?.shadow?.blurMm === 2,
+    `描边与投影写进草稿（实得 ${JSON.stringify({ stroke: effectsDraft?.stroke, strokeWidth: effectsDraft?.strokeWidth, blur: effectsDraft?.shadow?.blurMm })}）`)
   await click('[data-testid="design-save"]')
-  await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled`, '恢复草稿保存完成')
+  await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存图片描边与投影')
+  const effectsSaved = designs.getDesign(saved.id)
+  const effectsLayer = effectsSaved.layers.find(layer => layer.id === croppedLayer.id)
+  ok(effectsSaved.schemaVersion === 7, `带图片描边/投影的工程标记为格式版本7（旧应用明确拒绝，实得 ${effectsSaved.schemaVersion}）`)
+  ok(effectsLayer.strokeWidth === 1.2 && effectsLayer.stroke === '#ffffff' && effectsLayer.shadow?.blurMm === 2, '描边与投影落盘')
+  // 关掉必须**真删字段**：留一个 strokeWidth:0 会把工程标成版本 7 却没给用户任何视觉差别。
+  await click('[data-testid="design-layer-stroke"]')
+  await click('[data-testid="design-layer-shadow"]')
+  await waitFor(`!document.querySelector('[data-testid="design-stroke-width"]') && !document.querySelector('[data-testid="design-shadow-dx"]')`, '关掉后参数面板收起')
+  ok(!(await evaluate(`(${canvasStrokeStyle})`)).includes('box-shadow') && !(await evaluate(`(${canvasLayerStyle})`)).includes('drop-shadow'),
+    '关掉后画布上不再有描边与投影')
+  await click('[data-testid="design-save"]')
+  await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存关闭结果')
+  const clearedLayer = designs.getDesign(saved.id).layers.find(layer => layer.id === croppedLayer.id)
+  const leftovers = ['stroke', 'strokeWidth', 'shadow'].filter((key) => key in clearedLayer)
+  ok(leftovers.length === 0, `关掉后字段被真删除（实得残留 ${JSON.stringify(leftovers)}）`)
 
   // Round trip through the template UI, followed by actual print rendering of its fixed revision.
   await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('模板')).click()`)

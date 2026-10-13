@@ -2,6 +2,24 @@
 const TYPES = new Set(['image', 'text', 'rect', 'ellipse', 'line'])
 const LIMITS = Object.freeze({ layers: 300, assets: 300, artboard: 2000, text: 20000, groups: 150, guides: 100 })
 
+/**
+ * 图层混合模式白名单——**只收 Canvas 2D `mix-blend-mode` 原生支持的 15 种**。
+ *
+ * Photoshop 全套 27 种里剩下的（linear-burn / vivid-light / pin-light / darker-color /
+ * lighter-color / subtract / divide…）CSS 没有对应值，硬上要么逐像素补、要么落到
+ * 不同公式的近似值。打印对色准敏感：宁可少给 12 种，也不给「画布与 PS 不一致」的
+ * 假模式。要扩清单时先见 docs/v0.7功能建议-参照Compositor.md 的混合模式一节。
+ */
+const BLEND_MODES = Object.freeze(['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'])
+
+/**
+ * 已实现的工程格式版本——**唯一的可读版本清单**，校验与测试都从这里取值。
+ *
+ * 测试要验「更高版本被拒」时必须用 `Math.max(...SCHEMA_VERSIONS) + 1`，不要写死数字：
+ * 写死会在下次抬版本时变成假失败（v6 落地时 design-editor/design-effects 就各中过一次）。
+ */
+const SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7])
+
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label}必须是对象`)
   return value
@@ -45,13 +63,121 @@ function linearPaint(value, label) {
   return { type: 'linear', angle, stops: stops.map(({ offset, color, opacity }) => ({ offset, color, opacity })) }
 }
 function shapeShadow(value) {
-  const shadow = object(value, '图形阴影')
+  const shadow = object(value, '阴影')
   return {
     dxMm: number(shadow.dxMm, 1, -50, 50, '阴影水平偏移'),
     dyMm: number(shadow.dyMm, 1.5, -50, 50, '阴影垂直偏移'),
     blurMm: number(shadow.blurMm, 1, 0, 10, '阴影模糊'),
     color: color(shadow.color, '#000000'),
     opacity: number(shadow.opacity, 0.2, 0, 1, '阴影透明度'),
+  }
+}
+/**
+ * `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa` → `rgba(r,g,b,a)`。
+ *
+ * 图片投影走 CSS `filter: drop-shadow()`，它只收 `<color>` 而不能像 SVG `feFlood` 那样
+ * 把颜色和不透明度分成两个属性——所以必须在这里把 `shadow.opacity` 乘进 alpha。
+ * 非十六进制（`color()` 允许的 `transparent`）一律落到全透明，别让 `parseInt` 吐出 NaN。
+ */
+function withAlpha(value, alpha) {
+  if (typeof value !== 'string' || !value.startsWith('#')) return 'transparent'
+  const hex = value.slice(1)
+  const full = hex.length <= 4 ? hex.split('').map((ch) => ch + ch).join('') : hex
+  const r = parseInt(full.slice(0, 2), 16), g = parseInt(full.slice(2, 4), 16), b = parseInt(full.slice(4, 6), 16)
+  const base = full.length === 8 ? parseInt(full.slice(6, 8), 16) / 255 : 1
+  return `rgba(${r},${g},${b},${Math.round(alpha * base * 1000) / 1000})`
+}
+/**
+ * 图片图层的描边与投影（v0.7 §6）：证件照衬边 + 照片卡立体感。
+ *
+ * **两个字段都是「可选」而非「有默认」**。形状的 `stroke` / `strokeWidth` 天生带默认值
+ * （每个形状都有一圈描边），图片不能沿用这个约定——一旦给图片补上默认描边，**所有存量
+ * 工程里的每一张图都会凭空多出一圈线**，而没有任何人要求过。
+ * 所以只在调用方真的传了才产出字段；不传 ⇒ 与旧工程逐字节同行为。
+ *
+ * 投影沿用与形状**同一个** `shadow` 结构（dx/dy/blur/color/opacity），只是渲染方式不同：
+ * 形状走 SVG `feGaussianBlur`+`feFlood`，图片走 CSS `filter: drop-shadow()`（跟 alpha 走）。
+ */
+function imageEffects(l) {
+  const out = {}
+  if (l.strokeWidth !== undefined || l.stroke !== undefined) {
+    out.stroke = color(l.stroke, '#ffffff')
+    out.strokeWidth = number(l.strokeWidth, 0, 0, 100, '描边宽度')
+  }
+  if (l.shadow !== undefined) out.shadow = shapeShadow(l.shadow)
+  return out
+}
+/**
+ * 裁切比例预设——**只放「纯比例」的**，一个绝对毫米尺寸都不放。
+ *
+ * 为什么这样切：带物理尺寸的预设（1 寸 = 25×35 mm）是**产品规格**，权威源是
+ * `templates.cjs` 的 `ITEM_SIZES`（多联拼版的「成品尺寸」用的是同一份，经 `app:env`
+ * 下发给界面）。在这里再抄一份 1 寸/2 寸，就等于给同一个规格留了两个定义，
+ * 改一处必漏另一处——I-27/I-39 那类漂移都是这么来的。
+ *
+ * `w`/`h` 是**毫米语义下的宽高比**，不是像素比：证件照按物理尺寸出图，
+ * 用像素比会在不同原图上得到不同的物理长宽比（同一份 3:4 在竖图和横图上结果相反）。
+ */
+const CROP_RATIOS = Object.freeze([
+  { id: '1:1', name: '正方形 1:1', w: 1, h: 1 },
+  { id: '3:4', name: '竖版 3:4', w: 3, h: 4 },
+  { id: '4:3', name: '横版 4:3', w: 4, h: 3 },
+  { id: '9:16', name: '竖版 9:16', w: 9, h: 16 },
+  { id: '16:9', name: '横版 16:9', w: 16, h: 9 },
+  { id: 'a4', name: 'A4 比例（210×297）', w: 210, h: 297 },
+])
+
+/** 裁切百分比统一保留 6 位小数：既够精度，又能让 `x + w <= 1` 稳稳成立（见下）。 */
+const cropRound = (value) => Math.round(value * 1e6) / 1e6
+
+/**
+ * 把裁切框调成指定的物理长宽比——**尽量保住用户原来的取景**。
+ *
+ * 为什么必须有这一步：静态图片图层的 `crop` 存的是「原图百分比」，而**打印出来的比例**
+ * 取决于 `(原图宽 × crop.w) : (原图高 × crop.h)`。只把图层尺寸改成 25×35 mm 却不动 crop，
+ * 换来的就是一张**被横向拉长的脸**——用户看到的是「选了 1 寸结果变形」，而代码里
+ * 每一行都没报错。所以「选尺寸」和「改裁切」必须是同一个动作。
+ *
+ * 取「原图内放得下的最大同比例矩形」，并以原裁切框**中心**为锚点贴边收拢：
+ * 面积最大 ⇒ 不白白丢像素；锚点不变 ⇒ 刚调好的取景不会跳到别处。
+ *
+ * @param crop   {x,y,w,h} 原裁切（0~1 的原图百分比），缺省为整图
+ * @param ratioW 目标物理宽度（mm）
+ * @param ratioH 目标物理高度（mm）
+ * @param assetW 原图像素宽（「百分比 → 物理比例」的换算依据）
+ * @param assetH 原图像素高
+ */
+function fitCropToRatio(crop, ratioW, ratioH, assetW, assetH) {
+  const current = crop || { x: 0, y: 0, w: 1, h: 1 }
+  const usable = (value) => Number.isFinite(value) && value > 0
+  // 参数不全时原样返回：宁可不动，也不要算出一个越界的裁切把工程写成非法状态
+  if (!usable(ratioW) || !usable(ratioH) || !usable(assetW) || !usable(assetH)) return { ...current }
+  // 要让「打印比例 = ratioW : ratioH」，百分比空间的宽高比须为
+  //   crop.w / crop.h = (ratioW × assetH) / (ratioH × assetW)
+  const k = (ratioW * assetH) / (ratioH * assetW)
+  if (!usable(k)) return { ...current }
+  const w = cropRound(Math.min(1, k))
+  const h = cropRound(Math.min(1, 1 / k))
+  const cx = current.x + current.w / 2
+  const cy = current.y + current.h / 2
+  // 先减后夹，且夹的上界与 w/h 用同一种取整——否则 x + w 可能落在 1.0000000001 上，
+  // 被 normalizeDesign 的「裁切区域超出原图」拦下（用户在界面上点一下预设就报错）。
+  const clamp = (value, limit) => Math.min(Math.max(cropRound(value), 0), Math.max(0, cropRound(limit)))
+  return { x: clamp(cx - w / 2, 1 - w), y: clamp(cy - h / 2, 1 - h), w, h }
+}
+
+/**
+ * 图片颜色调整——**全字段恒等值为默认**（brightness/contrast/saturate=1，grayscale/invert=0），
+ * 老工程不传 `adjust` 时行为与升级前逐字节一致。渲染侧见 renderDesign 的 filterOf。
+ */
+function imageAdjust(value) {
+  const adj = object(value, '图片颜色调整')
+  return {
+    brightness: number(adj.brightness, 1, 0, 3, '亮度'),
+    contrast: number(adj.contrast, 1, 0, 3, '对比度'),
+    saturate: number(adj.saturate, 1, 0, 3, '饱和度'),
+    grayscale: number(adj.grayscale, 0, 0, 1, '去色'),
+    invert: number(adj.invert, 0, 0, 1, '反相'),
   }
 }
 
@@ -100,7 +226,7 @@ function normalizeSource(value) {
 
 function normalizeDesign(input) {
   const doc = object(input, '底图工程')
-  if (doc.schemaVersion !== undefined && ![1, 2, 3, 4, 5].includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
+  if (doc.schemaVersion !== undefined && !SCHEMA_VERSIONS.includes(doc.schemaVersion)) throw new Error('不支持的底图工程版本')
   const board = object(doc.artboard, '画布')
   const layers = doc.layers === undefined ? [] : doc.layers
   if (!Array.isArray(layers) || layers.length > LIMITS.layers) throw new Error(`最多支持 ${LIMITS.layers} 个图层`)
@@ -135,10 +261,14 @@ function normalizeDesign(input) {
         w: number(l.w, 30, 0.01, 10000, '图层宽度'), h: number(l.h, 20, 0.01, 10000, '图层高度'),
         rotation: number(l.rotation, 0, -36000, 36000, '旋转'), opacity: number(l.opacity, 1, 0, 1, '透明度'),
         visible: bool(l.visible, true, '可见性'), locked: bool(l.locked, false, '锁定'),
+        // 混合模式：与下方内容的叠色方式。默认 normal（不混合），存量工程不传即旧行为。
+        // 白名单见 BLEND_MODES——只收 CSS 原生 15 种，理由写在常量注释里。
+        blend: l.blend === undefined ? 'normal' : l.blend,
         // 仅编辑器可见：参考框这类「给用户对齐用、绝不能印出去」的图层。默认 false，
         // 旧工程与所有不传新选项的调用方行为完全不变。渲染侧见 renderDesign。
         editorOnly: bool(l.editorOnly, false, '仅编辑可见'),
       }
+      if (!BLEND_MODES.includes(out.blend)) throw new Error('不支持的混合模式')
       if (l.type === 'image' && l.variable === true) {
         out.variable = true
         out.bindColumn = string(l.bindColumn, '', 200, '照片绑定列').trim()
@@ -148,6 +278,8 @@ function normalizeDesign(input) {
         const focal = l.focal === undefined ? {} : object(l.focal, '照片焦点')
         out.focal = { x: number(focal.x, 0.5, 0, 1, '照片水平焦点'), y: number(focal.y, 0.5, 0, 1, '照片垂直焦点') }
         out.radius = number(l.radius, 0, 0, 1000, '照片圆角')
+        if (l.adjust !== undefined) out.adjust = imageAdjust(l.adjust)
+        Object.assign(out, imageEffects(l))
       } else if (l.type === 'image') {
         out.assetId = token(l.assetId, '图层素材标识')
         if (!Object.hasOwn(assets, out.assetId)) throw new Error(`图片图层缺少素材：${out.name}`)
@@ -156,6 +288,8 @@ function normalizeDesign(input) {
         if (out.crop.x + out.crop.w > 1.00000001 || out.crop.y + out.crop.h > 1.00000001) throw new Error('裁切区域超出原图')
         out.flipX = bool(l.flipX, false, '水平翻转')
         out.flipY = bool(l.flipY, false, '垂直翻转')
+        if (l.adjust !== undefined) out.adjust = imageAdjust(l.adjust)
+        Object.assign(out, imageEffects(l))
       } else if (l.type === 'text') {
         Object.assign(out, {
           text: string(l.text, '文字', LIMITS.text, '图层文字'), fontFamily: string(l.fontFamily, '微软雅黑', 150, '字体名称'),
@@ -199,7 +333,9 @@ function normalizeDesign(input) {
     if (layerIds.some((layerId, offset) => positions.get(layerId) !== first + offset)) throw new Error('图层组成员必须在层级中连续排列')
     const name = string(group.name, `图层组 ${index + 1}`, 120, '图层组名称').trim()
     if (!name) throw new Error('图层组名称不能为空')
-    return { id, name, layerIds }
+    // 组透明度：乘算到组内每一个图层（与 Compositor v8 的文件夹透明度同语义）。
+    // 默认 1 ⇒ 存量工程与不传该字段的调用方行为不变。
+    return { id, name, layerIds, opacity: number(group.opacity, 1, 0, 1, '图层组透明度') }
   })
   const guides = doc.guides === undefined ? [] : doc.guides
   if (!Array.isArray(guides) || guides.length > LIMITS.guides) throw new Error(`最多支持 ${LIMITS.guides} 条参考线`)
@@ -217,11 +353,19 @@ function normalizeDesign(input) {
   // 版本 + 恰好有分组」的工程被倒标成旧格式，等于给旧读者开了静默降级的口子。
   // 版本 3 = 图层级 editorOnly（参考框）；旧应用会明确报「不支持的底图工程版本」，
   // 而不是把参考框当普通图层印出去。
+  // 版本 4 = 图形渐变 fillPaint / 阴影 shadow。
+  // 版本 5 = 变量图（按名单配图列逐行换照片）。
+  // 版本 6 = 混合模式 blend / 图片颜色调整 adjust / 组透明度 groups.opacity。
+  // 版本 7 = 图片图层的描边 stroke/strokeWidth 与投影 shadow（按 alpha 的 drop-shadow）。
+  //   旧应用读到它必须明确报「不支持的底图工程版本」——否则描边/投影会被静默剥掉，
+  //   用户拿到的是一张**缺了白边**的证件照，而两边都不报错。
   let version = doc.schemaVersion || 1
   if (result.groups.length || result.guides.length) version = Math.max(version, 2)
   if (result.layers.some(layer => layer.editorOnly)) version = Math.max(version, 3)
-  if (result.artboard.backgroundPaint || result.layers.some(layer => layer.fillPaint || layer.shadow)) version = Math.max(version, 4)
+  if (result.artboard.backgroundPaint || result.layers.some(layer => layer.fillPaint || (layer.shadow && layer.type !== 'image'))) version = Math.max(version, 4)
   if (result.layers.some(layer => layer.variable)) version = Math.max(version, 5)
+  if (result.layers.some(layer => layer.blend !== 'normal' || layer.adjust !== undefined) || result.groups.some(group => group.opacity !== 1)) version = Math.max(version, 6)
+  if (result.layers.some(layer => layer.type === 'image' && (layer.shadow !== undefined || layer.strokeWidth !== undefined))) version = Math.max(version, 7)
   result.schemaVersion = version
   // Record uploaded fonts so a missing file cannot silently become a system fallback.
   const fontAssets = object(doc.fontAssets === undefined ? {} : doc.fontAssets, '字体素材表')
@@ -264,6 +408,23 @@ function imageDpi(layer, asset) {
   const crop = layer.crop || { w: 1, h: 1 }
   return Math.min(asset.width * crop.w / layer.w, asset.height * crop.h / layer.h) * 25.4
 }
+/**
+ * 图片颜色调整 → CSS filter 串。
+ *
+ * 只输出**非恒等**的那几项：全默认时返回空串，DOM 里一个字符都不多——存量工程
+ * 与关闭调整时的渲染结果与升级前逐字节一致。Chromium 的 print 管线同样支持
+ * filter，所以画布 / PDF / PNG 导出 / 打印四处同源。
+ */
+function filterOf(adjust) {
+  if (!adjust) return ''
+  const parts = []
+  if (adjust.brightness !== 1) parts.push(`brightness(${adjust.brightness})`)
+  if (adjust.contrast !== 1) parts.push(`contrast(${adjust.contrast})`)
+  if (adjust.saturate !== 1) parts.push(`saturate(${adjust.saturate})`)
+  if (adjust.grayscale > 0) parts.push(`grayscale(${adjust.grayscale})`)
+  if (adjust.invert > 0) parts.push(`invert(${adjust.invert})`)
+  return parts.length ? `filter:${parts.join(' ')}` : ''
+}
 
 /**
  * 渲染底图工程。
@@ -287,15 +448,38 @@ function renderDesign(input, options = {}) {
     const id = nextEffectId(), p = doc.artboard.backgroundPaint, e = linearEndpoints(doc.artboard.w, doc.artboard.h, p.angle)
     return `<svg class="${prefix}-board-paint" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${doc.artboard.w} ${doc.artboard.h}" preserveAspectRatio="none"><defs>${gradientMarkup(id, p, e)}</defs><rect width="${doc.artboard.w}" height="${doc.artboard.h}" fill="url(#${id})"/></svg>`
   })() : ''
+  // 组透明度乘算：组在本 schema 里是单层扁平结构（每个图层至多属于一个组），
+  // 所以「组透明度 × 图层透明度」一次乘法即可，不需要递归求祖先链。
+  // 渲染侧在图层样式里直接乘出结果，组元数据本身不产生 DOM 包裹层。
+  const groupOpacity = new Map()
+  for (const g of doc.groups || []) for (const id of g.layerIds) groupOpacity.set(id, g.opacity)
   const assetClasses = new Map()
   const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly)).map(l => {
     let body = ''
-    const style = [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${l.opacity}`]
+    const effectiveOpacity = Math.min(1, Math.max(0, l.opacity * (groupOpacity.get(l.id) ?? 1)))
+    const style = [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${effectiveOpacity}`]
+    if (l.blend && l.blend !== 'normal') style.push(`mix-blend-mode:${l.blend}`)
+    // 图片图层的描边与投影（v0.7 §6）。两条都**不碰几何**，这是刻意的：
+    // - 描边走一个**叠层元素** + `inset box-shadow`，画在框的内侧。
+    //   ⚠️ 别图省事用 `outline`：**Chromium 把 outline 画在定位子元素之下**，图片正好铺满
+    //   整个框，于是整圈描边被盖住、只在右/下边缘漏出约 0.2mm（实测 300dpi 下就是 2px）。
+    //   这不是理论推演，是出真图读真像素量出来的——`test/design-export-e2e.cjs` 里有断言。
+    //   也别用 `border`：会挤掉内容盒，可见源区域的比例与帧比例不再相等 ⇒ 等于把照片拉长。
+    // - 投影走 `filter: drop-shadow()`，**按图层 alpha 走**。别图省事用 `box-shadow`：
+    //   后者按包围盒投，一张抠过底的签名图会被投出一个方盒。
+    if (l.type === 'image') {
+      if (l.shadow) style.push(`filter:drop-shadow(${l.shadow.dxMm}mm ${l.shadow.dyMm}mm ${l.shadow.blurMm}mm ${withAlpha(l.shadow.color, l.shadow.opacity)})`)
+    }
+    // 变量图：`border-radius` 留在图层外框上（描边的 `outline` 要跟着圆角走），
+    // 但**裁剪交给内层**——外框一旦自己也 `overflow:hidden`，投影就有被自身裁掉的风险，
+    // 而「描边 + 投影」正是证件照衬边最常见的组合，不能赌浏览器的裁剪语义。
     if (l.type === 'image' && l.variable) {
       const url = options.photoUrl?.(l)
-      style.push('overflow:hidden', `border-radius:${l.radius}mm`)
-      if (url) body = `<img data-photo-column="${escapeHtml(l.bindColumn)}" src="${escapeHtml(url)}" style="display:block;width:100%;height:100%;object-fit:${l.fit};object-position:${l.focal.x * 100}% ${l.focal.y * 100}%">`
-      else if (url !== null && options.showPhotoPlaceholder) body = `<div style="box-sizing:border-box;width:100%;height:100%;border:0.3mm dashed #987b57;background:#eee7d9;display:flex;align-items:center;justify-content:center;text-align:center;color:#725a3c;font:10pt sans-serif;overflow:hidden">变量图<br>按名单配图列匹配</div>`
+      style.push(`border-radius:${l.radius}mm`)
+      const clip = `position:absolute;inset:0;overflow:hidden;border-radius:${l.radius}mm`
+      const filter = filterOf(l.adjust)
+      if (url) body = `<div style="${clip}"><img data-photo-column="${escapeHtml(l.bindColumn)}" src="${escapeHtml(url)}" style="display:block;width:100%;height:100%;object-fit:${l.fit};object-position:${l.focal.x * 100}% ${l.focal.y * 100}%${filter ? `;${filter}` : ''}"></div>`
+      else if (url !== null && options.showPhotoPlaceholder) body = `<div style="${clip}"><div style="box-sizing:border-box;width:100%;height:100%;border:0.3mm dashed #987b57;background:#eee7d9;display:flex;align-items:center;justify-content:center;text-align:center;color:#725a3c;font:10pt sans-serif;overflow:hidden">变量图<br>按名单配图列匹配</div></div>`
       else if (url !== null && options.requirePhotos) throw new Error(`变量图未关联照片：${l.bindColumn}`)
     } else if (l.type === 'image') {
       let cls = assetClasses.get(l.assetId)
@@ -305,7 +489,8 @@ function renderDesign(input, options = {}) {
         if (!geometryOnly) css.push(`.${cls}{background-image:url(${cssString(assetUrl(doc.assets[l.assetId]))})}`)
       }
       const c = l.crop
-      body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%"></div></div>`
+      const filter = filterOf(l.adjust)
+      body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%${filter ? `;${filter}` : ''}"></div></div>`
     } else if (l.type === 'text') {
       const fam = family(l.fontFamily)
       style.push(`font-family:${fam ? `${cssString(fam)},sans-serif` : DEFAULT_FONT_STACK}`, `font-size:${l.fontSize}pt`, `font-weight:${l.bold ? 700 : 400}`, `line-height:${l.lineHeight}`, `letter-spacing:${l.letterSpacing}pt`, `color:${l.color}`, `text-align:${l.align}`, 'white-space:pre-wrap', 'overflow-wrap:anywhere', 'overflow:hidden')
@@ -328,6 +513,12 @@ function renderDesign(input, options = {}) {
       ].join('')
       const shadowShape = shadowId ? shape.replace(/\/>$/, ` filter="url(#${shadowId})"/>`) : ''
       body = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${l.w} ${l.h}" width="100%" height="100%" style="display:block;overflow:${shadowId ? 'visible' : 'hidden'}">${defs ? `<defs>${defs}</defs>` : ''}${shadowShape}${shape}</svg>`
+    }
+    // 图片描边：叠层元素 + `inset box-shadow`（必须压在图片之上，见上面那段注释）。
+    // 变量图的圆角在外框上，叠层也要带上同一个 `border-radius`，衬边才会跟着圆角走。
+    if (l.type === 'image' && l.strokeWidth > 0) {
+      const radius = l.variable ? `;border-radius:${l.radius}mm` : ''
+      body += `<div data-design-stroke="${escapeHtml(l.id)}" style="position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 0 ${l.strokeWidth}mm ${l.stroke}${radius}"></div>`
     }
     return `<div class="${prefix}-layer" data-design-layer="${escapeHtml(l.id)}" style="${escapeHtml(style.join(';'))}">${body}</div>`
   })
@@ -363,4 +554,4 @@ function shadowMarkup(id, w, h, shadow) {
     '<feComposite in="color" in2="shift" operator="in"/></filter>'
 }
 
-module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, linearEndpoints, shadowRegion, DEFAULT_FONT_STACK, LIMITS }
+module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, linearEndpoints, shadowRegion, fitCropToRatio, DEFAULT_FONT_STACK, LIMITS, BLEND_MODES, SCHEMA_VERSIONS, CROP_RATIOS }

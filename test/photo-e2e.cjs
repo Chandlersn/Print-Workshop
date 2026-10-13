@@ -258,14 +258,35 @@ app.whenReady().then(async () => {
   await waitFor(() => evaluate(`document.querySelector('.cs-trigger .cs-label')?.textContent==='照片出片 × people.csv'`), '变量图模板选中完成')
   ok(await evaluate(`document.querySelector('.cs-trigger .cs-badge')?.textContent==='变量图'`), '选中模板后仍显示变量图标识')
   await waitFor(() => evaluate(`!!document.querySelector('iframe')`), '人像批量预览')
-  ok(await evaluate(`(document.querySelector('iframe').srcdoc.match(/data-photo-column=/g)||[]).length===3`), '纯照片模板可从打印中心选择，预览包含三行人像')
+  ok(await evaluate(`(document.querySelector('iframe').srcdoc.match(/data-photo-column=/g)||[]).length===1 && document.querySelector('[data-testid="print-preview-paging"]').textContent.includes('/ 3 页')`), '打印中心只预览一张纸，保留三页总统计')
+  await clickText('[data-testid="print-preview-paging"] button', '下一页')
+  await waitFor(() => evaluate(`document.querySelector('[data-testid="print-preview-paging"]').textContent.includes('第 2 / 3 页')`), '预览下一张纸')
+  ok(await evaluate(`(document.querySelector('iframe').srcdoc.match(/data-photo-column=/g)||[]).length===1`), '切换预览页仍只加载本页照片')
   await new Promise(resolve => setTimeout(resolve, 300))
   fs.writeFileSync(path.join(artifacts, 'portrait-print-preview.png'), (await ui.webContents.capturePage()).toPNG())
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: path.join(artifacts, 'portrait-ui-export.pdf') })
+  // Force small real batches so three records exercise the session/progress/cancel path.
+  const realPrinter = { ...printer, printToPdfBuffer: async (...args) => { await new Promise(r => setTimeout(r, 250)); return printer.printToPdfBuffer(...args) } }
+  ipcMain.removeHandler('print:exportPdf')
+  ipcMain.handle('print:exportPdf', (event, payload) => require('../electron/api.cjs').call('print:exportPdf', { ...payload, batchRows: 1 }, {
+    allowWrite: true, printer: realPrinter,
+    dialog: { saveFile: opts => dialog.showSaveDialog(opts) },
+    emit: (channel, progress) => event.sender.send(channel, progress),
+  }))
+  const outFile = path.join(artifacts, 'portrait-ui-export.pdf')
+  if (fs.existsSync(outFile)) fs.unlinkSync(outFile)
+  await clickText('button', '导出 PDF')
+  await waitFor(() => evaluate(`document.querySelector('[data-testid="print-progress"]')?.textContent.includes('第 1 / 3 批')`), '真实分批进度')
+  fs.writeFileSync(path.join(artifacts, 'print-progress.png'), (await ui.webContents.capturePage()).toPNG())
+  await clickText('[data-testid="print-cancel"]', '取消出片')
+  await waitFor(async () => require('../electron/print.cjs').listJobs().some(job => job.status === 'canceled'), '取消任务留痕')
+  await waitFor(() => evaluate(`!document.querySelector('[data-testid="print-progress"]')`), '取消完成恢复界面')
+  ok(!fs.existsSync(outFile), '真实点击取消停止后续批次，不发布PDF半成品')
   await clickText('button', '导出 PDF')
   await waitFor(async () => require('../electron/print.cjs').listJobs().some(job => job.status === 'ok'), '界面导出与历史归档')
   const jobs = require('../electron/print.cjs').listJobs()
   ok(jobs[0].status === 'ok' && fs.existsSync(path.join(artifacts, 'portrait-ui-export.pdf')), '真实点击导出 PDF 后留下成功归档')
+  ok(require('../electron/pdf-merge.cjs').countPdfPagesFromFile(outFile)===3, '真实独立会话照片加载与对象合并生成完整三页PDF')
   require('../electron/dataset.cjs').setPhotoMatchColumn(ds.id, nameColumn)
   await require('../electron/photo-library.cjs').importFolder({ datasetId: ds.id, column: nameColumn, folder })
   const blanks = require('../electron/print.cjs').buildBatchHtml(ds.id, template.id)

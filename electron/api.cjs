@@ -53,9 +53,21 @@ const cache = require('./cache.cjs')
 const printTasks = new Map()
 
 function registerPrintTask(jobKey) {
+  if (printTasks.has(jobKey)) throw new Error('同一出片任务正在执行，请等待完成')
   const task = { canceled: false }
   printTasks.set(jobKey, task)
   return task
+}
+
+function printInputFingerprint(datasetId, templateId) {
+  const photos = loadJson('photo-bindings', { expect: 'array' }) || []
+  return JSON.stringify({ dataset: dataset.getDataset(datasetId), template: templates.getTemplate(templateId), photos: photos.filter(b => b.datasetId === datasetId) })
+}
+function guardedPrintDomain(datasetId, templateId, fingerprint) {
+  return { ...printDomain, buildBatchHtml(...args) {
+    if (printInputFingerprint(datasetId, templateId) !== fingerprint) throw new Error('出片期间名单、模板或照片发生变化，请重新预览后出片')
+    return printDomain.buildBatchHtml(...args)
+  } }
 }
 
 function cancelPrintTask(jobKey) {
@@ -728,23 +740,31 @@ const OPS = {
     gui: 'printer',
     params: {
       design: { required: true, desc: '当前可编辑草稿，无需先保存工程' },
+      format: { required: false, desc: 'png（默认）、jpeg 或 webp' },
+      quality: { required: false, desc: '有损格式质量 1~100；jpeg 默认 90、webp 默认 80，png 忽略' },
       dpi: { required: false, desc: '150、300或600；默认300' },
-      transparent: { required: false, desc: 'true忽略画布背景色并保留图层透明度' },
-      filePath: { required: false, desc: 'PNG绝对输出路径；省略则显示保存对话框。渲染仍需要Electron宿主能力' },
+      transparent: { required: false, desc: 'true忽略画布背景色并保留图层透明度；jpeg 不支持透明，会自动铺画布底色' },
+      filePath: { required: false, desc: '图片绝对输出路径（扩展名须与 format 一致）；省略则显示保存对话框。渲染仍需要Electron宿主能力' },
     },
     run: async (p, ctx) => {
+      // 延迟加载：出图模块只在真要导出时才进内存，纯 Node 加载注册表不受影响。
+      const { FORMATS } = require('./design-export.cjs')
+      // format / quality 的合法性由 prepareExport 统一体检，这里只取它的结论做对话框文案。
       const prepared = ctx.printer.prepareDesignPng(p)
+      const format = FORMATS[prepared.format]
       let filePath = p.filePath
       if (!filePath) {
         if (!ctx.dialog) throw guiRequired('design:exportPng', '保存对话框（请用filePath指定输出路径）')
         const result = await ctx.dialog.saveFile({
-          title: '导出高清 PNG 底图',
-          defaultPath: `${printDomain.sanitizeFilename(prepared.name)}-${prepared.dpi}dpi.png`,
-          filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+          title: `导出高清 ${format.label} 底图`,
+          defaultPath: `${printDomain.sanitizeFilename(prepared.name)}-${prepared.dpi}dpi.${format.exts[0]}`,
+          filters: [{ name: format.label, extensions: [...format.exts] }],
         })
         if (result.canceled || !result.filePath) return { canceled: true }
         filePath = result.filePath
       }
+      // 显式路径的扩展名要与 format 相符——这道校验在 exportImage 里（写盘前），
+      // 报错要早于「渲染完了才发现写不进去」。
       return ctx.printer.exportDesignPng(prepared, filePath)
     },
   },
@@ -1103,8 +1123,9 @@ const OPS = {
       datasetId: { required: true, desc: '数据集 id' },
       templateId: { required: true, desc: '模板 id' },
       rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
+      previewPage: { required: false, desc: '仅生成指定物理纸张的预览，0 基；保留全作业统计' },
     },
-    run: (p) => printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows),
+    run: (p) => printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { previewPage: p.previewPage }),
   },
 
   /**
@@ -1127,11 +1148,12 @@ const OPS = {
       templateId: { required: true, desc: '模板 id' },
       rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
       savePath: { required: false, desc: 'PDF 保存绝对路径；缺省时经 GUI 保存对话框询问' },
-      batchRows: { required: false, desc: '每批目标记录数（分批导出）；缺省 100' },
+      batchRows: { required: false, desc: '每批目标记录数；照片缺省25，普通作业缺省100' },
       jobKey: { required: false, desc: '任务键（进度/取消关联）；缺省自动生成并随结果返回' },
     },
     run: async (p, ctx) => {
       const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
+      const fingerprint = printInputFingerprint(String(p.datasetId), String(p.templateId))
 
       let savePath = p.savePath ? String(p.savePath) : ''
       if (!savePath) {
@@ -1156,15 +1178,16 @@ const OPS = {
       const onProgress = (x) => {
         try { ctx.emit('print:progress', { jobKey, ...x }) } catch { /* 进度事件异常不阻断出片 */ }
       }
-      const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows)
+      const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows ?? (built.photoAssets.length ? 25 : 100))
       try {
         let r
         if (batches.length <= 1) {
+          onProgress({ phase: 'single', batches: 1 })
           // 单批：一条 printToPDF 直写最终文件，与分批上线前的逐字节行为一致
           r = await ctx.printer.exportPdf(built.html, savePath)
         } else {
           r = await printBatch.exportPdfBatched({
-            domain: printDomain,
+            domain: guardedPrintDomain(String(p.datasetId), String(p.templateId), fingerprint),
             printer: ctx.printer,
             datasetId: String(p.datasetId),
             templateId: String(p.templateId),
@@ -1225,8 +1248,8 @@ const OPS = {
    * （silent=false，用户可确认/取消），要么静默直打（silent=true）——两者都依赖
    * 一个真实的 Electron 窗口，纯 Node 下不存在替代实现。
    *
-   * 分批（S1.3-b）：与 PDF 同源的切批规则；非静默时**只有第一批弹系统对话框**
-   * （用户在那一弹确认的就是整份作业）。已提交系统队列的批次不承诺撤回，
+   * 分批与 PDF 同源；非静默时每批确认打印设备和设置。
+   * 已提交系统队列的批次不承诺撤回，
    * 失败/取消信息里带已提交数。
    */
   'print:send': {
@@ -1237,28 +1260,30 @@ const OPS = {
       templateId: { required: true, desc: '模板 id' },
       rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
       silent: { required: false, desc: 'true 静默直打；缺省 false 弹系统打印对话框' },
-      batchRows: { required: false, desc: '每批目标记录数（分批导出）；缺省 100' },
+      batchRows: { required: false, desc: '每批目标记录数；照片缺省25，普通作业缺省100' },
       jobKey: { required: false, desc: '任务键（进度/取消关联）；缺省自动生成并随结果返回' },
     },
     run: async (p, ctx) => {
       const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
+      const fingerprint = printInputFingerprint(String(p.datasetId), String(p.templateId))
       const silent = Boolean(p && p.silent)
       const jobKey = p.jobKey ? String(p.jobKey) : newJobKey()
       const task = registerPrintTask(jobKey)
       const onProgress = (x) => {
         try { ctx.emit('print:progress', { jobKey, ...x }) } catch { /* 进度事件异常不阻断出片 */ }
       }
-      const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows)
+      const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows ?? (built.photoAssets.length ? 25 : 100))
       // 直打失败必须留痕：打印是唯一会真正消耗纸张的出口，打印机离线、驱动报错、
       // 系统卡纸全在这里抛异常。没有 failed 记录的话，用户只看到一句报错，
       // 历史里查不到「当时出了什么、出了多少」，也无从判断该不该重打。
       // （与 print:exportPdf 的 catch 分支对称——两个出口不能一个留痕一个不留。）
       let r
       try {
+        if (batches.length <= 1) onProgress({ phase: 'single', batches: 1 })
         r = batches.length <= 1
           ? await ctx.printer.sendToPrinter(built.html, { silent })
           : await printBatch.sendToPrinterBatched({
-            domain: printDomain,
+            domain: guardedPrintDomain(String(p.datasetId), String(p.templateId), fingerprint),
             printer: ctx.printer,
             datasetId: String(p.datasetId),
             templateId: String(p.templateId),

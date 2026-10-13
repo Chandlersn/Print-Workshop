@@ -268,14 +268,23 @@ function validateBatch(datasetId, templateId, rows) {
 
 /** 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；范围由 rows（行级勾选）限定；
  *  range 为分批导出的行区间（S1.3-b），只影响本次渲染的行，不改 selection 口径 */
-function buildBatchHtml(datasetId, templateId, rows, { range } = {}) {
+function buildBatchHtml(datasetId, templateId, rows, { range, previewPage } = {}) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
   const spec = renderEngine.pageSpec(tpl.pageSize)
-  const scope = resolveScope(ds, { rows, range })
-  const list = scope.rows
+  let scope = resolveScope(ds, { rows, range })
   // 多联：一页装多条记录，页数 ≠ 记录数，必须分开报，否则预览会按记录数撑高
   const layout = renderEngine.resolveLayout(tpl.layout, spec)
+  const fullCount = scope.rows.length
+  const perPage = layout.enabled ? layout.perPage : 1
+  const fullPages = Math.ceil(fullCount / perPage)
+  let shownPage = null
+  if (previewPage !== undefined && previewPage !== null) {
+    if (!Number.isInteger(previewPage) || previewPage < 0) throw new Error('预览页码必须为非负整数')
+    shownPage = Math.min(previewPage, Math.max(0, fullPages - 1))
+    if (fullCount) scope = resolveScope(ds, { rows, range: { from: shownPage * perPage, to: (shownPage + 1) * perPage } })
+  }
+  const list = scope.rows
   const pageCount = layout.enabled ? Math.ceil(list.length / layout.perPage) : list.length
   const doc = renderEngine.resolveTemplateDesign(tpl)
   const photoColumns = (doc?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly).map(layer => layer.bindColumn)
@@ -297,9 +306,11 @@ function buildBatchHtml(datasetId, templateId, rows, { range } = {}) {
   return {
     html: renderEngine.buildHtml(tpl, list, { withToolbar: false, preparedDesign }),
     snapshotHtml: renderEngine.buildHtml(tpl, list, { withToolbar: true, preparedDesign }),
-    recordCount: list.length,
+    recordCount: shownPage === null ? list.length : fullCount,
     photoAssets: photos.assets,
-    pageCount,
+    pageCount: shownPage === null ? pageCount : fullPages,
+    renderedPageCount: pageCount,
+    previewPage: shownPage,
     bgDpi,
     designInfo: preparedDesign.info,
     layout: layout.enabled
@@ -405,7 +416,8 @@ function resolveSnapshot(jobId) {
 /**
  * 删除打印任务：元数据移除 + 归档目录清理。
  * 归档目录（archive/<月>/<jobId>/）含 snapshot.html，变量图快照另含 photos/ 原件，
- * 元数据经 saveJson 原子落盘；两步都成功才算删净，目录已不存在视为已删。
+ * 只允许清理该任务自己拥有的目录；清理失败保留记录，允许用户重试。
+ * 不删除外部 PDF、共享素材或名单的累计打印状态。
  */
 function deleteJob(jobId) {
   const jobs = listJobs()
@@ -413,30 +425,45 @@ function deleteJob(jobId) {
   // 只清首条目录会让另一条变成无元数据的孤儿快照，永久占盘
   const matched = jobs.filter((j) => j.id === String(jobId))
   if (!matched.length) throw new Error(`打印记录已不存在（可能已被删除）`)
-  let archiveRemoved = true
+  // 所有路径先验证，再开始删除；被篡改的 snapshot 不得指向其他任务/素材目录。
+  const dirs = new Set()
   for (const job of matched) {
     // 取消态没有归档快照（snapshot 为 null），仅删元数据即可
     if (!job.snapshot) continue
-    let jobDir
+    const parts = typeof job.snapshot === 'string' ? job.snapshot.split('/') : []
+    if (!/^job_[a-zA-Z0-9_-]+$/.test(String(job.id))
+      || parts.length !== 4 || parts[0] !== 'archive'
+      || !/^\d{4}-(0[1-9]|1[0-2])$/.test(parts[1])
+      || parts[2] !== job.id || parts[3] !== 'snapshot.html') {
+      throw new Error('归档路径异常，未删除记录；请检查该任务的快照路径')
+    }
+    const jobDir = resolveInsideDataDir(parts.slice(0, 3).join('/'))
+    // 中间目录的链接/junction 也不能绕过守卫到数据目录外或其他任务。
+    for (let i = 1; i <= 3; i++) {
+      const dir = resolveInsideDataDir(parts.slice(0, i).join('/'))
+      let stat
+      try { stat = fs.lstatSync(dir) } catch (err) { if (err.code === 'ENOENT') continue; throw err }
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('归档目录异常，未删除记录')
+    }
+    dirs.add(jobDir)
+  }
+  for (const jobDir of dirs) {
     try {
-      jobDir = resolveInsideDataDir(path.dirname(job.snapshot))
+      fs.rmSync(jobDir, { recursive: true, force: true })
+      if (fs.existsSync(jobDir)) throw new Error('目录仍存在')
     } catch (err) {
-      // 路径越界说明存储被改过：跳过清理但仍删元数据，不让删除整体失败
-      console.warn(`[print] 归档清理跳过（${err.message}）`)
-      continue
+      throw new Error(`归档清理失败，打印记录已保留，可重试：${err.message}`)
     }
-    if (fs.existsSync(jobDir)) {
-      try {
-        fs.rmSync(jobDir, { recursive: true, force: true })
-        archiveRemoved = archiveRemoved && !fs.existsSync(jobDir)
-      } catch (err) {
-        archiveRemoved = false
-        console.warn(`[print] 归档目录删除失败 ${jobDir}: ${err.message}`)
-      }
-    }
+    // 空月份目录没有归档内容，只在确实为空时移除。
+    try { fs.rmdirSync(path.dirname(jobDir)) } catch { /* 其他任务或文件仍在，保留 */ }
   }
   saveJson(JOBS_STORE, jobs.filter((j) => j.id !== String(jobId)))
-  return { ok: true, archiveRemoved }
+  // saveJson 默认保留上一版；删除后让恢复副本同步，防止损坏恢复时复活已删记录。
+  let backupUpdated = true
+  try {
+    fs.copyFileSync(path.join(DATA_DIR, `${JOBS_STORE}.json`), path.join(DATA_DIR, `${JOBS_STORE}.json.bak`))
+  } catch { backupUpdated = false }
+  return { ok: true, archiveRemoved: true, backupUpdated }
 }
 
 module.exports = {

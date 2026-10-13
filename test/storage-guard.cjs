@@ -102,9 +102,9 @@ console.log('== 3. 快照路径守卫 ==')
     createdAt: new Date().toISOString(), recordCount: 1, pageCount: 1,
     snapshot: '../victim-dir/snapshot.html', totalRows: 1,
   }])
-  printDomain.deleteJob('job_evil2')
+  throws(() => printDomain.deleteJob('job_evil2'), 'deleteJob 拒绝异常归档路径')
   ok(fs.existsSync(path.join(victimDir, 'x.txt')), 'deleteJob 未递归删除目录外目录')
-  ok(!printDomain.listJobs().some((j) => j.id === 'job_evil2'), '越界 job 的元数据仍被删除')
+  ok(printDomain.listJobs().some((j) => j.id === 'job_evil2'), '异常路径保留记录供检查，不假报清理成功')
 }
 
 console.log('== 4. JSON 损坏 / null 兜底 ==')

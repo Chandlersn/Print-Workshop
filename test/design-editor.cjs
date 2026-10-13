@@ -3,7 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const { rmDeep } = require('./helpers/rm.cjs')
-const { normalizeDesign, renderDesign, LIMITS } = require('../electron/design-layout.cjs')
+const { normalizeDesign, renderDesign, LIMITS, SCHEMA_VERSIONS } = require('../electron/design-layout.cjs')
 const edit = require('../electron/design-editor.cjs')
 const tmp = fs.mkdtempSync(path.join(__dirname, '.tmp-design-editor-'))
 process.env.PRINTPRESS_DATA_DIR = tmp
@@ -26,7 +26,8 @@ try {
     assert.equal(groupedDoc.schemaVersion, 2)
     assert.equal(edit.ungroupSelection(groupedDoc, ['b']).schemaVersion, 2)
     assert.equal(normalizeDesign({ ...legacy, guides: [{ id: 'vertical', axis: 'x', position: 20 }] }).schemaVersion, 2)
-    assert.throws(() => normalizeDesign({ ...legacy, schemaVersion: 6 }), /版本/)
+    // 取「已支持的最大版本 + 1」，别写死数字——写死会在下次抬版本时变成假失败。
+    assert.throws(() => normalizeDesign({ ...legacy, schemaVersion: Math.max(...SCHEMA_VERSIONS) + 1 }), /版本/)
   })
   check('版本号取各特性最大值，已是高版本时不被分组倒标成旧格式', () => {
     const legacy = document()

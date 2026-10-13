@@ -27,6 +27,33 @@ function jpegSize(buf) {
 }
 
 /**
+ * WebP：RIFF 容器，尺寸藏在第一个 chunk 里，三种编码各不相同。
+ * - `VP8X`（扩展）：画布宽高各占 3 字节小端，存的是「实际值 - 1」
+ * - `VP8 `（有损）：帧头 3 字节 tag + 3 字节起始码，之后宽高各 2 字节小端（低 14 位）
+ * - `VP8L`（无损）：1 字节签名后 4 字节里塞了 14 位宽 + 14 位高，同样存「实际值 - 1」
+ */
+function webpSize(buf) {
+  // RIFF 头 12 字节 + chunk 头 8 字节 = 20；各编码还要再多读几个字节，逐个下面再判。
+  if (buf.length < 20) return null
+  if (buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WEBP') return null
+  const chunk = buf.toString('latin1', 12, 16)
+  if (chunk === 'VP8X') {
+    if (buf.length < 30) return null
+    return { width: buf.readUIntLE(24, 3) + 1, height: buf.readUIntLE(27, 3) + 1 }
+  }
+  if (chunk === 'VP8 ') {
+    if (buf.length < 30 || buf[23] !== 0x9d || buf[24] !== 0x01 || buf[25] !== 0x2a) return null
+    return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff }
+  }
+  if (chunk === 'VP8L') {
+    if (buf.length < 25 || buf[20] !== 0x2f) return null
+    const bits = buf.readUInt32LE(21)
+    return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
+  }
+  return null
+}
+
+/**
  * 按内容嗅探图片类型——**不信任调用方给的文件名 / 扩展名**。
  *
  * 拖拽与剪贴板粘贴场景下，前端传来的文件名完全不可信（可以随手把别的东西改名成 .png）。
@@ -39,13 +66,20 @@ function sniffImageExt(buf) {
   return null
 }
 
-/** 从内存字节读图片尺寸：拖拽 / 剪贴板粘贴时用，不需要先落盘 */
+/**
+ * 从内存字节读图片尺寸：拖拽 / 剪贴板粘贴时用，不需要先落盘。
+ *
+ * WebP 也在这里解——但**上传入口仍然只收 PNG / JPEG**（见 `sniffImageExt`）。
+ * 加 WebP 解析是为了验出图（design-export 的 WebP 导出要核对真实像素），
+ * 不是放开素材导入；素材格式要扩，得连着看缩略图、打印解码与体积预算一起改。
+ */
 function imageSizeFromBuffer(buf) {
-  return pngSize(buf) || jpegSize(buf)
+  return pngSize(buf) || jpegSize(buf) || webpSize(buf)
 }
 
 function imageSize(filePath, fs) {
   return imageSizeFromBuffer(fs.readFileSync(filePath))
 }
 
-module.exports = { pngSize, jpegSize, sniffImageExt, imageSizeFromBuffer, imageSize }
+module.exports = { pngSize, jpegSize, webpSize, sniffImageExt, imageSizeFromBuffer, imageSize }
+

@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict')
-const { normalizeDesign, renderDesign, linearEndpoints, shadowRegion } = require('../electron/design-layout.cjs')
+const { normalizeDesign, renderDesign, linearEndpoints, shadowRegion, SCHEMA_VERSIONS } = require('../electron/design-layout.cjs')
 
 const base = { schemaVersion: 1, name: 'gradient test', artboard: { w: 210, h: 148 }, assets: {}, layers: [] }
 const paint = { type: 'linear', angle: 0, stops: [{ offset: 1, color: '#000000', opacity: 0.5 }, { offset: 0, color: '#ffffff', opacity: 1 }] }
@@ -17,7 +17,8 @@ assert.ok(first.html.includes('stop-opacity="0.5"'))
 assert.notEqual(first.html.match(/id="(pp_effect_[^"]+)"/)[1], second.html.match(/id="(pp_effect_[^"]+)"/)[1])
 assert.throws(() => normalizeDesign({ ...base, artboard: { ...base.artboard, backgroundPaint: { ...paint, stops: [{ offset: 0.2, color: '#fff' }, { offset: 1, color: '#000' }] } } }), /首尾/)
 assert.throws(() => normalizeDesign({ ...base, layers: [{ id: 'line', type: 'line', fillPaint: paint }] }), /仅支持/)
-assert.throws(() => normalizeDesign({ ...base, schemaVersion: 6 }), /版本/)
+// 取「已支持的最大版本 + 1」探测更高版本被拒，别写死数字（写死会随抬版本变假失败）。
+assert.throws(() => normalizeDesign({ ...base, schemaVersion: Math.max(...SCHEMA_VERSIONS) + 1 }), /版本/)
 const shadow = { dxMm: -3, dyMm: 4, blurMm: 2, color: '#112233', opacity: 0.35 }
 const withShadow = normalizeDesign({ ...base, layers: [{ id: 'shadow-box', type: 'rect', x: 5, y: 5, w: 30, h: 12, fillPaint: paint, shadow }] })
 assert.equal(withShadow.schemaVersion, 4)
