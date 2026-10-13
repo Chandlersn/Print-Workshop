@@ -56,6 +56,21 @@ function persistAll(list) {
   saveJson(STORE_NAME, list)
 }
 
+/** Mark the requested template ids as built-in, including rows misclassified by an earlier release. */
+function markLegacyBuiltinTemplates(ids) {
+  const targets = new Set((Array.isArray(ids) ? ids : []).map(String))
+  if (!targets.size) return 0
+  const list = loadAll()
+  let changed = 0
+  for (const template of list) {
+    if (!targets.has(template.id) || template.origin === 'builtin') continue
+    template.origin = 'builtin'
+    changed += 1
+  }
+  if (changed) persistAll(list)
+  return changed
+}
+
 function listTemplates() {
   const dsList = dataset.listDatasets()
   return loadAll().map((t) => {
@@ -68,6 +83,7 @@ function listTemplates() {
     return {
       id: t.id,
       name: t.name,
+      origin: t.origin === 'builtin' ? 'builtin' : 'user',
       pageSize: t.pageSize,
       fieldCount: (t.fields || []).length,
       photoCount,
@@ -142,7 +158,7 @@ function removeBgFile(bgPath) {
   }
 }
 
-function saveTemplate(template) {
+function saveTemplate(template, options = {}) {
   if (!template || typeof template !== 'object') throw new Error('模板数据为空')
   if (!template.name || !String(template.name).trim()) throw new Error('模板名称不能为空')
   // 延迟加载避免 render-engine 引用本文件纸张常量时产生循环初始化。
@@ -169,9 +185,15 @@ function saveTemplate(template) {
   if (template.id) {
     const idx = list.findIndex((x) => x.id === template.id)
     if (idx === -1) throw new Error(`所选模板已不存在（可能已被删除），请刷新后重试`)
+    if (list[idx].origin === 'builtin') {
+      throw new Error('系统内置模板不能覆盖，请另存为常用模板')
+    }
+    template.origin = 'user'
     template.updatedAt = now
     list[idx] = template
   } else {
+    // Only the seed process may create built-ins. Renderer IPC always uses the default.
+    template.origin = options?.systemSeed === true && template.origin === 'builtin' ? 'builtin' : 'user'
     template.id = `tpl_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`
     template.createdAt = now
     template.updatedAt = now
@@ -193,17 +215,23 @@ function saveTemplate(template) {
  * 万一用户换完图没保存就走了，记录里会留下一条指向已删文件的引用，
  * 前端加载失败时会自动清掉（见 TemplateView 的 onBgError）。
  */
-function discardBackground(bgPathOrId) {
+function discardBackground(bgPathOrId, options = {}) {
   const ref = String(bgPathOrId || '')
   if (/^asset_[a-f0-9]{64}$/.test(ref)) {
-    return require('./asset-library.cjs').discardIfEphemeral(ref)
+    return require('./asset-library.cjs').discardIfEphemeral(ref, options)
   }
-  // legacy：旧数据里 template.background 仍是 print-bg/ 路径 → 直接删副本
+  // legacy：旧数据里 template.background 仍是 print-bg/ 路径；保留其他模板仍在用的原图。
+  const stillReferenced = loadAll().some((template) =>
+    template.background === ref && template.id !== options.exceptTemplateId)
+  if (stillReferenced) return { removed: false }
   return { removed: removeBgFile(ref) }
 }
 
 function deleteTemplate(id) {
   const t = getTemplate(id)
+  if (t.origin === 'builtin') {
+    throw new Error('系统内置模板不可删除；如需定制，请先另存为常用模板')
+  }
   const rest = loadAll().filter((x) => x.id !== id)
   persistAll(rest)
   // 连带清理底图：assetId 走分流（仍被引用则保留），旧 print-bg 路径按原逻辑（其他模板引用则保留）
@@ -218,18 +246,20 @@ function deleteTemplate(id) {
 }
 
 /** 所有模板引用的背景原件标识（assetId）；供素材库引用扫描，避免清理误删在用模板底图。 */
-function listBackgroundAssetIds() {
+function listBackgroundAssetIds(options = {}) {
   const ids = []
   for (const t of loadAll()) {
+    if (options.exceptTemplateId && t?.id === options.exceptTemplateId) continue
     if (t && typeof t.background === 'string' && /^asset_[a-f0-9]{64}$/.test(t.background)) ids.push(t.background)
   }
   return ids
 }
 
 /** Asset references captured by templates, including a pinned historical design revision. */
-function listReferencedAssetIds() {
-  const ids = new Set(listBackgroundAssetIds())
+function listReferencedAssetIds(options = {}) {
+  const ids = new Set(listBackgroundAssetIds(options))
   for (const template of loadAll()) {
+    if (options.exceptTemplateId && template?.id === options.exceptTemplateId) continue
     const ref = template?.backgroundDesign
     if (ref === undefined || ref === null) continue
     if (typeof ref.id !== 'string' || !Number.isSafeInteger(ref.revision) || ref.revision < 1) {
@@ -411,6 +441,10 @@ function matchDataset(templateId, datasetId) {
 
 /** 换绑数据集：必须先通过字段匹配校验，通过后更新绑定并持久化 */
 function rebindDataset(templateId, datasetId) {
+  const existing = getTemplate(String(templateId))
+  if (existing.origin === 'builtin') {
+    throw new Error('系统内置模板不可修改；如需更换数据集，请先另存为常用模板')
+  }
   const m = matchDataset(templateId, datasetId)
   if (!m.ok) {
     const err = new Error(
@@ -444,4 +478,5 @@ module.exports = {
   listBackgroundAssetIds,
   listReferencedAssetIds,
   migrateBackgrounds,
+  markLegacyBuiltinTemplates,
 }

@@ -36,6 +36,18 @@ function ok(cond, label, extra) {
 const tplSrc = fs.readFileSync(path.join(ROOT, TPL), 'utf-8')
 const engineSrc = fs.readFileSync(path.join(ROOT, ENGINE), 'utf-8')
 
+console.log('== 0. 新字段固定左端，文字长度增加时只向右延伸 ==')
+{
+  const addField = tplSrc.match(/function addField\(key\)\s*\{[\s\S]*?\n\}/)
+  ok(addField !== null, '找到新增字段逻辑')
+  ok(/align:\s*'left'/.test(addField[0]), '新字段默认左对齐')
+  const fieldStyle = tplSrc.match(/function fieldStyle\(f\)\s*\{[\s\S]*?\n\}/)
+  ok(fieldStyle && /textAlign:\s*f\.align === 'center' \|\| f\.align === 'right' \? f\.align : 'left'/.test(fieldStyle[0]),
+    '画布缺省或无效对齐值也固定左端')
+  ok(/const rawAlign = f\.align \|\| 'left'/.test(engineSrc), '导出时缺省对齐方式为左对齐')
+  ok(/\? rawAlign : 'left'/.test(engineSrc), '导出时无效对齐值回退为左对齐')
+}
+
 /**
  * 取出某个选择器的规则体（取第一个匹配的块）。
  * 两种来源都要能吃：

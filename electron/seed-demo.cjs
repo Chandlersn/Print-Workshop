@@ -125,6 +125,17 @@ function templateNames() {
   return new Set(templates.listTemplates().map((t) => t.name))
 }
 
+/** Mark templates from earlier releases, which predate the stored origin field. */
+function markLegacyBuiltinTemplates() {
+  const names = new Set([...TPL_DOC_DEFS, ...TPL_GRID_DEFS].map((def) => def.name))
+  const ids = templates.listTemplates()
+    // 模板仍是系统内置项，即使用户给绑定的数据集改了名字，或旧版曾误写为 user。
+    // 这七个名称是随应用发布的固定种子名；不要依赖可编辑的数据集名称判断来源。
+    .filter((template) => names.has(template.name))
+    .map((template) => template.id)
+  return templates.markLegacyBuiltinTemplates(ids)
+}
+
 /**
  * 激活 7 套模板用到的列（打印开关）。
  *
@@ -182,13 +193,14 @@ function saveTemplates(defs, dsId) {
     if (existing.has(def.name)) continue
     templates.saveTemplate({
       name: def.name,
+      origin: 'builtin',
       pageSize: def.pageSize,
       background: def.bg,
       bgSize: def.bgSize,
       layout: def.layout,
       datasetId: dsId,
       fields: def.fields.map((f) => ({ ...f })),
-    })
+    }, { systemSeed: true })
     created += 1
   }
   return created
@@ -204,9 +216,13 @@ function saveTemplates(defs, dsId) {
 function seedIfFirstRun(seedDir) {
   const settings = loadJson('settings') || {}
   const ver = Number(settings.seedVersion) || (settings.demoSeeded ? 1 : 0)
-  if (ver >= SEED_VERSION) return { seeded: false, reason: 'already' }
+  if (ver >= SEED_VERSION) {
+    try { markLegacyBuiltinTemplates() } catch { /* Retry the metadata migration on next launch. */ }
+    return { seeded: false, reason: 'already' }
+  }
 
   try {
+    markLegacyBuiltinTemplates()
     if (ver === 0) {
       // 1. 复制示例底图
       const srcBg = path.join(seedDir, 'print-bg')

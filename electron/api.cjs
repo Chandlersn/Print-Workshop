@@ -640,8 +640,9 @@ const OPS = {
     params: {
       assetId: { required: false, desc: '要丢弃的底图原件标识（asset_<sha256>）' },
       path: { required: false, desc: '兼容旧数据：print-bg/ 路径副本' },
+      exceptTemplateId: { required: false, desc: '正在编辑且已在内存中移除该底图的模板 id' },
     },
-    run: (p) => templates.discardBackground(p.assetId || p.path),
+    run: (p) => templates.discardBackground(p.assetId || p.path, { exceptTemplateId: p.exceptTemplateId }),
   },
 
   // ==================== 可编辑底图 ====================
@@ -971,7 +972,7 @@ const OPS = {
     },
     run: (p, ctx) => {
       const asset = designs.importImageBytes({ name: p.name, base64: p.base64 })
-      return assetLibrary.upsert(asset, { displayName: p.displayName, tags: p.tags, favorite: p.favorite }, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail })
+      return assetLibrary.adopt(asset.id, { displayName: p.displayName, tags: p.tags, favorite: p.favorite }, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail })
     },
   },
 
@@ -990,7 +991,7 @@ const OPS = {
       const imported = []
       for (const filePath of result.filePaths) {
         const asset = designs.importImageFile(filePath)
-        imported.push(assetLibrary.upsert(asset, {}, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }))
+        imported.push(assetLibrary.adopt(asset.id, {}, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }))
       }
       return { canceled: false, imported }
     },

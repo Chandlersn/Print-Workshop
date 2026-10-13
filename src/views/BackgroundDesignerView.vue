@@ -1368,15 +1368,15 @@ watch(sizePreset, (value) => {
   applySizePreset(value)
 })
 function toggleLayer(layer, key) { commit((doc) => { const target = doc.layers.find((item) => item.id === layer.id); target[key] = !target[key] }) }
-function removeSelected() {
+async function removeSelected() {
   if (!editable.value.length) return
   // 删图层会把「没加入素材库的临时件原图」（粘贴 / 拖入 / 「＋ 图片」对话框加入）一并清理，
   // 且不可恢复。这里**刻意不弹确认框**——2026-10-11 用户明确要求删图时别打断操作。
   // 清理结果由顶部提示条告知（见 discardOrphanedEphemeral 里设置的 message），
   // 已加入素材库（managed）的图不受影响。
-  applyRemoveSelected()
+  await applyRemoveSelected()
 }
-function applyRemoveSelected() {
+async function applyRemoveSelected() {
   let result
   let orphanedIds = []
   if (commit(doc => {
@@ -1390,7 +1390,7 @@ function applyRemoveSelected() {
     for (const id of orphanedIds) delete doc.assets[id]
   })) {
     selectedIds.value = result.selectedIds
-    if (orphanedIds.length) discardOrphanedEphemeral(orphanedIds)
+    if (orphanedIds.length) await discardOrphanedEphemeral(orphanedIds)
   }
 }
 
@@ -1410,20 +1410,28 @@ async function discardOrphanedEphemeral(ids) {
   const serialized = JSON.stringify(design.value)
   const safeIds = ids.filter((id) => !serialized.includes(id))
   const removedIds = []
+  let failed = false
   for (const id of safeIds) {
     try {
       const res = await window.printpress.discardEphemeralAsset(id, design.value.id || undefined)
       if (res && res.removed) removedIds.push(id)
-    } catch { /* 单个失败不阻塞界面：原件留在磁盘，后续 I-32 孤儿清理兜底 */ }
+    } catch { failed = true }
   }
-  if (!removedIds.length) return
+  if (!removedIds.length) {
+    message.value = failed
+      ? '图层已删除，但原图清理失败；请稍后检查未引用原件。'
+      : '图层已删除；原图仍被其他工程引用或已加入素材库，因此保留。'
+    return
+  }
   const stale = (snapshot) => {
     const s = JSON.stringify(snapshot)
     return removedIds.some((id) => s.includes(id))
   }
   history.value = history.value.filter((snapshot) => !stale(snapshot))
   future.value = future.value.filter((snapshot) => !stale(snapshot))
-  message.value = '已删除所选图层，未加入素材库的原图已同步清理（原图不可恢复，此步不可撤销）'
+  message.value = failed
+    ? '已清理未加入素材库的原图，但部分原图清理失败；请稍后检查未引用原件。'
+    : '已删除所选图层，未加入素材库的原图已同步清理（原图不可恢复，此步不可撤销）'
 }
 function duplicate() {
   if (!selected.value.length) return

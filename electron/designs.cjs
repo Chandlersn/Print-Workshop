@@ -187,6 +187,23 @@ function readAsset(id, claimedPath) {
 function assetInfo(id) {
   return readAsset(assetIdOfExport(id)).asset
 }
+/**
+ * Read only an asset's lifecycle marker without loading or hashing the image bytes.
+ * `null` means the metadata is missing, malformed, or predates the source field;
+ * callers must then use their own conservative fallback.
+ */
+function assetSource(id) {
+  const assetId = assetIdOfExport(id)
+  const hash = ASSET_ID.exec(assetId)[1]
+  try {
+    const metadata = JSON.parse(fs.readFileSync(guardedFile(`design-assets/${hash}.json`, 'design-assets'), 'utf8'))
+    if (!metadata || metadata.id !== assetId || !Object.prototype.hasOwnProperty.call(metadata, 'source')) return null
+    return normalizeSource(metadata.source)
+  } catch (err) {
+    if (err && err.code === 'PATH_ESCAPED') throw err
+    return null
+  }
+}
 function assetBytes(id) {
   const assetId = assetIdOfExport(id)
   const { asset } = readAsset(assetId)
@@ -577,4 +594,4 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetBytes, setAssetSource, withDesignLock: withLock, publishRevisionLocked }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetSource, assetBytes, setAssetSource, withDesignLock: withLock, publishRevisionLocked }

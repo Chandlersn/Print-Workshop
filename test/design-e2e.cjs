@@ -11,6 +11,7 @@ const DATA = fs.mkdtempSync(path.join(__dirname, '.tmp-design-e2e-'))
 const OUTPUT = path.join(ROOT, '.workbuddy-ai', 'tmp', 'design-acceptance')
 fs.mkdirSync(OUTPUT, { recursive: true })
 process.env.PRINTPRESS_DATA_DIR = DATA
+const assetLibrary = require('../electron/asset-library.cjs')
 app.setPath('userData', path.join(DATA, 'userData'))
 app.disableHardwareAcceleration()
 app.commandLine.appendSwitch('disable-gpu')
@@ -370,6 +371,7 @@ async function main() {
   const pastedDesign = await evaluate(draftDesign)
   const pastedLayer = pastedDesign.layers[pastedDesign.layers.length - 1]
   ok(pastedLayer.type === 'image' && pastedLayer.name === '粘贴截图.jpg', '粘贴截图落成图片图层并沿用文件名')
+  ok(!assetLibrary.listLibrary({}).items.some(item => item.assetId === pastedLayer.assetId), '刚粘贴的临时素材不进入素材库列表')
   ok(fs.readFileSync(path.join(DATA, pastedDesign.assets[pastedLayer.assetId].path)).equals(pasteJpeg), '粘贴的图片字节原样落盘，不受前端文件名影响')
 
   const dropJpeg = nativeImage.createFromBuffer(jpeg).resize({ width: 96 }).toJPEG(75)
@@ -423,6 +425,35 @@ async function main() {
     await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 2 - i}`, `撤销第 ${i + 1} 次导入`)
   }
   ok(true, '撤销可完整回退粘贴与拖入产生的图层')
+
+  // Pasting an ephemeral image and deleting its only layer must synchronously reclaim the source file.
+  const cleanupJpeg = nativeImage.createFromBuffer(jpeg).resize({ width: 121 }).toJPEG(79)
+  const cleanupBytes = JSON.stringify(cleanupJpeg.toString('base64'))
+  await evaluate(`(() => {
+    const make = ${bytesToFile}
+    const dt = new DataTransfer()
+    dt.items.add(make(${cleanupBytes}, 'delete-after-paste.jpg', 'image/jpeg'))
+    document.querySelector('.canvas-scroll').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+  })()`)
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 1}`, 'paste image for delete cleanup regression')
+  await waitFor(`(${draftDesign})?.layers.length===${layersBeforePaste + 1}`, 'cleanup image persisted in draft')
+  const cleanupDoc = await evaluate(draftDesign)
+  const cleanupLayer = cleanupDoc.layers[cleanupDoc.layers.length - 1]
+  const cleanupPath = path.join(DATA, cleanupDoc.assets[cleanupLayer.assetId].path)
+  const cleanupMetaPath = path.join(DATA, 'design-assets', `${cleanupLayer.assetId.slice('asset_'.length)}.json`)
+  const libraryIndexPath = path.join(DATA, 'asset-library.json')
+  const libraryRows = fs.existsSync(libraryIndexPath) ? JSON.parse(fs.readFileSync(libraryIndexPath, 'utf8')) : []
+  libraryRows.push({ assetId: cleanupLayer.assetId, displayName: '旧版临时素材', tags: [], favorite: false })
+  fs.writeFileSync(libraryIndexPath, JSON.stringify(libraryRows, null, 2))
+  ok(!assetLibrary.listLibrary({}).items.some(item => item.assetId === cleanupLayer.assetId), '旧版缺少 source 的临时索引不会让粘贴素材出现在素材库')
+  ok(fs.existsSync(cleanupPath) && fs.existsSync(cleanupMetaPath), 'pasted original and ephemeral metadata exist before deleting its layer')
+  await click(`[data-layer-id="${cleanupLayer.id}"]`)
+  ui.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Delete' })
+  ui.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Delete' })
+  await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste}`, 'delete pasted image layer')
+  await waitNode(() => !fs.existsSync(cleanupPath) && !fs.existsSync(cleanupMetaPath), 'delete layer removes original and metadata from data directory')
+  ok(!fs.existsSync(cleanupPath) && !fs.existsSync(cleanupMetaPath), 'deleting the only pasted layer removes its original and metadata from design-assets')
+  ok(!JSON.parse(fs.readFileSync(libraryIndexPath, 'utf8')).some(item => item.assetId === cleanupLayer.assetId), '删除后同步清除旧版素材库索引记录')
 
   // Exercise the real dialog IPC/importer; only the OS file picker result is substituted.
   const originalDialog = dialog.showOpenDialog

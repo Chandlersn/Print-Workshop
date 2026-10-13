@@ -146,6 +146,50 @@ check('listLibrary 只展示 managed（过滤 source ephemeral）', () => {
   assert.ok(ids.includes(assetL.id), 'managed 来源应出现在列表')
 })
 
+// Old builds left temporary items in asset-library.json, sometimes without a
+// source field. The original metadata must win so those rows neither show nor
+// count as durable references that block immediate cleanup.
+check('旧素材库索引中的临时件（缺 source 或误标 managed）会被隐藏并释放', () => {
+  const writeStaleEntry = (assetId, source) => {
+    const file = path.join(tmp, 'asset-library.json')
+    const rows = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : []
+    const entry = { assetId, displayName: '旧版临时图', tags: ['旧临时标签'], favorite: false, archivedAt: null, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }
+    if (source !== undefined) entry.source = source
+    fs.writeFileSync(file, JSON.stringify(rows.filter(row => row.assetId !== assetId).concat(entry), null, 2))
+  }
+  const missingSource = designs.importImageBytes({ name: 'legacy-no-source.png', base64: makePng(8, 8, [31, 81, 131]).toString('base64'), source: 'ephemeral' })
+  writeStaleEntry(missingSource.id)
+  assert.ok(!library.referencedAssetIds().has(missingSource.id), '缺少 source 的旧索引不能阻止临时原件回收')
+  assert.ok(!library.listLibrary({}).items.some(row => row.assetId === missingSource.id), '原件元数据标记 ephemeral 时不显示旧索引行')
+  assert.ok(!library.listTags().some(tag => tag.tag === '旧临时标签'), '临时旧索引的标签也不会残留在筛选器')
+  assert.throws(() => library.getEntry(missingSource.id), /素材库里没有/, '临时旧索引不会被界面当作已入库素材')
+  assert.equal(library.discardIfEphemeral(missingSource.id).removed, true, '旧索引不再阻止粘贴图即时删除')
+  assert.ok(!existsAny(shaOf(missingSource.id)), '缺少 source 的旧索引对应原件已删除')
+
+  const wrongSource = designs.importImageBytes({ name: 'legacy-managed-label.png', base64: makePng(8, 8, [32, 82, 132]).toString('base64'), source: 'ephemeral' })
+  writeStaleEntry(wrongSource.id, 'managed')
+  assert.ok(!library.referencedAssetIds().has(wrongSource.id), '错误标为 managed 的旧索引也不能覆盖原件的 ephemeral 标记')
+  assert.ok(!library.listLibrary({}).items.some(row => row.assetId === wrongSource.id), '原件 metadata 优先于冲突的旧索引 source')
+  assert.equal(library.discardIfEphemeral(wrongSource.id).removed, true, '错误标记同样不妨碍即时删除')
+  assert.ok(!existsAny(shaOf(wrongSource.id)), '错误标记对应的临时原件已删除')
+})
+
+check('索引与原件元数据短暂不同步时，不缓存缺失的 source 判断', () => {
+  const bytes = makePng(8, 8, [73, 83, 93])
+  const asset = designs.importImageBytes({ name: 'metadata-refresh.png', base64: bytes.toString('base64'), source: 'ephemeral' })
+  const metadataPath = path.join(assetsDir, `${shaOf(asset.id)}.json`)
+  const metadata = fs.readFileSync(metadataPath, 'utf8')
+  const file = path.join(tmp, 'asset-library.json')
+  const rows = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : []
+  rows.push({ assetId: asset.id, displayName: '旧索引', tags: [], favorite: false })
+  fs.writeFileSync(file, JSON.stringify(rows, null, 2))
+  fs.unlinkSync(metadataPath)
+  assert.ok(library.listLibrary({}).items.some(row => row.assetId === asset.id), '元数据缺失时按旧索引的安全默认暂留')
+  fs.writeFileSync(metadataPath, metadata)
+  assert.ok(!library.listLibrary({}).items.some(row => row.assetId === asset.id), '元数据恢复后立刻按 ephemeral 分流，不受旧缓存影响')
+  assert.equal(library.discardIfEphemeral(asset.id).removed, true, '元数据恢复后临时原件可即时删除')
+})
+
 // 7. discardBackground 路由到 discardIfEphemeral（不再直接 fs.unlink 路径）——用独立生成图，避免共享 fixture 去重污染
 check('discardBackground 对 assetId 走素材库分流（不直接删路径副本）', () => {
   const pngE = makePng(8, 8, [0, 128, 64])
@@ -183,6 +227,10 @@ check('design:importBytes 通道强制 source=ephemeral；领域层缺省 manage
   const pngC2 = makePng(8, 8, [3, 2, 1])
   const direct = designs.importImageBytes({ name: 'direct.png', base64: pngC2.toString('base64') })
   assert.equal(designs.assetInfo(direct.id).source, 'managed', '领域层缺省 managed：漏传的后果只能是「不删」，不能是「误删」')
+  const pasted = designs.importImageBytes({ name: 'pasted-before-library.png', base64: makePng(8, 8, [6, 5, 4]).toString('base64'), source: 'ephemeral' })
+  api.call('asset:importBytes', { name: 'saved-to-library.png', base64: makePng(8, 8, [6, 5, 4]).toString('base64') }, { allowWrite: true })
+  assert.equal(designs.assetInfo(pasted.id).source, 'managed', '用户明确从素材库导入同一张临时图时会升级为 managed')
+  assert.ok(library.listLibrary({}).items.some(item => item.assetId === pasted.id), '用户明确保存到素材库的图仍会显示')
 })
 
 // 10. 工程文档引用保护 + exceptDesignId（正在编辑未保存的工程，磁盘是旧版，内存态才是权威）
@@ -233,4 +281,24 @@ check('旧值兼容：磁盘上 template/library 被归一为 ephemeral/managed'
 })
 
 console.log(`\n通过 ${passed} 项（I-33 模板底图并入素材库）`)
+{
+  const image = makePng(9, 7, [47, 119, 203])
+  const uploaded = templates.uploadBackgroundBytes(image, 'template-current.png')
+  const libraryIndexPath = path.join(tmp, 'asset-library.json')
+  const currentRows = fs.existsSync(libraryIndexPath) ? JSON.parse(fs.readFileSync(libraryIndexPath, 'utf8')) : []
+  currentRows.push({ assetId: uploaded.background, displayName: '旧版临时模板底图', tags: [], favorite: false })
+  fs.writeFileSync(libraryIndexPath, JSON.stringify(currentRows, null, 2))
+  const template = templates.saveTemplate({
+    name: 'current-template-cleanup', pageSize: { id: 'a4-portrait', w: 210, h: 297 },
+    fields: [], datasetId: ds.id, background: uploaded.background,
+  })
+  const hash = shaOf(uploaded.background)
+  assert.ok(!library.listLibrary({}).items.some(row => row.assetId === uploaded.background), '模板粘贴底图不会因旧索引行显示在素材库')
+  assert.equal(templates.discardBackground(uploaded.background).removed, false)
+  assert.ok(existsAny(hash), 'a saved template reference must retain its background')
+  assert.ok(!JSON.parse(fs.readFileSync(libraryIndexPath, 'utf8')).some(row => row.assetId === uploaded.background), '已引用的临时模板底图会从素材库索引中移除')
+  assert.equal(templates.discardBackground(uploaded.background, { exceptTemplateId: template.id }).removed, true)
+  assert.ok(!existsAny(hash), 'removing the background from the active template must reclaim the original')
+  console.log('  ok - deleting the active template background ignores its stale saved reference')
+}
 rmDeep(tmp)

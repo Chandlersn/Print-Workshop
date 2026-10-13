@@ -122,8 +122,9 @@ function safeColor(v) {
 function fieldStyle(f) {
   const x = clampNum(f.x, 0, 100, 0)
   const y = clampNum(f.y, 0, 100, 0)
-  const rawAlign = f.align || 'center'
-  const align = ['left', 'center', 'right'].includes(rawAlign) ? rawAlign : 'center'
+  // 与模板画布一致：没有保存对齐值时固定文字左端，避免长度变化带动起点漂移。
+  const rawAlign = f.align || 'left'
+  const align = ['left', 'center', 'right'].includes(rawAlign) ? rawAlign : 'left'
   const parts = [`left:${x}%;`, `top:${y}%;`]
   if (align === 'center') parts.push('transform:translateX(-50%);')
   else if (align === 'right') parts.push('transform:translateX(-100%);')

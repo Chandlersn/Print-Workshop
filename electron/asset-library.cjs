@@ -41,6 +41,20 @@ function index() {
 function persist(all) {
   saveJson('asset-library', all)
 }
+function effectiveSource(entry) {
+  const id = entry && entry.assetId
+  if (typeof id !== 'string' || !ASSET_ID.test(id)) return normalizeSource(entry && entry.source)
+  const originalSource = designs.assetSource(id)
+  // The immutable original metadata is authoritative when it has an explicit
+  // lifecycle marker. Older metadata falls back to the index; missing values
+  // remain managed for backwards-compatible, fail-safe retention.
+  return originalSource || normalizeSource(entry.source)
+}
+function pruneEphemeralEntries(entries = index()) {
+  const managed = entries.filter(entry => effectiveSource(entry) !== 'ephemeral')
+  if (managed.length !== entries.length) persist(managed)
+  return managed
+}
 function assetIdOf(id) {
   if (typeof id !== 'string' || !ASSET_ID.test(id)) throw new Error('素材标识无效')
   return id
@@ -165,12 +179,11 @@ function listLibrary(opts = {}) {
   const page = Math.max(1, Number.parseInt(opts.page, 10) || 1)
   const pageSize = Math.min(LIMITS.pageSize, Math.max(1, Number.parseInt(opts.pageSize, 10) || LIMITS.defaultPageSize))
 
-  const matched = index().filter((entry) => {
+  const matched = pruneEphemeralEntries().filter((entry) => {
     if (!includeArchived && entry.archivedAt) return false
     // 分流切口：list 只展示「受管理」原件（normalizeSource !== 'ephemeral'）。
     // 模板页上传 / 底图制作页直接加图的底图虽也存进 design-assets/ 池子、受引用扫描保护，
     // 但不进素材库列表（用户明确：列表只来源于受管理件）。
-    if (normalizeSource(entry.source) === 'ephemeral') return false
     if (favoriteOnly && !entry.favorite) return false
     if (tags.length && !tags.every((tag) => (entry.tags || []).some((t) => t.toLowerCase() === tag))) return false
     if (!query) return true
@@ -202,14 +215,14 @@ function listLibrary(opts = {}) {
 
 function getEntry(assetId) {
   const id = assetIdOf(assetId)
-  const found = index().find((entry) => entry.assetId === id)
+  const found = pruneEphemeralEntries().find((entry) => entry.assetId === id)
   if (!found) throw new Error('素材库里没有这个素材')
   return found
 }
 
 function snapshotImportEntry(assetId) {
   const id = assetIdOf(assetId)
-  return index().find(entry => entry.assetId === id) || null
+  return pruneEphemeralEntries().find(entry => entry.assetId === id) || null
 }
 function restoreImportEntry(assetId, previous, removeOriginal = true) {
   const id = assetIdOf(assetId)
@@ -223,7 +236,7 @@ function restoreImportEntry(assetId, previous, removeOriginal = true) {
 /** 全部标签（供筛选器用），按使用次数倒序。 */
 function listTags() {
   const counts = new Map()
-  for (const entry of index()) {
+  for (const entry of pruneEphemeralEntries()) {
     if (entry.archivedAt) continue
     for (const tag of entry.tags || []) counts.set(tag, (counts.get(tag) || 0) + 1)
   }
@@ -241,7 +254,7 @@ function listTags() {
  */
 function upsert(asset, metadata = {}, options = {}) {
   const id = assetIdOf(asset && asset.id)
-  const all = index()
+  const all = pruneEphemeralEntries()
   const now = new Date().toISOString()
   const existing = all.find((entry) => entry.assetId === id)
   const entry = {
@@ -280,7 +293,7 @@ function adopt(assetId, metadata = {}, options = {}) {
 /** 改展示信息：只动 displayName / tags / favorite 三项，其余字段调用方说了不算。 */
 function updateMetadata(assetId, patch = {}, options = {}) {
   const id = assetIdOf(assetId)
-  const all = index()
+  const all = pruneEphemeralEntries()
   const found = all.find((entry) => entry.assetId === id)
   if (!found) throw new Error('素材库里没有这个素材')
   const entry = {
@@ -303,7 +316,7 @@ function restore(assetId) {
 }
 function setArchived(assetId, archivedAt) {
   const id = assetIdOf(assetId)
-  const all = index()
+  const all = pruneEphemeralEntries()
   const found = all.find((entry) => entry.assetId === id)
   if (!found) throw new Error('素材库里没有这个素材')
   const entry = { ...found, archivedAt, updatedAt: new Date().toISOString() }
@@ -338,7 +351,9 @@ function referencedAssetIds(options = {}) {
   const excludedLibraryIds = new Set(options && Array.isArray(options.excludeLibraryAssetIds) ? options.excludeLibraryAssetIds : [])
   const refs = new Set()
   // 素材库（含已归档）：在库里就可能被恢复，算引用
-  for (const entry of index()) if (entry.assetId && !excludedLibraryIds.has(entry.assetId)) refs.add(entry.assetId)
+  for (const entry of index()) {
+    if (entry.assetId && !excludedLibraryIds.has(entry.assetId) && effectiveSource(entry) !== 'ephemeral') refs.add(entry.assetId)
+  }
   // Photo bindings are durable consumers even when a library entry is missing or archived.
   // If this index cannot be read, fail closed: treating it as empty could delete a live photo.
   for (const binding of loadJson('photo-bindings', { expect: 'array' }) || []) {
@@ -352,7 +367,7 @@ function referencedAssetIds(options = {}) {
   }
   // 模板背景（assetId）也算引用：否则清理未引用会误删正在用的模板底图
   const templates = require('./templates.cjs')
-  for (const assetId of templates.listReferencedAssetIds()) refs.add(assetId)
+  for (const assetId of templates.listReferencedAssetIds(options)) refs.add(assetId)
   return refs
 }
 
@@ -431,13 +446,19 @@ function discardIfEphemeral(assetId, options = {}) {
   try { info = designs.assetInfo(id) } catch { return { removed: false } }
   const source = normalizeSource(info.source)
   if (source !== 'ephemeral') return { removed: false } // 受管理原件不即时删
+  // Old builds could leave ephemeral originals in the library index without a
+  // source marker. Remove those stale rows before checking references so they
+  // neither appear in the library nor pin a temporary original on disk.
+  const all = index()
+  const filtered = all.filter(entry => entry.assetId !== id)
+  if (filtered.length !== all.length) persist(filtered)
   const refs = referencedAssetIds(options)
   if (refs.has(id)) return { removed: false } // 仍被引用 → 不删
   const hash = hashOf(id)
   let removed = false
   for (const ext of ['png', 'jpg', 'jpeg', 'json']) {
     const fp = resolveInsideDataDir(`design-assets/${hash}.${ext}`)
-    try { if (fs.existsSync(fp)) { fs.unlinkSync(fp); removed = true } } catch { /* 已不存在 */ }
+    try { fs.unlinkSync(fp); removed = true } catch (err) { if (err.code !== 'ENOENT') throw err }
   }
   const thumb = resolveInsideDataDir(`design-thumbnails/${hash}.png`)
   try { if (fs.existsSync(thumb)) fs.unlinkSync(thumb) } catch { /* 缩略图可有可无 */ }

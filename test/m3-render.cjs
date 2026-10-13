@@ -69,6 +69,9 @@ ok(st.includes('transform:translateX(-50%);'), '居中 translate 修正')
 ok(st.includes('font-size:24pt;') && st.includes('font-weight:bold;'), '字号 pt 与加粗')
 const stR = engine.fieldStyle({ x: 80, y: 60, align: 'right' })
 ok(stR.includes('transform:translateX(-100%);') && stR.includes('text-align:right;'), '右对齐双修正')
+const stDefault = engine.fieldStyle({ x: 36, y: 40 })
+ok(stDefault.includes('left:36%;') && stDefault.includes('text-align:left;') && !stDefault.includes('translateX'),
+  '缺省对齐固定左端，文字增减不移动起点', stDefault)
 const stF = engine.fieldStyle({ x: 1, y: 2, fontFamily: "测试'楷体" })
 ok(stF.includes("font-family:'测试楷体';"), 'family 引号剥除', stF)
 
@@ -78,6 +81,18 @@ const tpl = loadJson('templates')[0]
 const ds = loadJson('datasets')[0]
 const html = engine.buildHtml(tpl, ds.rows, { withToolbar: true })
 ok((html.match(/<div class="page">/g) || []).length === 3, '一记录一页（3 页）')
+const changingTextTpl = structuredClone(tpl)
+changingTextTpl.fields = [{ column: '姓名', x: 36, y: 40, fontSize: 24 }]
+const changingTextHtml = engine.buildHtml(changingTextTpl, [
+  { 姓名: '李' },
+  { 姓名: '李欣妍以及较长的姓名' },
+], { withToolbar: false })
+const changingTextStyles = [...changingTextHtml.matchAll(/<div class="pf" style="([^"]+)">/g)].map((m) => m[1])
+ok(changingTextStyles.length === 2 && new Set(changingTextStyles).size === 1
+  && changingTextStyles[0].includes('left:36%;')
+  && changingTextStyles[0].includes('text-align:left;')
+  && !changingTextStyles[0].includes('translateX'),
+'文字长度变化时 PDF 输入 HTML 保持同一左起点并向右延伸', changingTextStyles)
 ok(html.includes('@page { size: 297mm 210mm; margin: 0; }'), 'A4 横向毫米尺寸', html.match(/@page[^}]+/)?.[0])
 ok(html.includes("url('data:image") && !html.includes('pp://media/print-bg/bg.png'), '底图内联为 base64 data URI（脱离 pp://，直打/外部分查看均可见）')
 ok(html.includes('font-face') && html.includes("'测试楷体'") && html.includes('data:'), '上传字体 @font-face 内联为 base64 data URI（脱离 pp://，快照外部可看）')

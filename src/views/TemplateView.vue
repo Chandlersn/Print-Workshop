@@ -157,9 +157,17 @@ function onCutMarks(on) {
 }
 
 const templates = ref([])
+const templateTab = ref('builtin')
+const visibleTemplates = computed(() => templates.value.filter((template) =>
+  templateTab.value === 'builtin' ? template.origin === 'builtin' : template.origin !== 'builtin',
+))
 const fonts = ref({ system: [], uploaded: [] })
 const datasets = ref([])
 const activeTpl = ref(null)
+const activeIsBuiltin = computed(() => Boolean(activeTpl.value && (
+  activeTpl.value.origin === 'builtin'
+  || templates.value.some((template) => template.id === activeTpl.value.id && template.origin === 'builtin')
+)))
 const activeDatasetId = ref('')
 const catalog = ref([])
 const sampleRow = ref(null)
@@ -528,6 +536,7 @@ const showStatusBand = computed(() => Boolean(
 function newTemplate() {
   errorMsg.value = '' // 切换编辑对象前清掉上一次的报错，避免提示张冠李戴
   msg.value = ''
+  templateTab.value = 'user'
   templateKey.value = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`
   activeTpl.value = {
     name: '未命名模板',
@@ -637,10 +646,15 @@ function onPageDim(which, val) {
 async function discardBackgroundFile(bgPath) {
   if (!bgPath) return
   try {
-    await window.printpress.discardBackground({ assetId: bgPath })
+    return await window.printpress.discardBackground({
+      assetId: bgPath,
+      // 编辑内置模板时，数据库中的原模板仍引用原图，不能把这条引用排除掉。
+      exceptTemplateId: activeIsBuiltin.value ? undefined : activeTpl.value?.id || undefined,
+    })
   } catch (err) {
-    // 清理失败不该挡住正在做的事（元数据已经改好了），留个痕即可
+    errorMsg.value = `底图已从模板移除，但原图清理失败：${extractError(err)}`
     console.warn('[bg] 旧底图清理失败', err)
+    return { removed: false, error: err }
   }
 }
 
@@ -680,12 +694,16 @@ function selectBackground() {
 async function removeBackground() {
   const t = activeTpl.value
   if (!t || !hasBackground.value) return
+  errorMsg.value = ''
   const prev = t.background
   delete t.backgroundDesign
   t.background = ''
   t.bgSize = null
   bgSelected.value = false
-  await discardBackgroundFile(prev)
+  const cleanup = prev ? await discardBackgroundFile(prev) : { removed: true }
+  if (cleanup && !cleanup.removed && !cleanup.error) {
+    errorMsg.value = '底图已从当前模板移除；原图仍被其他模板引用或已加入素材库，因此保留'
+  }
   flash('底图已移除——点画布中央可重新上传')
 }
 
@@ -864,7 +882,8 @@ function addField(key) {
     y: 40,
     fontSize: 24,
     color: '#2b2622',
-    align: 'center',
+    // 固定文字起点：名单里文字长度变化时，从这个左边缘向右延伸。
+    align: 'left',
     bold: false,
     fontFamily: '',
   })
@@ -899,7 +918,7 @@ function fieldStyle(f) {
     color: f.color,
     fontFamily: family ? JSON.stringify(family) : 'inherit',
     fontWeight: f.bold ? 700 : 400,
-    textAlign: f.align,
+    textAlign: f.align === 'center' || f.align === 'right' ? f.align : 'left',
   }
 }
 
@@ -1172,10 +1191,18 @@ async function saveTemplate() {
   try {
     const payload = JSON.parse(JSON.stringify(activeTpl.value))
     payload.datasetId = activeDatasetId.value // 模板 × 数据集绑定：打印中心按模板直接带出
+    const savingBuiltinCopy = activeIsBuiltin.value
+    if (savingBuiltinCopy) {
+      // 内置模板是只读原件。第一次保存修改时生成独立常用模板，原件继续留在内置列表。
+      delete payload.id
+      payload.origin = 'user'
+    }
     const saved = await window.printpress.saveTemplate(payload)
     activeTpl.value = saved
+    templateKey.value = saved.id
+    if (savingBuiltinCopy) templateTab.value = 'user'
     await refreshLists()
-    flash('模板已保存')
+    flash(savingBuiltinCopy ? '已另存为常用模板，内置模板保持不变' : '模板已保存')
   } catch (err) {
     errorMsg.value = extractError(err)
   }
@@ -1192,9 +1219,13 @@ function onConfirmConfirmed() {
 
 async function removeTemplate() {
   const t = activeTpl.value
+  if (activeIsBuiltin.value) {
+    errorMsg.value = '系统内置模板不可删除；如需删除修改版，请先另存为常用模板'
+    return
+  }
   if (!t || !t.id) { activeTpl.value = null; return }
   pendingConfirm.value = {
-    message: `确定删除模板「${t.name}」？\n该操作不可恢复。`,
+    message: `确定删除常用模板「${t.name}」？\n系统内置模板会保留。`,
     action: async () => {
       try {
         await window.printpress.deleteTemplate(t.id)
@@ -1320,9 +1351,25 @@ onBeforeUnmount(() => {
     <div class="layout">
       <aside class="side">
         <h3 class="side-title">模板</h3>
+        <div class="tpl-tabs" role="tablist" aria-label="模板分类">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="templateTab === 'builtin'"
+            :class="{ active: templateTab === 'builtin' }"
+            @click="templateTab = 'builtin'"
+          >内置</button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="templateTab === 'user'"
+            :class="{ active: templateTab === 'user' }"
+            @click="templateTab = 'user'"
+          >常用</button>
+        </div>
         <div class="tpl-list">
           <button
-            v-for="t in templates"
+            v-for="t in visibleTemplates"
             :key="t.id"
             class="tpl-item"
             :class="{ active: activeTpl && activeTpl.id === t.id }"
@@ -1331,7 +1378,7 @@ onBeforeUnmount(() => {
             <span class="tpl-name">{{ t.name }}</span>
             <span class="tpl-meta">{{ t.fieldCount }} 个字段{{ t.hasBackground ? ' · 有底图' : '' }}</span>
           </button>
-          <p v-if="templates.length === 0" class="side-empty">还没有模板</p>
+          <p v-if="visibleTemplates.length === 0" class="side-empty">{{ templateTab === 'builtin' ? '暂无内置模板' : '暂无常用模板' }}</p>
         </div>
 
         <h3 class="side-title">字体管理</h3>
@@ -1459,8 +1506,13 @@ onBeforeUnmount(() => {
           <button class="btn-ghost btn-icon" :disabled="!canUndo" title="撤销（Ctrl+Z）" @click="undo">撤销</button>
           <button class="btn-ghost btn-icon" :disabled="!canRedo" title="重做（Ctrl+Y）" @click="redo">重做</button>
           <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）按 x 顺序等距排成一行，y 取中位数" @click="applyEvenRow">均分横排</button>
-          <button class="btn-primary" @click="saveTemplate">保存</button>
-          <button class="btn-danger" @click="removeTemplate">删除</button>
+          <button class="btn-primary" @click="saveTemplate">{{ activeIsBuiltin ? '另存为常用' : '保存' }}</button>
+          <button
+            class="btn-danger"
+            :disabled="activeIsBuiltin"
+            :title="activeIsBuiltin ? '内置模板不可删除；另存为常用模板后可删除副本' : '删除这个常用模板'"
+            @click="removeTemplate"
+          >删除</button>
           </div>
         </div>
 
@@ -1549,23 +1601,93 @@ onBeforeUnmount(() => {
           <button class="btn-ghost btn-mini" @click="alignSelected('bottom')">底对齐</button>
         </div>
 
-        <!-- 字段面板：数据页启用「印」的字段平铺于此，点击即加入画布 -->
-        <div v-if="activeDatasetId" class="field-palette">
-          <span class="palette-label">字段面板</span>
-          <button
-            v-for="opt in fieldOptions"
-            :key="opt.value"
-            class="palette-chip"
-            :disabled="opt.disabled"
-            :title="opt.disabled ? '整列为空，点击后打印将留空' : `点击把「${opt.label}」加入画布`"
-            @click="addField(opt.value)"
-          >{{ opt.label }}</button>
-          <span v-if="!fieldOptions.length" class="palette-empty">
-            没有已启用的字段——去数据页表格列头点「印」开启
-          </span>
-        </div>
-
         <div class="workbench">
+          <div v-if="activeDatasetId || selectedField || bgSelected" class="field-dock">
+            <!-- 字段面板：固定悬浮在窗口右侧，不占画布布局空间 -->
+            <div v-if="activeDatasetId" class="field-palette">
+              <span class="palette-label">字段面板</span>
+              <button
+                v-for="opt in fieldOptions"
+                :key="opt.value"
+                class="palette-chip"
+                :disabled="opt.disabled"
+                :title="opt.disabled ? '整列为空，点击后打印将留空' : `点击把「${opt.label}」加入画布`"
+                @click="addField(opt.value)"
+              >{{ opt.label }}</button>
+              <span v-if="!fieldOptions.length" class="palette-empty">
+                没有已启用的字段——去数据页表格列头点「印」开启
+              </span>
+            </div>
+
+            <aside v-if="selectedField || bgSelected" class="props">
+              <h3 class="side-title">{{ bgSelected ? '底图' : '字段属性' }}</h3>
+              <!-- 底图选中：只报信息与删除方式，不放按钮——删除统一走 Delete 键 -->
+              <template v-if="bgSelected && !selectedField">
+                <template v-if="activeDesign">
+                  <div class="fill-badge">{{ activeDesign.name }} · v{{ activeDesign.revision }}</div>
+                  <p class="kbd-hint">{{ activeDesign.artboard.w }} × {{ activeDesign.artboard.h }} mm · {{ activeDesign.layers.length }} 个图层</p>
+                  <button class="btn-ghost" @click="editBackgroundDesign">编辑图层</button>
+                  <p class="kbd-hint">按 Delete 解除模板引用，工程保留</p>
+                </template>
+                <template v-else>
+                <div class="fill-badge">
+                  底图 {{ activeTpl.bgSize ? `${activeTpl.bgSize.width} × ${activeTpl.bgSize.height} px` : '（尺寸未知）' }}
+                </div>
+                <p class="kbd-hint">按 Delete 键移除底图，图片文件会一并删掉</p>
+                </template>
+              </template>
+              <template v-else-if="selectedField">
+                <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">
+                  该字段的数据列在当前数据集中不存在——请删除本字段，或从上方字段面板重新添加
+                </div>
+                <div v-if="selectedFill" class="fill-badge" :class="{ warn: selectedFill.suggestSkip }">
+                  填充 {{ selectedFill.fill }}<template v-if="selectedFill.suggestSkip"> · 建议跳过</template>
+                </div>
+                <label class="prop-row">
+                  <span class="prop-label">显示名</span>
+                  <input v-model="selectedField.label" class="prop-input" @focus="pushUndo" />
+                </label>
+                <div class="prop-row">
+                  <span class="prop-label">字体</span>
+                  <CustomSelect v-model="selectedField.fontFamily" :options="fontOptions" width="130px" @open="pushUndo" />
+                </div>
+                <label class="prop-row">
+                  <span class="prop-label">字号 pt</span>
+                  <input v-model.number="selectedField.fontSize" type="number" min="6" max="200" class="prop-input" @focus="pushUndo" />
+                </label>
+                <label class="prop-row">
+                  <span class="prop-label">颜色</span>
+                  <input v-model="selectedField.color" type="color" class="prop-color" @pointerdown="pushUndo" />
+                </label>
+                <div class="prop-row">
+                  <span class="prop-label">对齐</span>
+                  <CustomSelect
+                    v-model="selectedField.align"
+                    :options="[
+                      { value: 'left', label: '左对齐' },
+                      { value: 'center', label: '居中' },
+                      { value: 'right', label: '右对齐' },
+                    ]"
+                    width="130px"
+                    @open="pushUndo"
+                  />
+                </div>
+                <p v-if="!selectedField.align || selectedField.align === 'left'" class="prop-meta prop-align-hint">
+                  左端固定在定位点，文字变长时向右延伸。
+                </p>
+                <label class="prop-row">
+                  <span class="prop-label">加粗</span>
+                  <input v-model="selectedField.bold" type="checkbox" class="prop-check" @pointerdown="pushUndo" />
+                </label>
+                <div class="prop-row">
+                  <span class="prop-label">位置</span>
+                  <span class="prop-meta">x {{ selectedField.x }}% · y {{ selectedField.y }}%</span>
+                </div>
+                <button class="btn-danger prop-remove" @click="removeField">移除字段</button>
+                <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除选中项</p>
+              </template>
+            </aside>
+          </div>
           <div
             class="canvas-wrap"
             :class="{ 'drop-active': dragging }"
@@ -1751,78 +1873,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <!--
-            属性面板 = **浮层抽屉**（照搬底图制作页的 .designer-panel.inspector）：
-            绝对定位、不占 flex 列，只在选中字段/底图时出现。
-            此前它是常驻 210px 的 flex 列：默认 1280×800 窗口下把 .canvas-wrap 挤到 739px，
-            而画布固定 760px → 右边缘被裁 21px 并出现横向滚动条（960 窗口下被裁 341px）。
-            改成浮层后 canvas-wrap 恢复整宽，默认窗口下 760px 画布完整可见。
-          -->
-          <aside v-if="selectedField || bgSelected" class="props">
-            <h3 class="side-title">{{ bgSelected ? '底图' : '字段属性' }}</h3>
-            <!-- 底图选中：只报信息与删除方式，不放按钮——删除统一走 Delete 键 -->
-            <template v-if="bgSelected && !selectedField">
-              <template v-if="activeDesign">
-                <div class="fill-badge">{{ activeDesign.name }} · v{{ activeDesign.revision }}</div>
-                <p class="kbd-hint">{{ activeDesign.artboard.w }} × {{ activeDesign.artboard.h }} mm · {{ activeDesign.layers.length }} 个图层</p>
-                <button class="btn-ghost" @click="editBackgroundDesign">编辑图层</button>
-                <p class="kbd-hint">按 Delete 解除模板引用，工程保留</p>
-              </template>
-              <template v-else>
-              <div class="fill-badge">
-                底图 {{ activeTpl.bgSize ? `${activeTpl.bgSize.width} × ${activeTpl.bgSize.height} px` : '（尺寸未知）' }}
-              </div>
-              <p class="kbd-hint">按 Delete 键移除底图，图片文件会一并删掉</p>
-              </template>
-            </template>
-            <template v-else-if="selectedField">
-              <div v-if="fieldMissing(selectedField)" class="fill-badge warn-strong">
-                该字段的数据列在当前数据集中不存在——请删除本字段，或从上方字段面板重新添加
-              </div>
-              <div v-if="selectedFill" class="fill-badge" :class="{ warn: selectedFill.suggestSkip }">
-                填充 {{ selectedFill.fill }}<template v-if="selectedFill.suggestSkip"> · 建议跳过</template>
-              </div>
-              <label class="prop-row">
-                <span class="prop-label">显示名</span>
-                <input v-model="selectedField.label" class="prop-input" @focus="pushUndo" />
-              </label>
-              <div class="prop-row">
-                <span class="prop-label">字体</span>
-                <CustomSelect v-model="selectedField.fontFamily" :options="fontOptions" width="130px" @open="pushUndo" />
-              </div>
-              <label class="prop-row">
-                <span class="prop-label">字号 pt</span>
-                <input v-model.number="selectedField.fontSize" type="number" min="6" max="200" class="prop-input" @focus="pushUndo" />
-              </label>
-              <label class="prop-row">
-                <span class="prop-label">颜色</span>
-                <input v-model="selectedField.color" type="color" class="prop-color" @pointerdown="pushUndo" />
-              </label>
-              <div class="prop-row">
-                <span class="prop-label">对齐</span>
-                <CustomSelect
-                  v-model="selectedField.align"
-                  :options="[
-                    { value: 'left', label: '左对齐' },
-                    { value: 'center', label: '居中' },
-                    { value: 'right', label: '右对齐' },
-                  ]"
-                  width="130px"
-                  @open="pushUndo"
-                />
-              </div>
-              <label class="prop-row">
-                <span class="prop-label">加粗</span>
-                <input v-model="selectedField.bold" type="checkbox" class="prop-check" @pointerdown="pushUndo" />
-              </label>
-              <div class="prop-row">
-                <span class="prop-label">位置</span>
-                <span class="prop-meta">x {{ selectedField.x }}% · y {{ selectedField.y }}%</span>
-              </div>
-              <button class="btn-danger prop-remove" @click="removeField">移除字段</button>
-              <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除选中项</p>
-            </template>
-          </aside>
         </div>
       </div>
     </div>
@@ -1941,6 +1991,31 @@ onBeforeUnmount(() => {
   max-height: calc(var(--tpl-visible) * var(--tpl-item-h) + (var(--tpl-visible) - 1) * var(--tpl-gap));
   overflow-y: auto;
   padding-right: 2px;  /* 滚动条不压卡片圆角 */
+}
+
+.tpl-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 3px;
+  border-radius: 7px;
+  background: var(--paper-card);
+}
+.tpl-tabs button {
+  flex: 1;
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--stone);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tpl-tabs button.active {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgb(40 32 20 / 12%);
 }
 
 /* 细滚动条：系统默认那根在 230px 侧栏里太喧宾夺主 */
@@ -2101,7 +2176,7 @@ onBeforeUnmount(() => {
 .warn-line { font-size: 12px; color: var(--stone); margin: 3px 0; }
 .warn-strong { color: var(--warn); }
 
-/* position:relative 是属性抽屉的定位参照（抽屉 absolute 挂在它右侧） */
+/* 工作区承载画布；字段工具与属性统一由右侧 viewport 浮层承载。 */
 .workbench { position: relative; display: flex; gap: 16px; align-items: flex-start; }
 
 .canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
@@ -2340,24 +2415,30 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* 属性抽屉：绝对定位浮在画布右侧，**不占 flex 列**（对齐底图制作页的 .designer-panel.inspector）。
-   之前是常驻 210px 的 flex 列，默认 1280×800 窗口下把 .canvas-wrap 挤到 739px，
-   而画布固定 760px → 右边缘被裁 21px + 横向滚动条；960 窗口下被裁 341px。
-   宽度取 240px（底图页是 264）：模板页画布是**固定 760px**、不会跟着缩，
-   抽屉每宽 1px 就多盖住画布 1px，所以收窄一点。 */
-.props {
-  position: absolute;
-  top: 0;
-  right: 0;
-  z-index: 40;
-  width: 240px;
-  max-height: calc(100vh - 200px);
-  overflow: auto;
-  padding: 12px;
+/* 字段面板与属性合成 viewport 浮窗：始终贴右、随窗口尺寸重定位，内容超高时内部滚动。 */
+.field-dock {
+  position: fixed;
+  top: 50%;
+  right: clamp(12px, 2vw, 28px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(252px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--paper-card);
-  box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22);
+  box-shadow: 0 8px 28px rgba(43, 38, 34, 0.24);
+  transform: translateY(-50%);
+}
+
+.props {
+  flex: 0 0 auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .prop-row {
@@ -2398,30 +2479,32 @@ onBeforeUnmount(() => {
 
 /* ---- 字段面板：数据页启用「印」的字段，点击即加入画布 ---- */
 .field-palette {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 10px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  background: var(--paper-card);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 6px;
+  max-height: min(42dvh, 340px);
+  overflow-y: auto;
 }
 
 .palette-label {
+  grid-column: 1 / -1;
   font-size: 12px;
   font-weight: 600;
   color: var(--stone);
 }
 
 .palette-chip {
-  padding: 3px 10px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 5px 7px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--paper);
   color: var(--ink-2);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
   transition: border-color 0.12s, color 0.12s, background 0.12s;
 }
@@ -2437,7 +2520,7 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 
-.palette-empty { font-size: 12px; color: var(--stone); }
+.palette-empty { grid-column: 1 / -1; font-size: 12px; color: var(--stone); }
 
 .align-label { font-size: 12px; color: var(--cinnabar); margin-right: 4px; }
 
@@ -2493,6 +2576,7 @@ onBeforeUnmount(() => {
 .prop-check { width: 16px; height: 16px; accent-color: var(--cinnabar); }
 
 .prop-meta { font-size: 11px; color: var(--stone); }
+.prop-align-hint { margin: -6px 0 10px; line-height: 1.5; }
 
 .prop-remove { width: 100%; margin-top: 4px; }
 </style>
