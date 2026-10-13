@@ -20,13 +20,14 @@
  * 运行：node test/ipc-wiring.cjs
  */
 const fs = require('fs')
+const { rmDeepSafe } = require('./helpers/rm.cjs')
 const path = require('path')
 const Module = require('module')
 
 const ROOT = path.join(__dirname, '..')
 const TMP = path.join(__dirname, '.tmp-data-wiring')
 
-fs.rmSync(TMP, { recursive: true, force: true })
+rmDeepSafe(TMP)
 fs.mkdirSync(TMP, { recursive: true })
 process.env.PRINTPRESS_DATA_DIR = TMP
 
@@ -287,12 +288,12 @@ async function main() {
 
 main()
   .then(() => {
-    fs.rmSync(TMP, { recursive: true, force: true })
+    rmDeepSafe(TMP)
     console.log(`\nIPC 装配（纯 Node）：${pass} 通过，${fail} 失败`)
     process.exit(fail ? 1 : 0)
   })
   .catch((err) => {
     console.error('测试本身崩溃:', err)
-    fs.rmSync(TMP, { recursive: true, force: true })
+    rmDeepSafe(TMP)
     process.exit(1)
   })

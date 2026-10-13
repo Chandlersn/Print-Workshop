@@ -18,6 +18,9 @@ const fs = require('fs')
 const path = require('path')
 const { buildPdf, readPdfLike, checkMergedStructure, payloadsOf, bufEq } = require('./helpers/pdf-fixture.cjs')
 const { mergePdfs, countPdfPagesFromFile, UnsupportedPdfError } = require('../electron/pdf-merge.cjs')
+// 收尾清理走 rmDeepSafe：CI（windows-latest）上杀软/索引器会短暂持有刚写完的文件句柄，
+// 裸 fs.rmSync 递归删除会以 ENOTEMPTY 崩掉整个套件（2026-10-13 真实发生过，60 项全绿仍红）。
+const { rmDeepSafe } = require('./helpers/rm.cjs')
 
 const FIXTURES = path.join(__dirname, 'fixtures')
 const TMP = path.join(__dirname, '.tmp-merge')
@@ -37,7 +40,7 @@ function ok(cond, label, extra) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  fs.rmSync(TMP, { recursive: true, force: true })
+  rmDeepSafe(TMP)
   fs.mkdirSync(TMP, { recursive: true })
   const out = (name) => path.join(TMP, name)
   const writeFix = (name, buf) => {
@@ -173,7 +176,7 @@ async function main() {
   const merged7 = checkMergedStructure('m7', fs.readFileSync(m7), 3, ok)
   ok(payloadsOf(srcCA).every((p, i) => bufEq(p, merged7.detail[i].payload)), '单文件自合并：内容不变')
 
-  fs.rmSync(TMP, { recursive: true, force: true })
+  rmDeepSafe(TMP)
   console.log(`\nPDF 合并：${passCount} 项通过，${failCount} 项失败`)
   if (failCount) process.exitCode = 1
 }

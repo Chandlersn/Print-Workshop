@@ -1,0 +1,1870 @@
+
+> printpress@0.6.0 test
+> node test/m1-import.cjs && node test/m2-templates.cjs && node test/m3-render.cjs && node test/render-grid.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/placeholder.cjs && node test/print-scope.cjs && node test/dataset-edit.cjs && node test/dataset-batch.cjs && node test/canvas-layout.cjs && node test/canvas-align.cjs && node test/bg-fidelity.cjs && node test/column-visibility.cjs && node test/template-layout.cjs && node test/field-edit.cjs && node test/print-jobs.cjs && node test/version-check.cjs && node test/storage-guard.cjs && node test/cache.cjs && node test/print-failure.cjs && node test/robustness.cjs && node test/ipc-hardening.cjs && node test/ipc-wiring.cjs && node test/api-cli.cjs && node test/e2e-harness.cjs && node test/designs.cjs && node test/design-render.cjs && node test/design-editor.cjs && node test/design-effects.cjs && node test/design-blend-adjust.cjs && node test/design-presets.cjs && node test/design-export.cjs && node test/design-crop-presets.cjs && node test/design-image-effects.cjs && node test/designer-aids.cjs && node test/asset-library.cjs && node test/template-asset-library.cjs && node test/design-package.cjs && node test/photos.cjs && node test/pdf-merge.cjs && node test/print-batch.cjs && node test/pack-root.cjs && node test/user-error.cjs && node test/invariants.cjs
+
+== 1. CSV 编码检测 ==
+  PASS GBK 文件正确解码出中文表头
+  PASS UTF-8 BOM 识别且剥离 BOM
+== 2. RFC 4180 引号规则 ==
+  PASS 表头 + 4 行数据（引号内换行算一行）
+  PASS 引号内逗号不切列
+  PASS 引号内换行保留
+  PASS 双引号转义还原
+== 3. 键名规范化与去重 ==
+  PASS 重复表头自动加后缀
+  PASS 空格折叠为下划线
+  PASS 空表头回退 col + 别名列N
+  PASS 非法字符表头回退并去重
+== 4. GBK CSV 全链路导入 ==
+  PASS 6 行数据入库
+  PASS 5 列
+  PASS GBK 中文数据完整
+  PASS 备注列填充率 4/6
+  PASS 晋级情况填充率 5/6（首行有值+末行单列行）
+== 5. 类型推断 ==
+  PASS 金额列识别为数值
+  PASS true/false 文本识别为布尔
+  PASS 单字符列不误判为长文本
+== 6. 乱 xlsx 导入（重复表头/合并单元格/空列） ==
+  PASS 7 列
+  PASS 重复表头去重
+  PASS 合并单元格取左上值
+  PASS 空列 fill 0 且建议跳过
+  PASS 长文本列 avgLen>200 且建议跳过
+  PASS 分数列数值类型+填充 2/3
+== 7. 数据集管理 ==
+  PASS 清单返回 3 个数据集
+  PASS 列别名改名生效
+  PASS 删除生效
+
+结果: 27 通过, 0 失败
+== 1. 图片尺寸解析 ==
+  PASS PNG 1x1 解析
+  PASS 非法 JPEG 返回 null
+  PASS imageSize 经文件读取
+== 2. 纸张建议 ==
+  PASS A4 横版比例命中
+  PASS 非标准比例换算自定义（mm/96dpi 四舍五入）
+  PASS 正方形底图配 A4 横版差超阈值
+== 3. 底图上传 ==
+  PASS 底图入素材库原件池（assetId）
+  PASS 尺寸读取正确
+  PASS 原件真实落盘
+  PASS WebP 尚不支持时上传入口明确拒绝
+== 4. 模板 CRUD（须绑定数据集） ==
+  PASS 未绑定数据集保存被拒
+  PASS 绑定不存在的数据集被拒
+== 4.5 保存强校验：字段总数须与数据集激活列一一对应 ==
+  PASS 未激活字段保存被拒且报数准确
+  PASS 报错点名缺失字段并给激活指引
+  PASS 报错不暴露内部 id
+  PASS 字段全部激活后保存通过
+  PASS 新建生成 id
+  PASS 模板绑定数据集持久化
+  PASS 字段快照完整
+  PASS 全量快照更新
+  PASS updatedAt 刷新
+  PASS 清单 1 条
+  PASS 无底图模板也进清单（可被打印中心选中）
+  PASS 最近保存的模板置顶
+  PASS 更新旧模板后它反超置顶
+== 5. 字体管理与引用校验 ==
+  PASS 上传字体 family=去扩展名
+  PASS 画布与 PDF 共用规范化的字体名
+  PASS 上传清单包含
+  PASS 系统字体清单返回
+  PASS 不写死暴露不存在的字体
+  PASS 未被引用时为空
+  PASS 引用检测命中模板名
+  PASS 被引用字体删除被拒
+== 6. 模板 × 数据集匹配与换绑 ==
+  PASS 绑定数据集自检通过（姓名已激活）
+  PASS 缺失字段被识别
+  PASS 匹配失败时换绑被拒
+  PASS 激活缺失字段后匹配通过
+  PASS 换绑成功并持久化
+  PASS 清单反映新绑定
+  PASS 对不存在数据集匹配抛错
+== 6.5 模板删除连带清理底图文件 ==
+  PASS 删除前底图文件真实在盘
+  PASS 模板删除后引用解除
+  PASS 删除模板连带清理底图文件（不留孤儿）
+  PASS 模板清单清空
+  PASS 解除引用后删除成功
+
+结果: 45 通过, 0 失败
+== 1. HTML 转义 ==
+  ok - 特殊字符全转义
+  ok - null → 空串
+== 2. 字段样式 ==
+  ok - 百分比坐标
+  ok - 居中 translate 修正
+  ok - 字号 pt 与加粗
+  ok - 右对齐双修正
+  ok - family 引号剥除
+== 3. buildHtml ==
+  ok - 一记录一页（3 页）
+  ok - A4 横向毫米尺寸
+  ok - 底图内联为 base64 data URI（脱离 pp://，直打/外部分查看均可见）
+  ok - 上传字体 @font-face 内联为 base64 data URI（脱离 pp://，快照外部可看）
+  ok - 记录值转义渲染
+  ok - 页面物理尺寸
+  ok - 浏览器回看工具条（withToolbar）
+  ok - Electron 内部通道无工具条
+== 4. 空值兜底 ==
+  ok - 空值字段仍占位渲染
+== 4b. 字段属性兼容（key / column 双形态） ==
+  ok - key 形态字段渲染出值（不再是空版）
+  ok - key 形态定位样式正常
+  ok - 校验层同样兼容 key 形态
+== 5. 出口校验 ==
+  ok - 校验基线：3 行 × 3 字段
+  ok - 姓名空 1 行
+  ok - 奖项空 1 行
+  ok - 备注空 2 行
+  ok - 无整列空字段
+  ok - 整列为空重点提示
+== 6. 批量组装 ==
+  ok - 组装元信息
+  ok - 纸张毫米来自统一 PAGE_SIZES
+  ok - 快照带工具条/打印通道不带
+== 7. 120 人批量 ==
+  ok - 120 记录 → 120 页
+== 8. 留痕归档 ==
+  ok - 任务 ID 生成
+  ok - 快照落盘（按月分目录）
+  ok - 留痕清单（新任务在前）
+  ok - 快照相对路径
+  ok - 未知任务/缺失快照抛错
+== 9. 纸张回退 ==
+  ok - 已知纸张命中
+  ok - 未知纸张回退默认（A4 横向）
+
+M3 领域层：36 项断言通过
+== 1. resolveLayout（按成品尺寸算行列并居中） ==
+  ok - 无 layout → 单页
+  ok - mode=single → 单页
+  ok - 85×54 在 A4 竖版可多联
+  ok - 算出 2 列 × 5 行 = 10 格
+  ok - 网格居中留边（左右各 20mm，上下各 13.5mm）
+  ok - 裁切线默认开启
+  ok - 裁切线可关闭
+  ok - 85×54 在 A4 横版为 3×3
+  ok - 横版居中偏移正确
+== 1b. pageSpec 必须兼容模板里存的对象（回归：竖版曾被静默渲染成横版） ==
+  ok - 传对象 → 命中竖版
+  ok - 传对象 → 命中横版
+  ok - 自定义纸张按对象自带尺寸（不再回退 A4）
+  ok - 自定义纸张高度正确
+  ok - 传字符串 id 仍可命中
+  ok - 未知字符串仍回退默认（A4 横版）
+  ok - 空值回退默认
+  ok - 竖版模板 @page = 210mm 297mm（不再被渲染成横版）
+== 2. resolveLayout 的边界与退回 ==
+  ok - 只放得下 1 个 → 退回单页
+  ok - 给出可读原因
+  ok - 成品宽为 0 → 退回
+  ok - 缺成品尺寸 → 退回
+  ok - 成品比纸张还大 → 退回
+== 3. buildHtml 多联组装 ==
+  ok - 10 条记录 → 1 页
+  ok - 1 页 10 格
+  ok - 字段在每格重复（10 处）
+  ok - 记录逐格填入
+  ok - 首格按成品尺寸定位
+  ok - 第 2 格横向偏移 85mm
+  ok - 第 3 格换行（纵向偏移 54mm）
+  ok - 默认带裁切线类
+  ok - 多联时整页不再铺底图（底图归每格）
+  ok - 每格底图铺满格子
+  ok - 11 条 → 2 页 11 格（末页不满）
+  ok - 末页空格不产生字段（不留残影）
+  ok - 空格子不渲染（不会印出空白卡片）
+  ok - 零记录 → 不出页（与单页模式一致）
+  ok - 关闭裁切线后无 cut 类
+== 4. 单页模式回归（多联改动不得影响现状） ==
+  ok - 单页模式仍是一记录一页
+  ok - 单页模式无格子
+  ok - 单页模式整页铺底图
+  ok - 无 layout 仍走单页
+== 5. 对折桌牌（fold）：一页一条记录 × 上下镜像半页 ==
+  ok - fold 模式启用
+  ok - 一页一条记录（上下联同内容互为镜像，不是两条）
+  ok - 半页成品 = 纸宽 × 纸高一半
+  ok - 对折只有折线，无裁切线
+  ok - 2 条记录 → 2 页（一页一份桌牌）
+  ok - fold 不产生多联格子
+  ok - 每页上联带倒置类（2 页共 2 处）
+  ok - 每页下联正排（2 页共 2 处）
+  ok - 每页中线画折线（2 页共 2 处）
+  ok - 同一记录上下联各渲染一次（张三 ×2）
+  ok - 倒置由 CSS rotate(180deg) 实现
+  ok - 底图铺满半页（fold-half 类统一持有底图，不逐页内联）
+  ok - fold 与多联格子类互不沾染
+  ok - 纸张口径不变（对折在页内完成）
+
+共 55 项断言：55 通过，0 失败
+== 1. 无配置时的默认决策 ==
+  ok - 打包态默认 userData/data
+  ok - 开发态默认 appPath/data
+== 2. bootstrap 配置读写 ==
+  ok - 无配置读取返回 null
+  ok - 目录不存在也不崩
+  ok - 写入后读回一致
+  ok - null 清除配置
+  ok - 损坏的 JSON 不崩、返回 null
+== 3. 优先级决策 ==
+  ok - 有效自定义配置优先
+  ok - 自定义路径不可用时回退默认
+== 4. 可写探测 ==
+  ok - 普通目录可写
+  ok - 可写探测会递归建目录
+  ok - 路径被文件占用 → 不可写
+== 5. 嵌套守卫 ==
+  ok - 同目录被拒
+  ok - 当前数据目录内部的子目录被拒
+  ok - 当前数据目录的祖先目录被拒
+  ok - 无嵌套关系 → 放行
+== 6. 整目录迁移 ==
+  ok - 根文件复制
+  ok - 子目录递归复制
+  ok - 同名文件覆盖（合并语义）
+== 7. 恢复默认 ==
+  ok - 清除配置后回到默认
+  ok - 恢复默认不删自定义目录里的旧数据
+
+共 21 项断言：21 通过，0 失败
+== 1. 表头行检测（多段式结构） ==
+  ok - 原始网格含标题/统计/明细段
+  ok - 明细段表头行（0基 9）得分最高
+  ok - 总览表头在第 2 行（0基 1）
+  ok - 无有效表头返回 -1
+== 2. 表头切片 ==
+  ok - 切片后首行即表头
+  ok - 只保留表头+2 行数据（空行被滤）
+  ok - 右侧幽灵列被裁掉（12 → 8 列）
+  ok - 越界表头行返回 null
+== 3. listSheets 概要 ==
+  ok - 4 个工作表全部列出
+  ok - 分表概要（2 行 × 8 列）
+  ok - 表头预览取自检测表头
+== 4. importSheets split 模式 ==
+  ok - 3 个表 → 3 个数据集
+  ok - A 表 2 行 × 8 列
+  ok - 记录键取自检测表头（选手姓名列）
+  ok - 命名 = 文件名·表名
+  ok - 显式表头行生效
+  ok - 普通表不受影响
+== 5. importSheets merge 模式 ==
+  ok - 合并为 1 个数据集
+  ok - 两表数据行拼接（2+1）
+  ok - 自动加来源列
+  ok - 来源列取自表名
+  ok - 列并集对齐正确
+== 6. 边界与守卫 ==
+  ok - 空选择被拒
+  ok - 不存在的表名被拒
+  ok - 越界表头行被拒
+== 6.5 导入进度回调 ==
+  ok - 进度模式下导入结果一致
+  ok - 首事件：读取工作簿
+  ok - 解析进度带 current/total/表名
+  ok - 生成进度逐表上报
+  ok - 末事件：完成 100%
+  ok - pct 单调不减
+== 7. inspectFile 分发 ==
+  ok - xlsx → 工作表清单
+  ok - csv → 直接导入
+
+共 33 项断言：33 通过，0 失败
+== 占位值检测（值形态规则，非业务字面量） ==
+  ok - 全角括号包裹
+  ok - 半角括号包裹
+  ok - 方头括号包裹
+  ok - 纯破折号
+  ok - 纯斜杠
+  ok - 纯问号
+  ok - 形态规则对一切整值括号包裹生效（只提示不拦截，不猜内容好坏）
+  ok - 正常文本
+  ok - 句中括号不算整值包裹
+  ok - 空串不是占位（是空值，另行统计）
+  ok - null/undefined 安全
+  ok - 数字 0 安全
+  ok - 形态规则只有两条（可读、可审）
+
+共 13 项断言：13 通过，0 失败
+== 1. normalizeSelection（纯函数语义） ==
+  ok - 按原行序升序（打印顺序跟随名单，不跟随勾选顺序）
+  ok - 重复索引去重
+  ok - 越界索引丢弃
+  ok - 非整数丢弃、字符串数字归一
+  ok - 空集合 → 空数组
+== 2. resolveScope（rows 优先 / 空选择拦截 / 缺省全量） ==
+  ok - rows 选出并按行序排列
+  ok - 缺省 rows → selection 为 null（全量）
+  ok - 缺省 → 全量 3 行
+  ok - 行级选择 selection 非 null
+  ok - 空勾选抛错（至少勾一行）
+  ok - 全部越界的勾选视同空，同样抛错
+  ok - filters 已下线：多传也不影响范围（只有 rows 说了算）
+== 3. scopeInfo / shouldMarkPrinted（不变量核心） ==
+  ok - 全量 → partial=false
+  ok - 部分 → partial=true
+  ok - 显式全选（行数覆盖=全量）→ partial=false
+  ok - selected/total 正确
+  ok - 全量出片 → 回写数据集状态
+  ok - 部分出片 → 不回写（信号不被污染）
+  ok - 缺省 scope → 视为全量，回写
+== 4. 领域层贯通（行级范围的校验与组装） ==
+  ok - 数据集 6 行
+  ok - 缺省 → 全量 6 行
+  ok - 缺省 → scope.partial=false
+  ok - 缺省全量 → 应回写
+  ok - 行级校验范围 3 行（totalCount 仍为 6）
+  ok - scope 标记部分出片
+  ok - 部分出片 → 不应回写数据集状态
+  ok - 范围内奖级空值 1（戊）
+  ok - 「去补录直达」行号回填为全量行号（不是范围内序号）
+  ok - 批量 HTML 按行级范围组装 3 页
+  ok - selection 规范化落盘
+  ok - HTML 只含勾选行
+  ok - 组装结果同样带 partial 标记
+  ok - 显式勾满全部行 → 视为全量 → 应回写
+== 5. 任务留痕的范围字段（部分留痕、全量不冗余） ==
+  ok - 部分任务记录 partial + totalRows
+  ok - 部分任务落盘 selection（打了哪几行可回溯）
+  ok - 部分出片同样写入归档快照（留痕必全）
+  ok - 全量任务不落 selection（避免冗余）
+  ok - 全量任务 totalRows 正确
+  ok - 任务清单可读回且 partial 为布尔
+== 6. 出口校验增量：超宽估算与重复行（只提示不拦截） ==
+  ok - 无重复行 → duplicates 为空
+  ok - 短值不触发超宽
+  ok - 可用宽度不足时整列计超宽（6 行）
+  ok - 超宽单元格 kind=overlong（直达 chips 可复用）
+  ok - 多联按单格宽估算：2 字 24pt 在 90mm 格内不超宽
+  ok - 识别 1 组 2 行重复
+  ok - 重复行号为全量行号 [0,2]
+  ok - 重复组带行摘要 preview
+  ok - 行级勾选含重复两行 → 行号仍为全量行号
+  ok - 行级勾选只圈中单行 → 不算重复
+
+共 49 项断言：49 通过，0 失败
+== 1. 建档基线 ==
+  ok - 基线 4 行 3 列
+  ok - 分数列基线：number，填充 3/4
+== 2. updateCell（值写入 + 持久化） ==
+  ok - 修改返回新值
+  ok - 修改已持久化
+  ok - 同行其他单元格不受影响
+  ok - 奖级列填充 3 → 4（空补值后重算）
+  ok - 改回空值填充回落
+== 3. updateCell（类型即时重算） ==
+  ok - 混入非数值 → 列类型重算为 text
+  ok - 恢复数值 → 列类型重算回 number
+== 4. updateCell（边界防护） ==
+  ok - 行号越界抛错
+  ok - 负行号抛错
+  ok - 未知列抛错
+  ok - 数据集不存在抛错
+== 5. addRow（追加空行） ==
+  ok - 追加后行数 4 → 5，新行号 4
+  ok - 新行全部为空串
+  ok - 姓名列填充随空行回落 4/5
+== 6. deleteRow（删行 + 重算） ==
+  ok - 删行后 5 → 4
+  ok - 删除首行后行序前移
+  ok - 被删行不存在
+  ok - 删除后旧行号越界抛错
+== 7. 编辑即时生效（读回的数据已变） ==
+  ok - 金奖只剩乙（甲被删、丁改走）
+  ok - 改格写回后读回即新值
+  ok - 列表摘要行数同步
+== 8. 列级打印开关（默认停用，用户激活才进模板页） ==
+  ok - 新数据集所有列缺省停用（须用户显式激活）
+  ok - 数据集不存在抛错
+  ok - 激活返回新状态
+  ok - 字段目录反映激活
+  ok - 其余列仍为停用
+  ok - 激活标记持久化到数据集
+  ok - 未知列激活抛错
+  ok - 可再次停用
+  ok - 摘要统计已激活打印字段数（=2）
+  ok - 停用后摘要同步（=1）
+  ok - 新导入数据集 printCols=0（默认全停）
+  ok - 默认未配图：photoMatchColumn=null
+  ok - 摘要暴露当前配图列（置顶排序数据源）
+  ok - 关闭配图后摘要同步为 null
+== 9. 打印状态回写（工作簿级，侧栏变色数据源） ==
+  ok - 未打印数据集 printCount=0 且无时间
+  ok - 首次回写 printCount=1
+  ok - 重复回写累加且记录最近方式
+  ok - lastPrintedAt 为 ISO 时间戳
+  ok - 不存在的数据集回写抛错
+== 10. 配图置顶排序（I-39，前端静态核查） ==
+  ok - 数据页侧栏：已配图名单独立置顶档，先于已印档位（I-39）
+  ok - 模板页数据集下拉：与数据页同一套「已配图最优先」置顶规则（I-39）
+  ok - 已配图名单有一个「图」字标记，置顶不是因为 bug（I-39）
+  ok - 列头点配图后即时同步侧栏摘要，置顶当场生效（I-39）
+== 11. 详情头部必须容忍整块缺失的 source（I-42，旧记录真实存在） ==
+  ok - 详情头部不得直接解引用 detail.source
+  ok - 详情头部不得直接对 lastPrintedAt 取切片（可能是空串）
+  ok - 来源信息统一走 detailSource 兜底
+  ok - 缺 source 时给出可读文案，而不是留空或抛错
+  ok - 没有 source 的记录仍可读取，且 lastPrintedAt 为空串——前端必须容忍这种形状
+
+共 51 项断言：51 通过，0 失败
+== 1. 同批共享 batchId ==
+  ok - 3 表 → 3 数据集
+  ok - 同次导入共享同一 batchId
+  ok - batchId 形如 imp_*
+  ok - 批次可读名取自源文件名
+  ok - 另一次导入有独立 batchId
+  ok - 列表摘要透出 batchId（UI 分组数据源）
+== 2. deleteBatch 整批删除 ==
+  ok - 整批删除 3 个，如实返回删除数
+  ok - 会话内全灭，其他导入不受波及
+== 3. 边界守卫 ==
+  ok - 全部 id 已不存在时抛错
+  ok - 空 id 清单被拒
+  ok - 混合清单：已删的不计，存在的照删（部分清理语义）
+  ok - 最终清空
+
+共 12 项断言：12 通过，0 失败
+== 1. 均分横排 ==
+  ok - 计划与输入同长
+  ok - x 等距分布 8/50/92
+  ok - y 统一为中位数 55
+  ok - 纯函数不改入参
+  ok - 两字段端点即 8/92
+  ok - 单字段原样
+  ok - 空数组安全
+== 2. 与画布语义的一致性 ==
+  ok - 计划 x 全在 0~100 内
+  ok - 等距（末对间距=首对间距）
+== 3. 锚点比例与渲染引擎口径一致 ==
+  ok - center → 0.5（盒中心）
+  ok - right → 1（右缘）
+  ok - left → 0（左缘）
+  ok - 未设 align 按 left（左缘，与渲染默认值一致）
+  ok - x=50 居中字段左右留白相等
+  ok - x=50 右缘字段右缘落在锚点线上
+  ok - x=50 左缘字段左缘落在锚点线上
+
+画布布局：16 项断言通过
+== 1. 画布字段框的盒宽必须恰好等于文字宽 ==
+  ok - 找得到 .field-box 规则
+  ok - .field-box 不许有 padding（会撑大盒宽 ⇒ 左右对齐漂移）
+  ok - .field-box 不许有 border（会撑大盒宽 ⇒ 左右对齐漂移）
+  ok - .field-box 不许有 border-width
+  ok - .field-box 不许有 max-width（长文本截断盒宽 ⇒ 居中/右对齐大幅漂移）
+  ok - .field-box 不许有 min-width
+  ok - .field-box 仍是绝对定位
+  ok - .field-box 仍不换行（与渲染 .pf 一致）
+== 2. 画布盒与渲染盒的关键属性必须同口径 ==
+  ok - 找得到渲染引擎的 .pf 规则
+  ok - 渲染 .pf 无 padding（画布无 padding 的前提）
+  ok - 渲染 .pf 无 border（画布无 border 的前提）
+  ok - 画布 .field-box 的 line-height 是 normal（与渲染一致，避免首行基线不同高）
+  ok - 渲染 .pf 不设 line-height（默认 normal）
+== 3. 状态样式不许用会改变盒宽的属性 ==
+  ok - 找得到 .field-box:hover 规则
+  ok - .field-box:hover 不用 border 系属性（border 会改变盒宽，破坏对齐；改用 outline / box-shadow）
+  ok - .field-box:hover 用 outline 或 box-shadow 表达状态
+  ok - 找得到 .field-box.selected 规则
+  ok - .field-box.selected 不用 border 系属性（border 会改变盒宽，破坏对齐；改用 outline / box-shadow）
+  ok - .field-box.selected 用 outline 或 box-shadow 表达状态
+  ok - 找得到 .field-box.nodata 规则
+  ok - .field-box.nodata 不用 border 系属性（border 会改变盒宽，破坏对齐；改用 outline / box-shadow）
+  ok - .field-box.nodata 用 outline 或 box-shadow 表达状态
+  ok - 找得到 .field-box.stale 规则
+  ok - .field-box.stale 不用 border 系属性（border 会改变盒宽，破坏对齐；改用 outline / box-shadow）
+  ok - .field-box.stale 用 outline 或 box-shadow 表达状态
+  ok - 找得到 .field-box.inmulti 规则
+  ok - .field-box.inmulti 不用 border 系属性（border 会改变盒宽，破坏对齐；改用 outline / box-shadow）
+  ok - .field-box.inmulti 用 outline 或 box-shadow 表达状态
+== 4. 位移口径：画布与渲染都用 anchorRatio × 盒宽 ==
+  ok - 找得到画布 fieldStyle
+  ok - 画布用 translateX(-shift×100%) 表达锚点位移
+  ok - 渲染引擎用同一套 translateX 百分比位移（center −50% / right −100%）
+  ok - 画布从 anchorRatio 取锚点比例（唯一权威源）
+  ok - anchorRatio 定义在 src/lib/field-layout.cjs
+== 5. 吸附/对齐数学仍以盒边缘为准（不被本次修改破坏）==
+  ok - 拖拽取盒宽用 ownRect.width
+  ok - 拖拽记录 anchorRatio 供吸附换算
+  ok - alignedX 仍按「盒边缘 → 锚点」换算
+  ok - alignedY 仍按盒边缘换算
+== 6. 上传字体在画布与 PDF 使用同一字体名 ==
+  ok - 画布注册并加载上传字体，而不是只在下拉菜单里列出
+  ok - 画布字段使用规范化后的字体名
+  ok - PDF 与画布共用同一规范化函数
+  ok - 规范化实现只留在 design-layout.cjs（零依赖，Vue 与 Node 都能引用）
+  ok - fonts.cjs 复用同一实现而不是再写一份
+  ok - 画布与编辑器不再各自复制一份规范化规则
+  ok - 默认字体栈在 design-layout.cjs 里显式声明
+  ok - 画布继承的字体栈与出片写死的字体栈逐字一致
+  ok - 空 family 走默认字体栈而不是退化成裸 sans-serif
+
+画布对齐契约：46 项断言通过
+== 1. 有效 dpi = 宽高两轴输出 dpi 的较低值 ==
+  ok - A4 下 2480px 宽 ≈ 300dpi（实际 300.0）
+  ok - 300dpi 判为 good（清晰度足够印刷）
+  ok - 文案形如「输出约 N dpi」
+  ok - 成品缩到 85mm 宽时 dpi 升到 741
+  ok - 800px 宽在 A4 下横向 ≈ 97dpi
+  ok - 界面显示宽高两轴较低的有效 dpi
+  ok - 较低一轴不足 96dpi 判为 bad（明显不够清晰）
+== 2. 分级阈值：300 / 150 / 96 三档 ==
+  ok - 恰好 300dpi → good
+  ok - 299dpi → ok（不再是 good）
+  ok - 恰好 150dpi → ok
+  ok - 149dpi → low
+  ok - 恰好 96dpi → low
+  ok - 95dpi → bad
+  ok - A4 上 2480px 的原始值是 299.96（低于 300）
+  ok - 但判定仍是 good（按取整后的 300 分级）
+  ok - dpiClass 也用取整后的值分级（否则界面配色与文案会互相打架）
+== 3. 拉伸变形时以较差的一边为准 ==
+  ok - 纵向 dpi(257) 低于横向(484)
+  ok - 展示数值与清晰度分级使用同一轴
+  ok - 分级按较差一边（纵向 257dpi ⇒ ok）
+== 4. 长宽比偏差：区分「变形」与「分辨率不够」 ==
+  ok - A4 底图比例一致（偏差 0.02%）
+  ok - 手机 4:3 铺 A4 判为拉伸（偏差 89%）
+  ok - 偏差 1.9% 不判拉伸
+  ok - 偏差 3% 判拉伸
+== 5. 缺数据不炸、不误报 ==
+  ok - 无 bgSize → 全零且文案为空（界面据此不渲染）
+  ok - 无成品尺寸 → 不计算
+  ok - 零尺寸底图 → 不计算
+  ok - 无 bgSize 的比例偏差安全返回
+== 6. 成品口径：多联按格、对折按半页（与渲染 resolveLayout 同口径）==
+  ok - 单页成品 = 整张纸
+  ok - 多联成品 = 单个成品尺寸
+  ok - 对折成品 = 半页
+  ok - 版式归一：grid
+  ok - 版式归一：缺省 single
+== 7. 导出路径不许引入任何图片重编码（静态守卫）==
+  ok - render-engine 用 inlineUrl 内联媒体
+  ok - 内联走 base64，不改字节（重编码会让 PDF 里的图与源图不再逐像素相同）
+  ok - 直接读原始文件字节
+  ok - 渲染引擎没有引入任何图像重编码库/调用
+  ok - 底图落盘是原始字节写入（storeBackground 不做任何转换）
+  ok - 导出 PDF 开了 printBackground（底图才会印）
+  ok - preferCSSPageSize 让 @page 毫米尺寸生效
+  ok - 零页边距（避免缩放出白边、位置整体偏移）
+  ok - 导出没有设置非 1 的 scale（会改变有效 dpi）
+  ok - 直打同样开了 printBackground
+  ok - 直打没有设置 scaleFactor（会改变有效 dpi）
+== 8. 界面必须把「输出 dpi」显式告诉用户 ==
+  ok - 模板页接入了 computeBgDpi
+  ok - 模板页展示输出 dpi 文案
+  ok - 模板页区分「被拉伸」与「分辨率不够」
+  ok - 打印中心展示底图输出 dpi
+  ok - 打印中心按 dpi 分级着色
+  ok - buildBatchHtml 返回 bgDpi 供界面消费
+  ok - 打印中心的成品口径与渲染一致，且取宽高两轴较低的有效 dpi
+  ok - 打印中心提示底图比例不符会被拉伸
+
+底图清晰度与导出保真：51 项断言通过
+== 1. 落盘形状校验：坏形状当没存过，绝不带进渲染 ==
+  ok - 非对象入参 null → 空 map
+  ok - 非对象入参 undefined → 空 map
+  ok - 非对象入参 "x" → 空 map
+  ok - 非对象入参 123 → 空 map
+  ok - 非对象入参 true → 空 map
+  ok - 非对象入参 ["a"] → 空 map
+  ok - 非对象入参 [] → 空 map
+  ok - 值不是数组的数据集被丢掉
+  ok - 数组里的非字符串与空串被剔掉
+  ok - 同一列记两次会去重
+  ok - 空数组的数据集不留键（盘上不攒空数组）
+  ok - 空 id 被丢掉
+  ok - 多个数据集原样保留
+== 2. 隐藏集只认「当前数据集真实存在的列」 ==
+  ok - 正常的两个隐藏列
+  ok - 盘上的旧 key（列已不存在）不算数
+  ok - 别的数据集的记录不串台
+  ok - map 为 null → 空集
+  ok - 没有列时 → 空集（列都还没加载）
+  ok - 数据集 id 为空 → 空集
+== 3. 写回：不改入参、去重、空集删键 ==
+  ok - 原 map 未被改动
+  ok - 目标数据集被整体替换
+  ok - 别的数据集不受影响
+  ok - 空集删键而不是留个空数组
+  ok - 删键不牵连别的数据集
+  ok - 重复的 key 去重
+  ok - 非字符串 key 被剔掉（不让坏值进盘）
+  ok - datasetId 为空时原样返回（不往 map 里塞空键）
+  ok - null map 也能起步
+== 4. 可见列过滤 ==
+  ok - 按隐藏集过滤且保持原顺序
+  ok - 隐藏集给数组也认
+  ok - 空隐藏集 → 全量
+  ok - 空 Set → 全量
+  ok - columns 为 null → 空数组
+  ok - 理论上不会发生，但函数本身不抛错
+== 5. 至少留一列 ==
+  ok - 3 列一列没藏 → 还能藏
+  ok - 3 列藏 1 → 还能藏
+  ok - 3 列藏 2（只剩 1 列）→ 拦住
+  ok - 全藏 → 拦住
+  ok - 单列数据集根本没有可藏的余地
+  ok - 没有列 → 拦住
+  ok - 隐藏集给数组也认
+== 6. 清理已删数据集留下的记录 ==
+  ok - 只留仍在的数据集
+  ok - 原 map 未被改动
+  ok - Set 也认
+  ok - 数据集列表为空时原样返回（不把用户偏好一次抹掉）
+  ok - null map → 空 map
+== 7. 存盘 → 读回 往返稳定（改字号不许冲掉隐藏状态） ==
+  ok - 改字号后隐藏状态原样读回
+  ok - 字号也一起写下去了（两个字段同住一个键）
+  ok - 同状态反复存读不漂移
+  ok - 全部恢复后盘上是干净的（无空数组残留）
+  ok - 恢复后三列全可见
+
+列显隐纯逻辑：51 项断言通过
+== 1. 版式模式归一：非 grid / fold 一律 single ==
+  ok - null → single
+  ok - 无 layout → single
+  ok - layout 为 null → single
+  ok - grid 原样
+  ok - fold 原样
+  ok - single 原样
+  ok - 未知值回落 single
+== 2. 设计参照物尺寸 ==
+  ok - null → 默认 A4 竖
+  ok - 单页 = 整张纸
+  ok - 多联 = 单个成品
+  ok - 多联但成品尺寸为 0 → 回落默认 85×54
+  ok - 多联但缺 itemW/itemH → 回落默认
+  ok - 对折桌牌 = 半页成品
+== 3. 多联摘要（含「放不下 2 个」） ==
+  ok - A4 横 × 85×54 → 3×3=9
+  ok - 放不下 → ok=false
+  ok - 只放得下 1 个也判 ok=false（多联至少要 2 个）
+  ok - 超过渲染引擎每页 400 格上限时回退单页
+== 4. 多联格子阵列（居中排布 + 放不下返回空） ==
+  ok - 9 个格子
+  ok - k 顺序为行优先
+  ok - 首格左缘 = 居中偏移
+  ok - 首格上缘 = 居中偏移
+  ok - 格子宽高为百分比
+  ok - 末格左缘正确
+  ok - 末格上缘正确
+  ok - 放不下 2 个 → 空数组
+  ok - 宽度放不下一格时不画假网格
+  ok - 超过 400 格上限时不画网格
+== 5. 底图比例预警（>2% 才提示） ==
+  ok - 无 bgSize → 空串
+  ok - 比例一致 → 不提示
+  ok - 多联偏差 → 指向「成品尺寸」
+  ok - 单页偏差 → 指向「纸张」
+  ok - 对折偏差 → 指向「半页成品」
+  ok - 差 1.9% 不提示
+  ok - 差 3% 提示
+== 6. 尺寸输入钳位 ==
+  ok - 纸张空串 → 10（不是 0）
+  ok - 纸张非数 → 10
+  ok - 纸张 null → 10
+  ok - 纸张过小钳到 10
+  ok - 纸张过大钳到 2000
+  ok - 纸张正常值原样
+  ok - 纸张四舍五入
+  ok - 成品空串 → null（不写回，用户想重输）
+  ok - 成品非数 → null
+  ok - 成品 0 → null
+  ok - 成品负数 → null
+  ok - 成品过小钳到 5
+  ok - 成品过大钳到 500
+  ok - 成品正常值原样
+  ok - 成品四舍五入
+== 7. pt → 画布 px ==
+  ok - 72pt 在 210mm 宽画布上的 px
+  ok - 12pt 在 297mm 宽画布上的 px
+  ok - 0pt → 0
+
+模板版式几何：52 通过
+== 1. 常量口径 ==
+  ok - 吸附阈值 6px
+  ok - 撤销栈上限 50
+  ok - 微调合并窗口 800ms
+== 2. 百分比钳位（0–100，1 位小数） ==
+  ok - 负值 → 0
+  ok - 超 100 → 100
+  ok - 保留 1 位小数
+  ok - 正常值原样
+  ok - 临界四舍五入后仍 ≤100
+== 3. 吸附（阈值内取最近） ==
+  ok - 阈值内命中并给出 adjust/line
+  ok - 阈值外不命中
+  ok - 多边缘取最近的一条
+  ok - 无边缘 → null
+  ok - 可传自定义阈值
+  ok - 兼容 [offset, label] 形态
+== 4. 撤销快照：含 fields+layout、不含底图、兼容旧形态 ==
+  ok - null 模板 → 空 fields 快照
+  ok - 底图不进快照（换/删图会真删文件）
+  ok - fields 往返一致
+  ok - layout 往返一致
+  ok - 兼容早期「只存 fields 数组」的快照
+  ok - 无 layout 时解析为 null
+== 5. 入栈去重与封顶 ==
+  ok - 首次入栈
+  ok - 连续同值去重（不入栈）
+  ok - 换值入栈
+  ok - 封顶前长度正常
+  ok - 超上限丢最旧（shift）
+== 6. 方向键微调合并窗口 ==
+  ok - 首次（距上次很久）→ 新一段
+  ok - 窗口内 → 合并
+  ok - 恰好 800ms → 仍合并
+  ok - 刚过 800ms → 新一段
+  ok - 远超窗口 → 新一段
+== 7. 多选对齐换算（锚点 vs 像素，含 align 影响） ==
+  ok - 居中字段左对齐 → 20
+  ok - 居中字段水平居中 → 30
+  ok - 居中字段右对齐 → 40
+  ok - align=left 左对齐 → 10
+  ok - align=left 右对齐 → 30
+  ok - align=left 水平居中 → 20
+  ok - align=right 水平居中 → 40
+  ok - 纵向 kind → null（x 不动）
+  ok - 顶对齐 → 20
+  ok - 垂直居中 → 36
+  ok - 底对齐 → 52
+  ok - 横向 kind → null（y 不动）
+
+字段编辑数学：42 通过
+== createJob / listJobs ==
+  PASS 任务 id 生成
+  PASS 快照写入归档目录
+  PASS listJobs 可读回
+== resolveSnapshot ==
+  PASS 快照路径可解析
+  PASS 不存在的任务抛错
+== deleteJob ==
+  PASS 删除前归档目录存在
+  PASS 删除返回 ok
+  PASS 归档目录已清理
+  PASS 元数据已移除
+  PASS 归档照片副本已释放
+  PASS 外部 PDF、名单、模板、照片绑定、共享原件和缩略图均保留
+  PASS 删除历史不回退名单累计已打状态
+  PASS 恢复备份也不残留已删记录
+  PASS 快照缺失时删除仍成功
+  PASS 删除不存在的任务抛错
+  PASS 删除不影响其他记录
+== 取消态不落盘快照 ==
+  PASS 状态标记为取消
+  PASS 取消态快照路径为 null
+  PASS 取消记录仍入历史
+  PASS 取消态删除仍成功（无归档目录）
+  PASS 取消记录元数据已移除
+== 失败重试及任务目录归属 ==
+  PASS 归档删除失败时保留历史并明确报错
+  PASS 清理失败没有误删快照
+  PASS 解锁后重试准确清理
+  PASS 拒绝其他任务、共享目录及非法归档路径：design-assets/snapshot.html
+  PASS 拒绝其他任务、共享目录及非法归档路径：archive/2026-10/job_mv669lpla60232/snapshot.html
+  PASS 拒绝其他任务、共享目录及非法归档路径：archive/2026-99/job_intruder/snapshot.html
+  PASS 拒绝其他任务、共享目录及非法归档路径：archive/2026-10/job_intruder/../snapshot.html
+  PASS 拒绝任务目录 junction，目标归档完整保留
+  PASS 重复 id 的两份合法归档均释放，其他记录保留
+  PASS 恢复副本更新失败准确返回，界面可提示残留
+
+结果: 31 项断言通过, 0 项失败
+== 1. compareVersions 版本比较 ==
+PASS  相同版本 = 0
+PASS  补丁位更大
+PASS  次版本位更大（跨进位）
+PASS  主版本位更大
+PASS  本地更小 → -1
+PASS  忽略 v 前缀
+PASS  缺段补 0 等价
+PASS  数值比较而非字符串比较（10 > 9）
+== 2. parseInfo 载荷解析 ==
+PASS  合法载荷完整解析 :: {"version":"0.2.0","notes":"修复若干","url":"https://x/releases"}
+PASS  缺 version → null（不猜测）
+PASS  纯空白 version → null（不猜测）
+PASS  version 首尾空白被裁剪
+PASS  非 JSON → null
+PASS  空串 → null
+== 3. checkForUpdate 决策矩阵（fake fetch，无真实网络） ==
+PASS  远程更大 → newer + info :: {"status":"newer","info":{"version":"0.2.0","notes":"新版","url":"https://x/"}}
+PASS  版本相同 → current（不打扰） :: {"status":"current"}
+PASS  本地更新 → current（不做降级提示） :: {"status":"current"}
+PASS  HTTP 错误 → unavailable :: {"status":"unavailable","reason":"HTTP 404"}
+PASS  坏载荷 → unavailable :: {"status":"unavailable","reason":"bad payload"}
+PASS  网络异常 → unavailable（离线静默） :: {"status":"unavailable","reason":"network"}
+PASS  超时 → unavailable :: {"status":"unavailable","reason":"timeout"}
+PASS  缺 currentVersion → unavailable :: {"status":"unavailable","reason":"missing currentVersion"}
+== 4. 配置常量形态 ==
+PASS  UPDATE_INFO_URL 是 https 地址
+PASS  RELEASES_URL 指向 releases 页
+PASS  FEEDBACK_URL 是 https 地址
+
+结果: 25 通过, 0 失败
+== 1. 存储路径守卫（穿越拦截） ==
+  ok - 目录内相对路径正常解析
+  ok - 拒绝 ../ 越界
+  ok - 拒绝嵌套 ../ 越界
+  ok - 拒绝 Windows 反斜杠越界
+  ok - 拒绝绝对盘符路径
+  ok - 拒绝 UNC 路径
+  ok - 拒绝空字符串
+  ok - 拒绝 null
+  ok - 拒绝非字符串
+  ok - 子目录不算越界
+== 2. 删除模板不得删到数据目录外 ==
+  ok - 渲染 HTML 不内联数据目录外的文件
+  ok - background 为 ../ 时目录外文件未被删除
+  ok - 模板记录本身仍被删除（元数据清理不受阻）
+== 3. 快照路径守卫 ==
+  ok - resolveSnapshot 拒绝越界路径
+  ok - deleteJob 拒绝异常归档路径
+  ok - deleteJob 未递归删除目录外目录
+  ok - 异常路径保留记录供检查，不假报清理成功
+== 4. JSON 损坏 / null 兜底 ==
+  ok - templates.json 为 null 且无备份 → 抛错
+  ok - 损坏文件被留存为 .corrupt-<ts>
+  ok - 原路径已腾空（不覆盖留存件）
+  ok - JSON 语法破损且无备份 → 抛错
+  ok - 二次写入后 .bak 存在（备份的是上一版而非新版）
+[store] templates.json 损坏（内容不是数组），已从 .bak 恢复；原文件留存为 templates.json.corrupt-2026-10-13T04-19-45-628Z
+  ok - 内容损坏时回退到上一版（.bak 存的是上一版，不是最新那次）
+  ok - 恢复结果已写回主文件（下次启动不再撞同一处损坏）
+  ok - .bak 同样损坏 → 抛错而非顶包
+  ok - 期望数组但读到对象 → 抛错
+  ok - 不存在的库返回 null（首次运行）
+== 5. 数值钳制 ==
+  ok - 成品尺寸过小不再产生天文数字版式
+  ok - 回退必须带 reason 供界面提示
+  ok - 每页格数有上限
+  ok - 尺寸 0 仍回退
+  ok - NaN 仍回退
+  ok - 正常多联不受钳制影响
+  ok - 放不下 2 个仍按原语义回退
+  ok - 越界坐标被钳制
+  ok - 超大字号被钳到上限
+== 6. 样式属性消毒 ==
+  ok - 注入用的双引号被剔除
+  ok - 注入的事件属性未进入输出
+  ok - fontFamily 里的 CSS 语法字符被剔除
+  ok - 非法 align 值不进入输出
+  ok - 合法颜色保留
+  ok - 三位十六进制保留
+  ok - 合法字体名保留
+  ok - 居中 translate 保留
+  ok - 右对齐 translate 保留
+  ok - 左对齐保留
+== 7. 版式回退原因必须能传到界面 ==
+  ok - 放不下时回退单页
+  ok - 回退时 reason 透传给前端
+  ok - 回退时保留原 mode（界面据此提示）
+== 8. 留痕上限 ==
+  ok - 留痕条数有上限（防无限膨胀）
+
+存储安全边界：50 通过，0 失败
+== 1. dirSize / cacheInfo ==
+  ok - 目录不存在 → 0（不抛错）
+  ok - 目录大小按字节累加
+  ok - 子目录递归计入
+  ok - cacheInfo 汇总所有缓存目录
+  ok - 带上数据目录本身（界面要显示位置）
+  ok - 只列实际存在的目录
+  ok - entries 是 {name,size} 结构
+  ok - pending 初始为空数组（不是 undefined）
+  ok - 空缓存目录照样列出（大小为 0）
+== 2. readPending / writePending ==
+  ok - 清单文件不存在 → 空数组（不能因此卡住启动）
+  ok - 写入时去重
+  ok - 写入后读回一致
+  ok - 非白名单条目（data / Local Storage / ../evil）读出来就被滤掉
+  ok - 全是非法名 → 不写清单文件
+  ok - 非法名一个都进不去
+  ok - 清单损坏 → 当空清单（不抛错）
+  ok - 结构不对（不是 {dirs:[]}）→ 空清单
+  ok - 有内容时清单文件落盘
+  ok - 传空数组 → 清单文件删掉（不留空壳）
+== 3. clearCache：全部可删 ==
+  ok - freed 是实际释放的字节数
+  ok - removed 列出删掉的目录名
+  ok - 全删成功时 failed 为空
+  ok - 全删成功时没有排队项
+  ok - 没失败就不留清单文件
+  ok - 缓存目录真的没了
+  ok - **用户数据（data/）一根汗毛没动**
+  ok - 清完再查大小为 0
+  ok - 重复点击：freed 0、removed 空（界面据此说「已无可清理」）
+== 4. clearCache：锁定目录 → failed + queued ==
+  ok - 前提：CWD 占住时该目录确实删不掉（复现 Chromium 持锁 GPUCache）
+  ok - 删不掉的进 failed（不再被 catch {} 静默吞掉）
+  ok - failed 带失败原因（EPERM / EBUSY 之类），界面能说清楚
+  ok - failed 带体积，界面才能说「还剩多少正被占用」
+  ok - **删不掉的自动排队到下次启动**
+  ok - 队列已落盘
+  ok - 一个删不掉不阻断其余（能删的照样删）
+  ok - freed 只算真正删掉的那部分
+  ok - 锁定目录还在（没被误判为已清）
+  ok - 重复点击后队列仍是那一项（不丢也不重复）
+== 5. runPendingCleanup：启动早期清队列 ==
+  ok - 没队列 → attempted 0（启动不做多余动作）
+  ok - attempted 是队列长度
+  ok - 真删掉的进 removed
+  ok - 队列里有、目录已不存在的也算清掉（否则永远留在队列里）
+  ok - 都清掉了，still 为空
+  ok - 清干净后清单文件删掉
+  ok - GPUCache 真的没了
+  ok - 这次仍删不掉 → 进 still
+  ok - **still 的项写回清单，留待下一次启动**（一次失败不放弃）
+== 6. 安全边界：只碰白名单里的系统缓存 ==
+  ok - 越界 / 非缓存名在读清单时就被滤掉，根本没进循环
+  ok - 启动清理不会动 data / Local Storage 等应用状态
+  ok - 「data」完好无损
+  ok - 「Local Storage」完好无损
+  ok - 「Session Storage」完好无损
+  ok - 「Network」完好无损
+  ok - 「print-bg」完好无损
+  ok - 「fonts」完好无损
+  ok - 白名单里的照清不误
+  ok - clearCache 也不碰应用状态目录
+  ok - clearCache 清掉了白名单目录
+  ok - cacheInfo 也只统计白名单目录
+
+系统缓存清理：59 通过，0 失败
+== 1. 重打必须还原出片范围 ==
+  ok - 部分出片只出 3 条
+  ok - 留痕保存了当时的行号
+  ok - 重打还原为当初那 3 行（不是全部 10 行）
+  ok - 按还原范围重新出片仍是 3 条
+  ok - 全量留痕不冗余存 selection
+  ok - 全量留痕重打走全量（null）
+  ok - 空 selection 视为全量
+  ok - 非数组 selection 视为全量
+  ok - 缺字段不炸
+  ok - null 记录不炸
+  ok - 行号去重排序并剔除非整数/负数
+== 2. 多联回退原因必须传到界面 ==
+  ok - 放不下时回退单页
+  ok - 回退时带原mode（界面据此判断该不该提示）
+  ok - 回退时带可读 reason
+  ok - 界面拿到可展示的回退原因
+  ok - 正常多联不提示
+  ok - 单页版式不提示（不是问题）
+  ok - 缺 reason 时有兜底文案
+  ok - 无 layout 不提示
+  ok - 每页格数超上限时回退并说明
+  ok - 对折桌牌正常启用
+  ok - 对折桌牌不触发回退提示
+== 3. 直打失败必须留痕 ==
+  ok - 失败态被记录
+  ok - 失败原因入库（能查当时出了什么）
+  ok - 失败也留快照（能回看当时排的是什么版）
+  ok - 失败记录出现在历史列表里
+  ok - 失败记录同样保留范围（可原样重打）
+  ok - 取消态不落快照（省空间）
+  ok - 取消态仍留历史痕迹
+== 4. 静态核查：print:send 必须有失败留痕分支 ==
+  ok - 定位到 print:send 操作定义
+  ok - print:send 包了 try/catch（异常不再静默）
+  ok - print:send 失败时写 failed 留痕
+  ok - 失败留痕发生在 return 之前
+  ok - 定位到 print:exportPdf 操作定义
+  ok - print:exportPdf 同样有 failed 留痕（两出口对称）
+
+打印出口容错：35 通过，0 失败
+== 1. 贴边布局在保存时就被拦下（而不是打印时刷假警报） ==
+  ok - 居中字段贴左边缘被拒
+  ok - 居中字段贴右边缘被拒
+  ok - x 为负被拒
+  ok - y 越界被拒
+  ok - 坐标非数值被拒
+  ok - 左/右对齐贴边合法（不误伤）
+  ok - 报错指名道姓并说明后果
+  ok - 居中常规字段不报超宽
+  ok - 真正超宽的大字号仍被报出（没矫枉过正）
+== 2. 行范围搜索过滤 ==
+  ok - 空关键词返回全部
+  ok - 纯空白视为无关键词
+  ok - 按姓名精确命中
+  ok - 按机构片段命中
+  ok - 无匹配返回空数组
+  ok - null 关键词不炸
+  ok - rows 为 null 不炸
+  ok - 跳过非对象行
+  ok - 5000 行定位准确
+  ok - 5000 行全表搜索在可接受耗时内
+== 3. 前端静态核查：异步失败必须可见 ==
+  ok - refreshAll 至少有一处 catch
+  ok - 三个清单各自 catch（一个失败不拖垮整页）
+  ok - 失败时给用户可见提示（不静默）
+  ok - execute 收尾的刷新被包进 try
+  ok - listJobs 在 try 之内（旧代码在 try 之外会顶掉已报结果）
+  ok - listDatasets 在 try 之内
+  ok - runAction 有 catch（守卫之外的异常也要可见）
+  ok - rebuildPreview 使用序号守卫
+  ok - 成功与失败两条路径都校验序号
+  ok - 序号变量已声明
+== 4. 前端静态核查：模板画布与数据页 ==
+  ok - onPointerMove 含吸附与多选跟随
+  ok - 吸附检测在多选跟随之前（否则整组撕裂一帧）
+  ok - 主字段先落到吸附后的最终值，再统一算位移
+  ok - onItemDim 交给 clampItemDim，空值/非法值不写回（不被钳成 5mm）
+  ok - 不再用 Number(val)||0 把空值变成 0
+  ok - clampItemDim 对 ≤0 返回 null（不写回语义）
+  ok - 撤销快照含 layout（尺寸改错也能撤销）
+  ok - restoreSnapshot 恢复 layout
+  ok - 兼容早期只存 fields 的快照
+  ok - 模态开着时不响应全局快捷键
+  ok - 守卫在函数前部而非末尾
+  ok - 方向键走合并撤销入口
+  ok - 合并窗口已定义（按住 1.3s 不冲光 50 级栈）
+  ok - 方向键不再每次按键都 pushUndo
+  ok - 消费后ack（否则每次进数据页重放上次跳转）
+  ok - ack 放在 finally（失败分支也要清）
+  ok - 只 ack 同一条请求（处理期间的新请求不被吃掉）
+  ok - ackCell 已从导航模块导入
+  ok - ackCell 已导出
+== 5. 前端静态核查：切数据集重置页码 ==
+  ok - selectDataset 重置页码（否则表格空白且分页器消失）
+  ok - 只重置一次，不重复
+== 6. 前端静态核查：搜索防抖 ==
+  ok - 搜索走防抖后的值
+  ok - 有 150ms 防抖定时器
+  ok - 重复输入会清掉上一个定时器
+  ok - 卸载时清定时器（不泄漏）
+  ok - 打开面板时同步清防抖值
+  ok - 按钮显示条件跟防抖值一致（不闪烁）
+  ok - onBeforeUnmount 已导入
+== 7. 多选对齐必须把「盒边缘」换算回「锚点」 ==
+  ok - 定位到 alignSelected 函数体
+  ok - alignSelected 的 x 轴交给 alignedX
+  ok - alignSelected 的 y 轴交给 alignedY
+  ok - 包围盒四边在视图层测出后传入
+  ok - anchorRatio 已导入并使用
+  ok - field-edit 的 left 分支坐标换算正确
+  ok - field-edit 的 center-h 分支坐标换算正确
+  ok - field-edit 的 right 分支坐标换算正确
+  ok - field-edit 的 top 分支坐标换算正确
+  ok - field-edit 的 center-v 分支坐标换算正确
+  ok - field-edit 的 bottom 分支坐标换算正确
+  ok - center-h 没有把盒中心裸当锚点写入（这正是偏移的根因）
+  ok - center-h（真实函数）换算后 align=left 的盒中心落在 580px（实得 580px）
+  ok - center-h（真实函数）换算后 align=center 的盒中心落在 580px（实得 580px）
+  ok - center-h（真实函数）换算后 align=right 的盒中心落在 580px（实得 580px）
+  ok - 反证：旧写法下 align=left 的盒中心偏 60px（=60px），确认是实打实的偏移不是误报
+  ok - 反证：旧写法下 align=right 的盒中心偏 60px（=-60px），确认是实打实的偏移不是误报
+  ok - align=center 时换算量为 0（锚点本就在盒中心）
+
+健壮性回归：75 通过，0 失败
+== 1. store 通道必须只放行 UI 偏好类 ==
+  ok - 白名单显式列举（不是文件名形状校验）
+  ok - 两个 handler 都走白名单校验
+  ok - 旧的文件名形状校验已移除（它挡不住 datasets/templates）
+  ok - ipc.cjs 不再自持白名单副本（唯一权威源在 api.cjs）
+  ok - 领域库 datasets 不在白名单内（一行调用即可清空全部数据）
+  ok - 领域库 templates 不在白名单内（一行调用即可清空全部数据）
+  ok - 领域库 print-jobs 不在白名单内（一行调用即可清空全部数据）
+  ok - 领域库 fonts 不在白名单内（一行调用即可清空全部数据）
+  ok - 领域库 archive 不在白名单内（一行调用即可清空全部数据）
+  ok - 扫到前端实际使用的键（5 处）
+  ok - 前端用到的键全在白名单内
+  ok - 实际只用到 settings 与 display-settings 两个
+== 2. 外部链接协议白名单 ==
+  ok - https 放行
+  ok - http 拒绝（无正当理由）
+  ok - file:// 拒绝（可拉起本地 exe）
+  ok - smb:// 拒绝（Windows 上会触发 NTLM 协商）
+  ok - javascript: 拒绝
+  ok - data: 拒绝
+  ok - vbscript: 拒绝
+  ok - 首尾空白容忍
+  ok - 空串拒绝
+  ok - null 拒绝
+  ok - 非字符串拒绝
+  ok - 畸形 URL 拒绝而非抛错
+  ok - 带凭据的 URL 行为明确（不抛错即可）
+  ok - parseInfo 抹掉 file:// 的 url（渲染层因此不给可点链接）
+  ok - parseInfo 保留 https 的 url
+  ok - 缺 url 时为空串（非 undefined）
+== 3. 新窗口默认必须 deny ==
+  ok - 存在 deny 分支
+  ok - 不再有 allow 分支（旧代码 default 就 allow）
+  ok - 所有路径最终都返回 deny
+  ok - 放行条件是 https 前缀
+== 4. 文件名消毒（模板名直接拼 defaultPath） ==
+  ok - 正常名原样保留
+  ok - 路径非法字符全清
+  ok - 控制字符全清
+  ok - 空名兜底
+  ok - null 兜底
+  ok - 首尾空白清掉
+  ok - 结尾点被清（Windows 会截断）
+  ok - 结尾空格被清
+  ok - 保留设备名 CON 被改写
+  ok - 保留设备名 con 被改写
+  ok - 保留设备名 PRN 被改写
+  ok - 保留设备名 AUX 被改写
+  ok - 保留设备名 NUL 被改写
+  ok - 保留设备名 COM1 被改写
+  ok - 保留设备名 LPT9 被改写
+  ok - 含保留字但非全等的正常名不误伤
+  ok - 限长 80
+  ok - 截断不产生尾点
+  ok - exportPdf 的 defaultPath 用了消毒后的名字
+  ok - 不再直接拼未消毒的模板名
+== 4b. 拖拽 / 粘贴上传底图：格式按内容判定，前端给的文件名不可信 ==
+  ok - PNG 正常写入并入素材库原件池（assetId）
+  ok - 尺寸按内容解析（1x1）
+  ok - 底图原件确实落在数据目录内
+  ok - 路径穿越被挡住（只取文件名）
+  ok - Windows 非法字符被替换
+  ok - 相同内容去重为同一原件（叫 .jpg 的 PNG 仍是同一 assetId）
+  ok - 非图片内容被拒绝（改名成 .png 也没用）
+  ok - 空内容被拒绝
+  ok - 底图文件选择器不再展示尚不支持的 WebP
+  ok - 拖拽入口也不宣称支持 WebP
+  ok - 前端调用了字节版上传通道
+  ok - 前端用 FileReader 把 File 读成 base64
+  ok - base64 去掉了 data: 前缀
+  ok - 拖拽与粘贴两条入口都接上了
+  ok - 拖拽时阻止默认行为（否则浏览器会直接打开这个文件）
+== 4c. 底图的上传入口与删除方式（前端静态核查） ==
+  ok - 画布中央有上传入口
+  ok - 中央那块按钮触发上传
+  ok - 工具栏的独立「上传底图」按钮已移除
+  ok - 有字段时收成小胶囊，且容器不吃事件（不挡字段拖拽）
+  ok - 点底图进入选中态
+  ok - 有独立的底图选中标志
+  ok - 存在纸面上的底图提示（.bg-tip）
+  ok - 选中字段时收起底图提示（改字段时不再弹「点底图」）
+  ok - Delete 有删底图的分支
+  ok - 存在移除底图的实现
+  ok - 删底图的分支排在 targets 判空之前（否则按 Delete 永远没反应）
+  ok - 底图不进撤销快照（撤销回来只会是破图）
+  ok - 换图 / 删图都会丢弃旧图文件
+  ok - 底图加载失败时自动清引用（换了图没保存就走了的兜底）
+== 4d. 底图文件与模板记录解耦：换图 / 删图当场删文件 ==
+  ok - 上传后原件落盘 design-assets
+  ok - 第二张原件落盘
+  ok - 不同内容去重后仍是不同原件（内容寻址）
+  ok - 保存模板不碰底图原件（两件事）
+  ok - 换图后旧原件当场被删（不再被引用）
+  ok - 新图原件不受影响
+  ok - 移除底图后原件当场被删（不再被引用）
+  ok - 越界路径被守卫挡下（removed:false）
+  ok - 数据目录外的文件没被删掉
+  ok - 删模板连带清掉它的底图
+== 4e. 模板列表封顶 + 「列对齐」下线（前端静态核查） ==
+  ok - 工具栏不再有「列对齐」按钮（handler 也没了）
+  ok - 没有残留的「列对齐」按钮文案
+  ok - 「均分横排」保留（删的是列对齐，不是整条工具栏）
+  ok - field-layout.cjs 里的 columnSnap 已删（零引用的死代码）
+  ok - 导出只剩 evenRow / anchorRatio
+  ok - 存在 .tpl-list 规则
+  ok - 可见条数上限是 8
+  ok - max-height 由「可见条数」变量算出（不是拍脑袋的像素值）
+  ok - 用 overflow-y:auto —— 超过才出滚动条
+  ok - .tpl-item 高度取自同一个变量（改一处两边同步）
+  ok - .tpl-item 不许被 flex 压缩（否则高度会缩水）
+  ok - .tpl-list 上定义了这个变量
+== 4f. 模板页属性面板必须是浮层，不许占列（前端静态核查） ==
+  ok - 存在 .props 规则
+  ok - .props 绝对定位（浮层，不占 flex 列）
+  ok - .props 不再是 flex 项（没有 flex-shrink）
+  ok - .props 有浮层阴影（与画布分层，否则像贴在纸上）
+  ok - .props 贴在右侧
+  ok - .workbench 是相对定位（属性抽屉的定位参照，缺了抽屉会跑到页面右下角）
+  ok - 属性抽屉仅在选中字段/底图时渲染（常驻会盖住画布）
+== 5. 取消「印」必须使模板字段失效 ==
+  ok - 全部激活时无问题
+  ok - 取消「印」后该字段判为缺失（阻断放行）
+  ok - 带 not-printable 原因（界面据此给「去数据页激活」的出路）
+  ok - 未取消的列不受牵连
+  ok - 界面区分两种缺失的文案
+  ok - 弹窗总提示也区分
+  ok - flag 文案指向「未激活打印」
+== 6. 0 份出片不得计「已打」 ==
+  ok - 全量出片回写
+  ok - 部分出片不回写
+  ok - 0 份不回写（空数据集不能凭空多一个成功信号）
+  ok - 勾选 0 条（partial）不回写
+  ok - 无 scope 时按全量（旧调用兼容）
+  ok - 空数据集 recordCount 为 0
+  ok - 0 份不回写「已打」
+== 7. 种子幂等 + 文案口径 ==
+  ok - 示例数据集按名字去重（迁移中途崩溃重启不留同名副本）
+  ok - 模板去重仍在
+  ok - 首启文案改为 7 套（实际种子是 7 套）
+  ok - 引导弹窗同步
+  ok - 不再有「4 套」残留
+  ok - 空态文案不再强制要求底图（无底图版式是合法的）
+  ok - 明确说明底图可选
+  ok - 扩展名文案由常量派生
+  ok - 两处文案都引用该常量
+  ok - 旧的硬编码清单已替换
+  ok - 拖放区不再写死一份
+  ok - 零引用的 MultiSelect.vue 已删
+  ok - 零引用的描线 token 已清
+  ok - 硬编码亮色已换成主题 token
+  ok - 改用 --warn-soft（暗色下不再刺眼）
+== 7b. 种子迁移：临时文件删不掉也必须走完（可重试自愈） ==
+  ok - 删不掉临时文件时迁移仍走完
+  ok - 扩展示例名单已导入
+  ok - 模板用到的列已激活（没有停在半途）
+  ok - 会务证卡模板已补种
+  ok - seedVersion 已写（不会每次启动重试）
+  ok - 再次启动直接 already（幂等）
+  ok - 临时 CSV 不落在 seed 资源目录（打包后是只读 resources/seed，开发态是被跟踪的 build/seed）
+  ok - 列全关的半途状态能被重试自愈（去重命中时补激活）
+== 8. 缓存 0 值语义 ==
+  ok - 有独立的成功标志（0 不再兼任「成功」与「失败」）
+  ok - 查询失败时置false
+  ok - 失败有独立文案（不把故障说成「已无缓存」）
+  ok - 按钮只在「清理中」禁用；缓存为 0 时仍可点 —— 同一按钮还要回收工程残留，不能按 cacheSize 挡死
+== 8b. 清理缓存「点了没反应」不许再复发 ==
+  ok - 主进程不再静默吞掉删除失败
+  ok - 缓存实现抽到 cache.cjs（main.cjs 启动早期也要用）
+  ok - app:cacheInfo 委托 cache.cjs
+  ok - app:clearCache 委托 cache.cjs
+  ok - 删不掉的记进 failed，带原因和体积
+  ok - failed 自动排队到下次启动
+  ok - cache.cjs 是纯 Node 模块（不 require electron，main/api 都能用）
+  ok - main.cjs 启动时清理上次没清掉的缓存
+  ok - **清理必须排在 app.whenReady() 之前**（晚于它 GPU 进程已持有 GPUCache，白清）
+  ok - 清理失败不能挡住启动（整段包在 try/catch 里）
+  ok - 界面有清理结果的状态位
+  ok - 缓存清掉了多少，如实说
+  ok - 工程残留清掉了多少，也必须如实说
+  ok - 「清理缓存」按钮顺带调用工程残留回收（界面一键两用）
+  ok - 不足 1KB 不报「已清理 0 KB」（Chromium 的 Cache 目录常年只有几十字节索引，报了是噪音）
+  ok - **当场清不掉的要交代去向**（不许「没反应」）
+  ok - 真的没缓存与残留可清时也有话说
+  ok - 界面读的是 failed / queued，不是自己猜
+  ok - 异常路径有独立标志（不是只说「已无缓存」）
+  ok - 「排到下次启动」用警示色（需要用户知情）
+  ok - cr-warn 有对应样式
+  ok - 重开「关于」清掉上次的结果文案
+== 8c. 「关于」不再挂使用说明入口（顶栏「说明」是唯一入口） ==
+  ok - 「关于」里没有「查看使用说明」按钮了
+  ok - 没有残留的「使用说明」按钮文案
+  ok - 顶栏「说明」入口还在
+  ok - 使用说明弹窗还在挂载
+  ok - GuideDialog 组件仍被引用
+  ok - GuideDialog.vue 还在
+  ok - docs/使用说明.md 还在
+== 9. 列显隐：不许变成「静默改打印」，也不许「藏了找不回」 ==
+  ok - 不再用 { tableSize: v } 单字段覆写（那会顺手清掉 hiddenColumns）
+  ok - 写下去的是内存镜像整体（含 hiddenColumns）
+  ok - 只此一处写 display-settings（多个写点就是多个覆写风险）
+  ok - 读到落盘值之前不许写（否则拿空镜像盖掉用户存着的隐藏状态）
+  ok - 读成功才开闸
+  ok - 读回时做形状校验（落盘 JSON 用户可手工编辑）
+  ok - 纯逻辑抽到 column-visibility.cjs（可直接单测，见 test/column-visibility.cjs）
+  ok - 那个套件确实存在
+  ok - 表头与表体两处都按可见列渲染
+  ok - 还在直接迭代全量列的只剩显隐菜单里的复选框清单
+  ok - 隐藏集只收当前数据集真实存在的 key（换过文件的旧 key 不算数）
+  ok - 「#」与「操作」是固定表头，不在可隐藏的列集合里
+  ok - 有「至少留一列」的判定
+  ok - hideColumn 里挡了一次
+  ok - 复选框路径也挡了一次（界面上禁用只是第一道）
+  ok - 工具栏给出「已隐藏 N 列」的回头入口
+  ok - 只在真有隐藏时出现（没藏东西就不占工具栏）
+  ok - 列头菜单里也有一条恢复
+  ok - 整个数据页只有「印」开关一处调 setColumnPrint —— 隐藏路径碰不到它
+  ok - 隐藏路径不写单元格
+  ok - 隐藏路径不改列名
+  ok - 菜单里把这条规则写给用户看
+  ok - 补录跳转有「目标列被隐藏」的分支
+  ok - **先展开、再定位**（反过来滚动到的是一个还不存在的格子）
+  ok - 菜单 Teleport 到 body（否则被 th 的 overflow 裁掉）
+  ok - 菜单用 fixed 定位
+  ok - 两个触发器（列头 ▾ 与胶囊）都打了标记
+  ok - 点触发器不算「点外面」（否则 mousedown 先关、click 再开，看起来像点它关不掉）
+  ok - Esc 能收起菜单
+  ok - 滚动 / resize 收起菜单，但菜单内部滚动不算（resize 的 target 是 window 不是 Node，直接 contains 会抛错）
+  ok - 卸载时摘掉监听（页面来回切不会越挂越多）
+  ok - 切换数据集时收起菜单（菜单里记的是上一个数据集的列）
+  ok - 清掉已删数据集留下的隐藏记录（这个 map 只增不减）
+  ok - 「▾」默认隐身（列头已有两个热区）
+  ok - hover 才现
+  ok - 列名出省略号（否则长列名会把「印」和「▾」一起挤出 th 可视区，两个开关都点不到）
+  ok - 没有把响应式容器整个丢给 IPC 的调用点（结构化克隆会抛）
+  ok - 写盘前先转纯对象（和 TemplateView 存模板同一手法）
+  ok - 写盘调用整体兜住（saveData 是同步抛的，Vue 会吞掉事件处理里的异常）
+  ok - 落盘偏好在 setup 阶段就发起读取（不等 onMounted）
+  ok - 补录跳转在判断「目标列被藏」之前先等读盘落地
+  ok - onMounted 不再重复读一次（晚读会把刚写下去的隐藏状态用旧值盖回来）
+  ok - .det-flag 规则存在
+  ok - .det-flag 设了 white-space: nowrap（关键修复；表格列会按 unbreakable 宽度分配）
+  ok - .det-flag 设了 display: inline-block（让 padding/border 可预测，不再被 inline 的基线对齐影响）
+  ok - .det-flag 没有把 white-space 写回 normal
+== 10. 「检查更新」必须真能触发更新（前端静态核查） ==
+  ok - preload 暴露 startUpdate（渲染层有「开始下载」的入口）
+  ok - preload 暴露 installUpdate（下载完成后能重启安装）
+  ok - preload 订阅 update:state（进度与失败原因能进界面）
+  ok - 注册表登记 app:startUpdate 并标 gui:updater
+  ok - assertCapabilities 有 updater 分支（无 GUI 上下文给 GUI_REQUIRED，不是 TypeError）
+  ok - normalizeCtx 放行 ctx.autoUpdate（漏了会被静默丢掉，通道恒 GUI_REQUIRED）
+  ok - App.vue 的「检查更新」会真正调 startUpdate()，不再只画徽标就结束
+  ok - App.vue 订阅更新状态（进度 / 失败原因渲染到界面）
+  ok - App.vue 有「立即重启安装」的入口
+  ok - auto-update.cjs 把失败收敛成 error 状态并广播（不再只 console.warn）
+  ok - startUpdate() 不支持时返回 reason（界面能说清「为什么没下载」）
+  ok - installUpdate() 只允许在「已下载」后重启安装（否则重启到一个没变的版本）
+== 11. 应用内说明与 docs/使用说明.md 的章节骨架必须一致（I-36） ==
+  ok - docs/使用说明.md 解析到 8 个章节
+  ok - GuideDialog.vue 解析到 8 个章节
+  ok - 两处章节数量一致
+  ok - 两处章节标题逐条一致（顺序也要一致）
+
+IPC 收口与结构：242 通过，0 失败
+== 1. 注册表里的操作必须全部真的挂上 ==
+  ok - 注册表 86 个操作全部挂到 ipcMain
+  ok - ipcMain 上没有注册表之外的通道（没有旁路）
+== 2. preload 暴露的通道必须有实现（否则是「点了没反应」） ==
+  ok - preload 暴露了 84 个通道
+  ok - preload 暴露的通道全部有实现
+  ok - main.cjs 只额外注册 app:meta / app:checkUpdate
+== 3. 位置参数 → 规范参数对象的归一化（写错只会静默传 undefined） ==
+  ok - 24 个通道的参数归一化正确
+  ok - 15 个无参通道不误传参数
+== 4. ctx 注入：写权限给满、GUI 能力齐备、打印通道是同一个实例 ==
+  ok - GUI 通道 allowWrite=true（与抽取前行为一致）
+  ok - ctx.app.version 来自宿主
+  ok - ctx.app.userDataDir 来自宿主
+  ok - ctx.dialog 五个能力齐备
+  ok - ctx.printer 就是 printer.cjs 模块本身
+  ok - printer 的 exportPdf / sendToPrinter 都在
+  ok - ctx.emit 是函数
+== 5. 进度事件：经 ctx.emit 落到 event.sender，且判 isDestroyed ==
+  ok - emit 用 import:progress 通道发出去
+  ok - 进度载荷原样透传
+  ok - 窗口销毁后 emit 静默丢弃（不抛错、不打断导入）
+  ok - preload 监听的通道名与 emit 一致
+== 6. 对话框能力真的接到 Electron dialog（不是空壳） ==
+  ok - openFile 把选项透传给 dialog.showOpenDialog
+  ok - openFile 把对话框结果原样返回
+== 7. 出口操作必须真的拿到 printer（否则 GUI 侧也会 GUI_REQUIRED） ==
+  ok - print:exportPdf 的 ctx.printer 可用
+  ok - print:send 的 ctx.printer 可用
+  ok - job:openSnapshot 的 ctx.dialog 可用
+
+IPC 装配（纯 Node）：23 通过，0 失败
+== 1. api.cjs 必须能在纯 Node 下加载（分层地基） ==
+  ok - 测试进程确实是纯 Node（不是 Electron）
+  ok - api.cjs 不 require electron
+  ok - api.cjs 不 require printer.cjs（后者 require electron，会污染整条依赖链）
+  ok - api.cjs 里没有 Electron API 的直接调用
+  ok - api.cjs 在纯 Node 下加载成功（86 个操作）
+  ok - call / invoke 双入口齐备
+== 2. 通道契约：39 个既有通道一个不能少 ==
+  ok - 既有通道全部保留
+  ok - README 里的操作计数全部等于实际值 86
+  ok - README 头部「当前版本」与 package.json 一致（0.6.0）
+  ok - 版本史里有 v0.6.0 的条目（发版时别忘了写）
+  ok - README 里的套件计数全部等于 npm test 实际挂载的 45 个
+  ok - 新增通道恰好是预期的 47 个（路径、批次、素材、图层工程、内置预设、使用记录、打开导出与应用内更新）
+  ok - ipc.cjs 从注册表派生通道（不是逐个手写）
+  ok - ipc.cjs 里没有硬编码通道名
+  ok - ipc.cjs 不再直接依赖领域模块（业务逻辑已全部搬走）
+  ok - GUI 通道显式给足写权限（与抽取前行为一致）
+  ok - GUI 能力经 ctx 注入
+== 3. 写权限闸门在共享路径上（不是 CLI 自己加的） ==
+  ok - 注册表标出了写操作（53 个）
+  ok - 全部写操作在无授权时被拦（且原因是 WRITE_FORBIDDEN）
+  ok - 只读操作不受写闸门影响
+== 4. GUI 边界：无 GUI 上下文要给 GUI_REQUIRED，不能是 TypeError ==
+  ok - 注册表标出了需 GUI 的操作（21 个）
+  ok - 需 GUI 的操作在纯 Node 下统一给 GUI_REQUIRED
+  ok - invoke 返回结构化错误（不抛）
+== 5. invoke 的必填参数体检（call 不做，避免改变 GUI 语义） ==
+  ok - 缺必填参数 → BAD_PARAMS
+  ok - 报错点名了缺哪个参数
+  ok - 未知操作 → UNKNOWN_OP
+  ok - invoke 成功时返回 {ok:true,data}
+  ok - call 不拦截参数（GUI 通道语义逐字保留）
+== 6. 纯 Node 闭环：导入 → 激活列 → 模板 → 校验 → 生成 ==
+  ok - importFile 尊重 name（这是 inspect 做不到的）
+  ok - 读到 2 行
+  ok - 新导入的列默认全部未激活打印
+  ok - 激活后列全部可打印
+  ok - 模板已保存
+  ok - 全量校验无问题
+  ok - 缺省范围是全量（partial=false）
+  ok - 生成的 HTML 含数据
+  ok - 全量出片范围正确
+  ok - print:generate 不产生留痕（预览不留痕，只有两个出口留痕）
+  ok - 行级范围被正确识别为部分出片
+== 7. CLI 子进程端到端 ==
+  ok - --help 退出码 0
+  ok - 帮助文本含用法与写权限说明
+  ok - --allow-write 后跟位置参数能正确解析（布尔开关不吞值）
+  ok - 选项放在命令之后也能解析
+  ok - 写操作无授权 → 退出码 3
+  ok - 错误码是 WRITE_FORBIDDEN
+  ok - GUI 出口 → 退出码 2
+  ok - 错误码是 GUI_REQUIRED
+  ok - 未知命令 → 退出码 1
+  ok - --rows 非法值被拦
+  ok - CLI 导入成功且名字可控
+  ok - CLI 导入的数据集在列表里
+  ok - 导入不存在的文件给出明确报错
+  ok - CLI 能查字段目录
+  ok - call 兜底入口可用
+  ok - CLI 默认数据目录不是仓库目录（对齐已安装应用，而非开发态）
+  ok - 默认目录落在已安装应用的 userData 下
+  ok - 默认目录是 userData/data
+== 8. 零第三方依赖 ==
+  ok - CLI 入口自身只 require Node 内置模块（领域层的 xlsx 属既有依赖，不算新增）
+== 9. 数据目录口径必须一致（打包名 / CLI 默认 / 界面文案） ==
+  ok - CLI 默认目录用的是 package.json 的 name（printpress）
+  ok - 引导弹窗写的路径与打包名一致
+  ok - 引导弹窗不再写错目录名
+  ok - README 里的默认目录路径正确
+  ok - README 不再写错目录名
+== 10. 打开类操作不接受路径参数（I-28） ==
+  ok - design:revealExport / design:openExport 都已注册
+  ok - 两条都标 gui: printer —— CLI / agent 拿不到 ctx.printer，一律 GUI_REQUIRED
+  ok - 两条都不声明任何参数（参数表为空，别处也就无从传路径进来）
+  ok - design:revealExport 的实现只调 ctx.printer.revealLastDesignPng()，不读任何参数
+  ok - design:openExport 的实现只调 ctx.printer.openLastDesignPng()，不读任何参数
+  ok - preload 暴露的 revealDesignExport 是零参函数（渲染层无处传路径）
+  ok - preload 暴露的 openDesignExport 是零参函数（渲染层无处传路径）
+  ok - printer.cjs 只在导出成功后记下路径（失败 / 取消都不更新）
+  ok - printer.cjs 的「打开最近导出」不接受传入路径
+  ok - app:openDataDir / asset:openFolder 都已注册
+  ok - 两条都标 gui: dialog —— CLI / agent 的 ctx.dialog 为 null，一律 GUI_REQUIRED
+  ok - 两条都不声明任何参数（渲染层无从传路径进来）
+  ok - preload 暴露的 openAssetFolder 是零参函数（渲染层无处传路径）
+  ok - asset:openFolder 的目录由 assetLibrary.originalsDir() 推导，不读任何入参
+
+agent 接口层：77 通过，0 失败
+== 1. 启动器存在且摘掉了破坏性环境变量 ==
+  ok - 启动器文件存在
+  ok - 启动器把两个破坏性变量列入摘除清单
+  ok - 确实执行了删除（而非只记录）
+  ok - 用 require("electron") 取二进制路径（纯 Node 下返回路径字符串）
+  ok - stdio 继承，输出不被吞
+  ok - 退出码透传（拿不到状态时按失败处理）
+  ok - 拉起失败时给出非 0 退出码，不静默成功
+== 2. package.json 的 test:e2e 必须经启动器 ==
+  ok - test:e2e 脚本存在
+  ok - test:e2e 经启动器启动
+  ok - test:e2e 不再是裸 electron 调用（那样在沙箱里静默无效）
+  ok - test:e2e 仍指向 m3-e2e.cjs
+== 3. 启动器行为：缺参数要快速失败 ==
+  ok - 无参数时退出码为 2
+  ok - 无参数时打印用法提示
+  ok - 缺参数时不进入 Electron 启动流程
+== 4. 启动器行为：真的会摘掉环境变量（--dry-run，不拉起 Electron） ==
+  ok - 启动器支持 --dry-run（供测试无副作用地验证环境处理）
+  ok - --dry-run 退出码为 0
+  ok - 启动器报告摘除了环境变量
+  ok - 报告中含 ELECTRON_RUN_AS_NODE
+  ok - 报告中含 NODE_OPTIONS
+  ok - 仍能解析出 electron 二进制路径
+  ok - --dry-run 无错误输出
+== 5. 主进程 e2e 脚本的既有约定未被破坏 ==
+  ok - m3-e2e 关硬件加速
+  ok - m3-e2e 关 GPU
+  ok - m3-e2e 用 in-process-gpu
+  ok - m3-e2e 关 breakpad（沙箱 crashpad 易损坏）
+== 6. 打包必须显式关闭 electron-builder 自身的发布（v0.2.13 空包真凶） ==
+  ok - dist 显式 --publish never
+  ok - dist 仍按 win x64 打包
+  ok - dist 先构建前端再打包（顺序不能反）
+  ok - release.yml 仍有「构建并打包」步骤
+  ok - 打包步骤不给 electron-builder 注入任何 token
+  ok - 发布仍由 release-upload.cjs 负责
+
+e2e 夹具：31 通过，0 失败
+  ok - 素材保留原始字节，按内容去重，扩展名以内容为准
+  ok - 无数据集也能保存；重开保留完整图层属性
+  ok - 已退出进程留下的保存锁自动恢复，活进程锁不会被删除
+  ok - 数据目录尚不存在时导入素材也能自建目录（不许抛原生 ENOENT）
+  ok - JPEG EXIF 方向 5–8 使用转置后的宽高，方向 3 保持宽高且原字节不变
+  ok - 新版本不可改变模板固定的旧版本，旧编辑器保存产生冲突
+  ok - 索引写入失败时旧工程仍完整可读，重试可成功
+  ok - 使用记录（design:touch）绝不动版本号，否则下次保存会撞 DESIGN_CONFLICT
+  ok - 「常用」的门槛是用户保存过：系统建的不记使用，打开没保存过的也不塞进常用
+  ok - 路径、缺少素材、伪造素材元信息、无效数值与内容都会被检查
+  ok - 版本目录符号链接不能跨出数据目录读取工程
+  ok - 素材和版本根目录 junction 出界时读写均拒绝，外部目录不产生文件
+  ok - 原始素材被改动或缺失时拒绝静默生成空底图
+  ok - 图片链接只写入 CSS 一次，文本安全转义且坐标为毫米
+  ok - 转换旧底图复制原件，旧文件删除不破坏新工程
+  ok - 已保存历史版本仍保护上传字体，删除引用工程前不可删除字体
+  ok - 上传字体被外部删除时，旧版本读取和新保存都明确拒绝回退
+  ok - 另存副本更换字体时更新元信息，移除文字仅移除新版本字体引用
+  ok - 模板引用阻止删除，移除引用后可删除且素材仍保留
+  ok - API 在纯 Node 中可用，并执行写入权限与 IPC 参数映射
+  ok - 清理残留：只回收「不在索引」的工程目录，索引里的与形状不符的都不动（I-37）
+  ok - 清理残留的通道无参、路径只由目录名推导（I-37 静态守卫）
+
+22 design domain acceptance groups passed
+  ok - 保存模板引用固定工程版本，列表标记有底图
+  ok - 打印预览提供固定版本图层统计与裁切后的最低有效dpi
+  ok - 21页复用同一原图，未重编码且只内联一次
+  ok - 静态文字字体单独内联，并排除未使用上传字体
+  ok - 图层文字转义，形状保留SVG且毫米位置不变
+  ok - 底图在变量字段之前，变量字段保持原有百分比锚点
+  ok - 变量字段字体名中的HTML实体字符保持字面值
+  ok - 工程新版本不改变已保存模板版本的内容
+  ok - 多联仅渲染21个实际成品，3页，图层资源仍只有一份
+  ok - 对折上下两联使用半页工程，上联旋转180度
+  ok - 渐变在单页、多联和对折的每份实际底图中使用独立 SVG ID
+  ok - 重复底图实例只生成图层几何，不重复编码原图 CSS
+  ok - 尺寸不符、无固定版本、旧底图混用均明确拒绝
+  ok - 删除实际素材后拒绝渲染而非空白底图
+  ok - 已引用的上传字体被外部删除时阻断打印，避免静默替换字形
+  ok - 纯矢量工程没有图片dpi，隐藏图片不拉低报告
+  ok - 仅编辑可见的参考框不进打印，也不计入图层数与最低dpi
+  ok - 旧单图仍内联原字节，并且没有工程包装
+  ok - 旧图转工程后删除旧文件或模板不影响工程原素材
+== 仅编辑可见的图层绝不出片（静态守卫）==
+  ok - 只有编辑器画布可以要求渲染仅编辑可见的图层
+  ok - 打印等待CSS背景实际解码完成，共用URL只解码一次
+  ok - 图片解码失败阻断打印
+  ok - 字体加载失败阻断打印
+  ok - 卡住的图片解码超时退出
+  ok - 20 张大图全部加载完成才放行
+  ok - 只抽检 3 张真解码，不再强制全量 decode（S1 实测全量 decode 第 7 张必炸）
+  ok - 抽检解码是顺序的（同时只有一张在分配位图，避开并发解码预算墙）
+  ok - 零尺寸坏图阻断打印
+  ok - 图片加载失败（缺原件）阻断打印
+
+图层打印集成：29 项通过
+  ok - 旧工程保持 schema 1，非空分组或参考线升级到 2；移除功能后不降级
+  ok - 版本号取各特性最大值，已是高版本时不被分组倒标成旧格式
+  ok - 仅编辑可见的图层升级到格式 3，默认关闭且旧工程不受影响
+  ok - 仅编辑可见的图层默认不渲染，显式要求时才进画布
+  ok - 参考框引用的上传字体不参与出片，不会因字体缺失阻断打印
+  ok - 非相邻成员连续化保留成员次序及绝对几何，输入保持不变
+  ok - 组合已有组会完整合并，未选择的完整组保留连续顺序
+  ok - 默认选组、修饰键切换整组，成员编辑可显式保留单层选择
+  ok - 解散分组不改变几何、绘制次序或原始文档
+  ok - 复制完整组生成全新图层与组标识，副本独立且原件不变
+  ok - 显式成员复制仅复制选中层，完整组选中仍复制组；原组不变
+  ok - 锁定任一组员保护完整组免于移动、删除和重排
+  ok - 删除任一组员按完整组执行，不留下悬空成员或删除素材
+  ok - 显式成员删除只删选中层，剩余两层保持组，剩余单层自动解组
+  ok - 显式成员删除仍保护含锁定成员的组，只删除同次选择中的独立可编辑层
+  ok - 上移下移跨越完整组，置顶置底保持多组内部次序
+  ok - 组成员重复、跨组、缺失、非连续及超限输入均被拒绝
+  ok - 参考线验证单位、方向、有限数值和数量，且允许画布尺寸改变后保留线
+  ok - 分组与参考线不进入渲染；保存重开和固定历史版完整保留辅助元数据
+
+19 design editor acceptance groups passed
+底图渐变与阴影领域验收通过
+== 1. 混合模式白名单：只收 CSS 原生，宁缺毋滥 ==
+  ok - 白名单恰为 16 项（normal + 15 种叠色），且不含 CSS 无对应的 PS 专有模式
+== 2. schema 默认值与白名单校验 ==
+  ok - 不传 blend 默认 normal；不传 adjust 时图层没有该字段；不传组透明度默认 1
+  ok - 未知混合模式抛错（不做静默降级）
+  ok - 颜色调整越界抛错，边界值放行
+  ok - 组透明度越界抛错
+== 3. 版本号：新字段抬到 6，且只升不降 ==
+  ok - 混合模式 / 颜色调整 / 组透明度各自都会把版本抬到 6
+  ok - 未使用新字段的工程版本不被抬高（存量工程不被动升级）
+  ok - 已是 6 的工程不回退（Math.max 语义）
+  ok - 可读版本清单是唯一权威源，6 已登记且校验不写死数字
+== 4. 渲染：颜色调整落成 CSS filter，恒等时不产生一个字符 ==
+  ok - 非恒等调整输出 filter，且只含改动项
+  ok - 去色与反相按 0~1 原样输出
+  ok - 恒等调整不产生 filter（与升级前逐字节一致）
+  ok - 变量图的调整落在 <img> 上（不是外框 div）
+== 5. 渲染：混合模式与组透明度 ==
+  ok - 非 normal 输出 mix-blend-mode，normal 不输出
+  ok - 组透明度乘算到组内图层，组外图层不受影响
+  ok - 组透明度为 1 时输出与没有组时一致（不多一个字符）
+== 6. I-40 静态守卫：一份实现、四处同源、界面不得绕过撤销语义 ==
+  ok - 白名单与渲染只有一处权威实现（design-layout.cjs），前端不手抄模式清单
+  ok - 四个出片面共用 renderDesign（新字段能到画布/PNG/打印/PDF）
+  ok - 调整滑杆与组透明度滑杆都是「预览→确认」：input 只预览，change 才记一条撤销
+  ok - 恢复原始颜色是真删除 adjust（渲染侧少一个 filter）
+
+== 7. I-47 静态守卫：滑杆的百分比换算必须与 schema 的取值口径成对 ==
+  ok - 行为证明：schema 只收 0~1 且越界**抛错**——界面发 0~100 时整条滑杆都用不了
+  ok - 界面字段表的「上限 ÷ 100」与「恒等值 ÷ 100」必须等于 schema 的 max 与默认值
+  ok - 换算只有一处：不许再有按字段分叉的除数，上限由字段表传进来
+  ok - 滑杆旁回显当前百分比，能看清调到哪一档
+
+混合模式与颜色调整：24 项通过
+== 内置预设：参考框一律「仅编辑可见」，出片时一个图层都不印 ==
+  ok - 内置预设只有身份证一套（收敛后不再内置练习纸 / 票据）
+  ok - 每套预设的图层都完整落在画布内，且不超图层上限
+  ok - 参考框全部仅编辑可见：默认出片一个图层都没有，编辑器画布照旧看得见
+  ok - 参考框预设的标注不与任何框叠在一起
+  ok - 身份证预设的两个卡位就是 ID-1 标准尺寸且水平居中
+  ok - 两个卡位之间留足间距，且整组在 A4 上垂直居中
+  ok - 未知标识明确报错，空名字退回预设名
+  ok - 每次构建都得到独立的一份（改坏预设副本不影响下一次）
+  ok - 预设能真的落库并原样读回来
+
+内置底图预设：9 项通过
+  ok - 毫米按指定DPI舍入到精确像素
+  ok - 不支持DPI、过长或过多像素明确拒绝，不自动缩小
+  ok - 未保存草稿可准备导出且不创建工程或改变输入
+  ok - 透明背景选项只改变导出快照，不修改作品背景
+  ok - 高 DPI 大范围阴影按滤镜缓冲区预算拒绝，提示用户降低 DPI
+  ok - 原图仅内联一次，准备后不依赖后续素材文件变化
+  ok - PNG写入物理DPI元信息且原像素压缩码流不变
+  ok - 输出路径须为受支持的图片绝对路径且不能覆盖工程原素材
+  ok - 目录junction不能绕过原素材保护
+== I-41 静态守卫：格式表单一权威源，透明能力与 DPI 元数据不得各写一份 ==
+  ok - 格式表只在 export-formats.cjs 定义，出图实现与界面都读它
+  ok - 透明能力与 DPI 写入方式由格式表决定，不在各处硬编码格式名
+  ok - 出图格式白名单：扩展名、透明能力、默认质量只定义一处
+  ok - 质量参数：有损格式有默认值，PNG 忽略，越界与非整数一律拒绝
+  ok - JPEG 不支持透明：勾了透明就铺画布底色，并如实报告 flattened
+  ok - 体积估算只给有损格式，且随质量单调上升、WebP 小于同质量 JPEG
+  ok - JPEG 写 JFIF 密度：无论上游有没有 APP0，结果都恰好一个且密度正确
+  ok - WebP 尺寸解析：VP8X / VP8 / VP8L 三种编码都能读
+  ok - API保持写权限与Electron宿主能力边界
+  ok - 保存对话框取消不写文件或创建工程
+  ok - 保存对话框按 format 换过滤器、扩展名与标题
+  ok - 非法格式与质量在弹窗前就被拒绝
+  ok - 注入渲染能力并提供显式路径可导出，不弹对话框
+  ok - 显式路径扩展名与 format 不符时在写盘前拒绝
+  ok - 渲染/提交失败保留旧文件，临时文件已清理
+
+出图（PNG / JPEG / WebP）：24 项通过
+== 1. 比例预设只放比例，物理规格仍归 templates.ITEM_SIZES ==
+  ok - CROP_RATIOS 是纯比例清单，且都落在合理范围
+  ok - 证件照尺寸的唯一权威源是 templates.ITEM_SIZES，且 app:env 下发的就是同一份
+== 2. fitCropToRatio：打印比例精确、裁切不越界、取景尽量保住 ==
+  ok - 宽高比精确命中，且裁切始终落在原图内
+  ok - 取「放得下的最大同比例矩形」：一条边顶满，面积不再能更大
+  ok - 以原裁切中心为锚点：能放下就不挪取景
+  ok - 贴边时向内侧收拢，不越界也不留下非法小数
+  ok - 参数不合法时原样返回，绝不写出一份非法裁切
+== 3. 集成：套用预设后的工程必须能通过 normalizeDesign，且不失真 ==
+  ok - 每个尺寸预设 × 各种原图长宽比，结果都能被 normalizeDesign 接受
+  ok - 比例预设只改高度、宽度不动，且同样不失真
+  ok - 变量图不参与裁切换算（取景由 cover + 焦点决定），帧尺寸即成品尺寸
+== 4. I-43 静态守卫：改尺寸必须连带改裁切，规格不许抄第二份 ==
+  ok - 界面把「尺寸 + 裁切」放在同一个动作里，不允许只改一边
+  ok - 比例预设与裁切数学只有一处权威实现，界面不重算
+  ok - 证件照规格由主进程下发（与多联拼版同一份），界面不写死清单
+  ok - 比例 id 自带冒号也不能被切坏：ratio:1:1 必须解析成 kind=ratio + id=1:1
+
+裁切比例预设：14 项通过
+== 1. 可选性：不传就与旧工程逐字节同行为，传了才抬版本 ==
+  ok - 不传 stroke / shadow 时不产出任何新字段，版本也不动
+  ok - 形状的默认描边不受影响（图片的「可选」不能顺手把形状也改成可选）
+  ok - 传了图片描边/投影 ⇒ 版本 7；形状阴影仍停在版本 4
+  ok - 只给 strokeWidth 或只给 stroke 都能成立，缺省色是白（衬边的高频用法）
+  ok - 非法值明确拒绝，不静默吞掉
+== 2. 渲染：描边画在框内侧不改几何，投影按 alpha 走（不许 box-shadow 投影） ==
+  ok - 描边落成「叠层 + inset box-shadow」，且框的毫米尺寸一个字符都没变
+  ok - 投影落成 drop-shadow，颜色与不透明度合成进 alpha
+  ok - 投影挂在承载图片的那个元素上（不是空壳，也不是内层裁切盒）
+  ok - 描边与投影可以同时开，互不覆盖
+  ok - withAlpha 的边界：短写、8 位、transparent 都不许吐 NaN
+== 3. 变量图：裁剪在内层，外框留圆角给描边，投影不被自身裁掉 ==
+  ok - 变量图的 overflow:hidden 挪到内层，外框保留 border-radius
+  ok - 变量图缺照片时投影/描边仍不炸（占位块也在同一个外框里）
+== 4. I-44 静态守卫：界面只写一份，关掉要删字段而不是留 0 ==
+  ok - 图片的描边/投影在界面里只写一份（变量图与静态图共用）
+  ok - 界面不重算颜色：投影颜色/不透明度交给渲染侧合成
+  ok - setShadow 放行图片图层（否则界面开关点了没反应）
+
+图片描边与投影：15 项通过
+== 1. 标尺刻度：步长随缩放自适应，位置精确不漂 ==
+  ok - 刻度步长随「每毫米占多少像素」自适应：缩小变疏、放大变密
+  ok - 刻度位置精确到毫米、单调递增、不越界，且末尾不会因为浮点少画一根
+  ok - 非法入参返回空刻度，不抛错也不吐出 NaN
+== 2. 布局网格：主/次格线可调，铺满画布 ==
+  ok - 间距与细分数都说了算：主格线每 spacing 一根，主格之间再等分
+  ok - 网格铺满整块画布（含 0 与末缘），非法入参返回空
+  ok - 网格只吸**主格线**：吸次格线会让边缘与参考线永远抢不到吸附
+  ok - 渲染步长与吸附目标出自同一份算术，界面不自己重算 spacing / 细分数
+== 3. 吸附目标：四类各自开关，关掉就真的不吸 ==
+  ok - 缺省值：网格关、其余三类开（与加开关之前的行为逐字一致）
+  ok - 漏传某个键时**保留**该类目标，而不是悄悄关掉
+  ok - 每一类关掉后，只有它自己的目标消失，其余照旧
+  ok - y 轴独立成一套：参考线按 axis 分流，画布高与宽不串
+== 4. 最近目标求解：阈值是像素口径，三条特征线都参与 ==
+  ok - 阈值内取最近的一条，阈值外一个都不动
+  ok - 左缘 / 中线 / 右缘三条特征线都参与，中线优先于边缘（更近者胜）
+  ok - 目标为空 / 入参缺失时安全返回，不抛错不产生 NaN
+== 5. 从标尺拖出参考线的落点换算 ==
+  ok - 像素偏移换算成毫米并取 1 位小数
+  ok - 落点夹在画布内：拖到画布外不会得到一条看不见也吸不到的线
+== 6. I-45 静态守卫：标尺与网格绝不能进工程文件，吸附阈值只有一份 ==
+  ok - 标尺与网格是视图层状态，进不了工程 schema（否则会跟着 renderDesign 印出去）
+  ok - 行为证明：即便有人把标尺/网格塞进文档，normalizeDesign 也会剥掉
+  ok - 四类吸附目标在界面上各自一个开关，与模块里的清单一一对应
+  ok - 吸附阈值只有一份定义（6px），且按 pxPerMm 换算成毫米
+  ok - 那四个开关真的接进了吸附求解，不是只摆了几个复选框
+  ok - 拖出参考线：拖动过程只画预览，松手才落一条（撤销栈不会被几十条中间态冲爆）
+  ok - 标尺挂在画布**外缘**，开标尺不会把画布挤小（I-34 的同类教训）
+
+底图对齐辅助（标尺 / 网格 / 吸附目标）：23 项通过
+  ok - 入库：展示元数据独立成库，原件仍按内容寻址
+  ok - 两个工程引用同一素材，原件不重复，SHA-256 不变
+  ok - 改库名 / 改标签不改写旧工程（旧工程照常打开、名字不动）
+  ok - 归档只是隐藏：原件还在，引用它的历史工程照常打开
+  ok - 同一内容重新导入 = 合并条目并恢复归档，不是新建第二条
+  ok - 缩略图：生成到设计目录内、可重建、生成失败不影响入库
+  ok - 搜索、标签（AND）、收藏优先与分页
+  ok - 已有工程的图片可「加入素材库」；原件缺失时明确报错
+  ok - 非法输入：素材标识被拒、超长名字与超多标签被裁剪
+  ok - asset:get 路径返回原件尺寸（UI 入画板按 width/height 等比适配）
+  ok - 清理未引用原件：只删真孤儿，工程/库里的都保留，且删除前复核仍孤儿（I-32）
+  ok - 原件已被删除：条目不进列表、不计数，单独报在 missing 里（记录不丢，文件回来即恢复）
+素材库领域验收：12 通过，0 失败
+== I-33 模板底图并入素材库 ==
+  ok - 模板上传底图 → background 为 assetId，原件在 design-assets，列表不展示
+  ok - discard(source ephemeral, 无引用) → 删原件
+  ok - discard(source managed) → 保留原件（不即时删）
+  ok - referencedAssetIds 含在用模板背景 → 不列为孤儿
+  ok - 去重升级：模板上传 → adopt 升 managed → discard 不再即时删
+  ok - listLibrary 只展示 managed（过滤 source ephemeral）
+  ok - discardBackground 对 assetId 走素材库分流（不直接删路径副本）
+  ok - migrateBackgrounds：旧 print-bg 背景迁为 assetId
+== I-33 扩展：底图制作页直接加图 = 临时件（与模板页同逻辑） ==
+  ok - design:importBytes 通道强制 source=ephemeral；领域层缺省 managed（漏传只能是「不删」）
+  ok - 工程引用保护：磁盘引用不删；exceptDesignId 跳过当前工程后同步删；adopt 后保留
+  ok - 旧值兼容：磁盘上 template/library 被归一为 ephemeral/managed
+
+通过 11 项（I-33 模板底图并入素材库）
+== ① 导出固定版本 ==
+  ok - 导出成功，图片与上传字体都进包
+  ok - 隐藏图层的原件也在依赖里（依赖收集不看可见性）
+  ok - 取消写包会删除临时文件并保留已有目标文件
+  ok - 覆盖旧包的替换步骤失败时能恢复完整旧文件
+  ok - Windows 覆盖分支成功后清理旧包备份与临时文件
+  ok - 高度可压缩的工程内容写出后仍能通过自身压缩比限制
+  ok - 读包期间可以取消，不必等到下一条目
+  ok - 导出后继续编辑保存，包里仍是导出时那一版
+== ② 导入产生副本（B 机） ==
+  ok - 检查返回摘要与令牌
+  ok - 提交后是新工程、版本 1，分组参考线与字体都完整
+  ok - 重复提交返回同一个结果（不产生第二份副本）
+  ok - 导入不改动导出方的工程与字体字节
+== ③ 字体冲突：同名不同内容走别名 ==
+  ok - 本机已有同名异内容字体时用 PP_Font_<sha>，原文件字节不变
+== ④ 缺失字体必须先解决依赖 ==
+  ok - 本机没有的字体会被报出来，未决策不能提交
+  ok - 三种补齐方式：替代字体 / 默认字体栈 / 提供字体文件
+== ⑤ 包校验：不合法的一律在发布前拒绝 ==
+  ok - 越界条目被拒，且包外没有任何写入
+  ok - 清单未列出的多余条目被拒
+  ok - 清单哈希与实际内容不符被拒
+  ok - 不支持的包格式版本被拒
+  ok - 检查失败不留暂存残留
+== ⑥ 事务：失败要回滚，取消/崩溃要收敛 ==
+  ok - 暂存快照被改动后提交失败，不留半工程
+  ok - 取消检查：暂存区清掉，令牌失效
+  ok - 崩溃残留的事务由恢复程序收敛（回收新建字体、不留半工程）
+== ⑦ I-38 工程包：先校验后发布、路径只来自白名单、导入必是副本（静态守卫） ==
+  ok - 包内条目名只认白名单，导出时也过一遍同一份判定
+  ok - 检查阶段绝不发布任何工程
+  ok - 导入固定新 ID + 版本 1，并复用锁内发布（不在锁内再调公共保存）
+  ok - 提交前先落事务记录，索引最后发布
+  ok - 通道与 preload 白名单齐备（渲染层只能调这几条）
+
+工程包领域验收：28 组通过
+  ok - 匹配 NFC、大小写、扩展名与子目录；不把不同子目录混为一张图
+  ok - 冲突、空值、缺图、坏图、非法名称分开统计；补打行号不变
+  ok - 先按名单筛选：未匹配与同名冲突不写入素材库或缩略图，坏图不入库
+  ok - 配图列唯一、开关持久化、切列仅复用已入库照片，新匹配照片需重新导入
+  ok - 目录入库保留原图字节；坏图在入库阶段给出原因
+  ok - 修改名单后重新匹配；同内容重复导入不增加素材
+  ok - 变量图保存、工程包迁移、按行换图、多联、对折与归档
+  ok - 符号链接目录不进入扫描结果；受控原件不随目录外照片导入
+  ok - 读取原件时识别被删/被篡改的照片，不复用旧的匹配成功状态
+  ok - 导入中断或目标数据集消失时不发布新绑定；并发导入明确拒绝
+  ok - 重新导入替换列清单，旧文件不混入新目录
+  ok - 归档按内容去重复制原件，并改为可移动的相对 URL
+  ok - API 写权限、目录对话框取消、报告只读与参数边界
+  ok - 实际任务留痕写入照片目录，清单缺失不能记录为成功快照
+14 photo acceptance groups passed
+== 1. countPdfPagesFromFile（页数入口先立住） ==
+  ok - 手写扁平页树 2 页
+  ok - 手写嵌套页树 3 页
+  ok - 真实 Chromium 夹具 3 页
+  ok - 真实 Chromium 夹具 b 3 页
+  ok - 不存在的文件抛错（不返回 0 冒充空文档）
+== 2. 基本合并：扁平 × 扁平（内容逐字节、页序、页树、xref） ==
+  ok - 合并页数 2+2=4
+  ok - m1: 页数 = 4
+  ok - m1: trailer /Size = 最大在用对象号+1
+  ok - m1: %%EOF 收尾
+  ok - m1: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - 逐页 content stream 与源逐字节一致（顺序 a→b）
+  ok - xref 每个在用条目偏移都能解析出对应对象头
+  ok - trailer /Info 取自第一份输入（A）
+== 3. 顺序语义：a+b+a 六页，第 3 页起是 b ==
+  ok - 合并页数 2+2+2=6
+  ok - m2: 页数 = 6
+  ok - m2: trailer /Size = 最大在用对象号+1
+  ok - m2: %%EOF 收尾
+  ok - m2: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - a+b+a 的逐页载荷序列（重复输入也保序）
+== 4. 嵌套页树 × 扁平 ==
+  ok - 合并页数 3+2=5
+  ok - m3: 页数 = 5
+  ok - m3: trailer /Size = 最大在用对象号+1
+  ok - m3: %%EOF 收尾
+  ok - m3: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - 嵌套页树合并后逐字节保真
+== 5. 间接 /Length + 二进制载荷（含 endstream 陷阱字节） ==
+  ok - 合并页数 2+3=5
+  ok - m4: 页数 = 5
+  ok - m4: trailer /Size = 最大在用对象号+1
+  ok - m4: %%EOF 收尾
+  ok - m4: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - 二进制载荷逐字节保真（含 \r\nendstream\r\n 陷阱串）
+  ok - 合并产物中 /Length 全是直接整数（间接已解值直排）
+== 6. 规模：300 页 × 3 份 ==
+  ok - 900 页合并成功
+  ok - m5: 页数 = 900
+  ok - m5: trailer /Size = 最大在用对象号+1
+  ok - m5: %%EOF 收尾
+  ok - m5: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - 边界抽检：第 300 页 = 第一份的第 300 页
+  ok - 边界抽检：第 301 页 = 第二份的第 1 页
+  ok - 边界抽检：第 600 页 = 第二份的第 300 页
+  .. 900 页合并耗时 242ms，输出 0.5MB
+== 7. 不支持结构：明确拒绝 + 不留半成品 ==
+  ok - 截断文件（无 %%EOF） → UnsupportedPdfError
+  ok - 截断文件（无 %%EOF） → 半成品输出已删除
+  ok - trailer 带 /Prev → UnsupportedPdfError
+  ok - trailer 带 /Prev → 半成品输出已删除
+  ok - trailer 带 /Encrypt → UnsupportedPdfError
+  ok - trailer 带 /Encrypt → 半成品输出已删除
+  ok - xref 流 → UnsupportedPdfError
+  ok - 第二个输入损坏 → 整体抛出
+  ok - 第二个输入损坏 → 已写出的部分也删除（无半成品）
+== 8. 真实 Chromium 产物 ==
+  ok - Chromium 3+3=6 页
+  ok - m6: 页数 = 6
+  ok - m6: trailer /Size = 最大在用对象号+1
+  ok - m6: %%EOF 收尾
+  ok - m6: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - Chromium 产物合并后逐字节保真
+  ok - m7: 页数 = 3
+  ok - m7: trailer /Size = 最大在用对象号+1
+  ok - m7: %%EOF 收尾
+  ok - m7: 每页 /Parent 指向的页树节点真的把它列进 /Kids
+  ok - 单文件自合并：内容不变
+测试本身崩溃: Error: ENOTEMPTY: directory not empty, rmdir 'D:\a\Print-Workshop\Print-Workshop\test\.tmp-merge'
+    at Object.rmdirSync (node:fs:1214:11)
+    at _rmdirSync (node:internal/fs/rimraf:262:21)
+    at rimrafSync (node:internal/fs/rimraf:195:7)
+    at Object.rmSync (node:fs:1263:10)
+    at main (D:\a\Print-Workshop\Print-Workshop\test\pdf-merge.cjs:176:6)
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5) {
+  errno: -4051,
+  code: 'ENOTEMPTY',
+  syscall: 'rmdir',
+  path: 'D:\\a\\Print-Workshop\\Print-Workshop\\test\\.tmp-merge'
+}
