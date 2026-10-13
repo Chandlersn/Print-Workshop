@@ -31,8 +31,19 @@ jobs:
           cache: npm
       - name: 安装依赖
         run: npm ci
+      # 2026-10-13：npm test 在 CI 挂、本地全绿且无法复现（Node 20 + 干净 checkout 都试过），
+      # 而 job logs API 要 admin 权限拿不到——先照 e2e 的做法把输出落文件传上来，失败时看现场。
       - name: 领域层测试（npm test）
-        run: npm test
+        shell: bash
+        run: mkdir -p test-logs && npm test 2>&1 | tee test-logs/npm-test.log
+      - name: 上传领域层测试日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics
+          path: test-logs/
+          if-no-files-found: warn
+          retention-days: 14
 
   e2e:
     name: 端到端（120 人真实 printToPDF）
