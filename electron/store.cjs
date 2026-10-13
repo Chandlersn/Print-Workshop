@@ -57,13 +57,16 @@ function loadJson(name, { expect = null } = {}) {
   try {
     raw = fs.readFileSync(fp, 'utf-8')
   } catch (err) {
-    throw new Error(`读取失败 ${fp}: ${err.message}`)
+    // 原来这里是 `读取失败 ${fp}: ${err.message}` —— 绝对路径 + errno 会原样出现在界面上，
+    // 用户读不懂也用不上（I-48）。`读取失败` 这个词有测试与文档钉着，必须保留。
+    throw new Error('读取失败：数据文件无法打开，可能被其他程序占用。')
   }
   let parsed
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
-    return recoverCorrupt(name, fp, `JSON 解析失败: ${err.message}`)
+    // why 会拼进下面给用户看的句子，所以只留中文结论，不带引擎原文
+    return recoverCorrupt(name, fp, 'JSON 解析失败')
   }
   // null 是合法 JSON 但不是合法数据（一号文件就是 null 一定是坏了）
   if (parsed === null || (expect === 'array' && !Array.isArray(parsed))) {
@@ -79,8 +82,9 @@ function recoverCorrupt(name, fp, why) {
   try {
     fs.renameSync(fp, corruptPath)
   } catch {
-    // 连改名都失败（文件被占用等）：直接抛，别赌
-    throw new Error(`${name}.json 损坏且无法留存（${why}）：${fp}`)
+    // 连改名都失败（文件被占用等）：直接抛，别赌。
+    // 文件名上文已经说了（`${name}.json`），这里不再重复绝对路径（I-48）
+    throw new Error(`${name}.json 损坏且无法留存（${why}）`)
   }
   const bak = `${fp}.bak`
   if (fs.existsSync(bak)) {
@@ -117,7 +121,8 @@ function saveJson(name, value) {
     fs.renameSync(tmp, fp)
   } catch (err) {
     try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch { /* 清理失败不影响主错误 */ }
-    throw new Error(`写入失败 ${fp}: ${err.message}`)
+    // 同上：不拼绝对路径与 errno（I-48）。`写入失败` 同样被测试钉着
+    throw new Error('写入失败：数据文件无法写入，可能是磁盘已满或没有写入权限。')
   }
   return { ok: true, path: fp }
 }

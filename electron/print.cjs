@@ -14,6 +14,7 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
+const { toUserMessage } = require('./user-error.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
 const renderEngine = require('./render-engine.cjs')
@@ -452,7 +453,8 @@ function deleteJob(jobId) {
       fs.rmSync(jobDir, { recursive: true, force: true })
       if (fs.existsSync(jobDir)) throw new Error('目录仍存在')
     } catch (err) {
-      throw new Error(`归档清理失败，打印记录已保留，可重试：${err.message}`)
+      // 这句会显示在打印历史的操作反馈上，所以 err.message（可能含路径/errno）不能直接拼（I-48）
+      throw new Error(`归档清理失败，打印记录已保留，可重试：${toUserMessage(err, '文件可能被其他程序占用')}`)
     }
     // 空月份目录没有归档内容，只在确实为空时移除。
     try { fs.rmdirSync(path.dirname(jobDir)) } catch { /* 其他任务或文件仍在，保留 */ }

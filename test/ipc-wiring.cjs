@@ -123,8 +123,11 @@ async function main() {
       .matchAll(/ipcMain\.handle\(['"]([^'"]+)['"]/g)].map((m) => m[1])
     const allRegistered = new Set([...registered.keys(), ...mainChannels])
 
+    // 通道名从 preload 源码里抓。锚点跟着实现走：preload 现在**不直接** `ipcRenderer.invoke('ch')`，
+    // 而是统一走 `invoke('ch')` 包装（那层包装负责把报错洗成用户看得懂的话，见 I-48）。
+    // 包装自身的 `ipcRenderer.invoke(channel, ...args)` 通道名不是字面量，不会被这里匹配到。
     const preloadChannels = [...src('electron/preload.cjs')
-      .matchAll(/ipcRenderer\.invoke\(['"]([^'"]+)['"]/g)].map((m) => m[1])
+      .matchAll(/(?<!ipcRenderer\.)\binvoke\(['"]([^'"]+)['"]/g)].map((m) => m[1])
     ok(preloadChannels.length > 0, `preload 暴露了 ${preloadChannels.length} 个通道`)
 
     const unreachable = preloadChannels.filter((c) => !allRegistered.has(c))

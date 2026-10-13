@@ -3,6 +3,7 @@ import { onMounted, onBeforeUnmount, ref } from 'vue'
 import PhotoImportPanel from '../components/PhotoImportPanel.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { activeDataset, rememberDataset } from '../lib/active-dataset.js'
+import { toUserMessage } from '../../electron/user-error.cjs'
 const emit = defineEmits(['navigate'])
 const detail = ref(null)
 const error = ref('')
@@ -28,7 +29,7 @@ onMounted(async () => {
     if (!alive) return
     detail.value = ds
     rememberDataset(ds.id)
-  } catch (err) { if (alive) error.value = err.message }
+  } catch (err) { if (alive) error.value = toUserMessage(err) }
   finally { if (alive) loading.value = false }
 })
 </script>

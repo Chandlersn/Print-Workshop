@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { toUserMessage } from '../../electron/user-error.cjs'
 
 const props = defineProps({ datasetId: { type: String, required: true }, columns: { type: Array, required: true }, matchColumn: { type: String, default: '' }, embedded: Boolean })
 const emit = defineEmits(['close', 'edit-cell'])
@@ -51,7 +52,7 @@ async function refresh() {
     const report = await window.printpress.photoReport({ datasetId: props.datasetId, column: column.value })
     if (alive && token === generation) result.value = report
   } catch (err) {
-    if (alive && token === generation) error.value = err.message
+    if (alive && token === generation) error.value = toUserMessage(err)
   } finally {
     if (alive && token === generation) loading.value = false
   }
@@ -71,7 +72,7 @@ async function importFolder() {
       photoStates.value = {}
     }
   } catch (err) {
-    if (alive && token === generation) error.value = err.message
+    if (alive && token === generation) error.value = toUserMessage(err)
   } finally {
     if (alive) { busy.value = false; loading.value = false }
   }
@@ -98,7 +99,7 @@ async function importFolder() {
           <p class="photo-note">来源：{{ result.folderName }} · 匹配 {{ result.counts.matched }} / {{ result.total }} 行 · 待处理 {{ result.blocking }} 行 · 未填写 {{ result.counts.empty }} 行</p>
           <p class="photo-note">已入库 {{ result.files.filter(f => f.assetId && !f.error).length }} 张 · 已跳过 {{ result.ignored.length + result.files.filter(f => f.error).length }} 个文件。切换配图列后，新匹配的照片需重新选择文件夹导入。</p>
           <p v-if="result.duplicates.length" class="photo-warning">{{ result.duplicates.length }} 张照片被多行共用，请确认是否符合预期。<span v-for="(group, i) in result.duplicates.slice(0, 10)" :key="i"> 第 {{ group.rowIndexes.slice(0, 10).map(n => n + 1).join('、') }} 行{{ group.rowIndexes.length > 10 ? '等' : '' }}；</span></p>
-          <details v-if="result.ignored.length || result.files.some(f => f.error)"><summary>查看跳过或无法导入的文件</summary><ul><li v-for="(file, i) in [...result.files.filter(f => f.error), ...result.ignored].slice(0, 100)" :key="i">{{ file.name }}：{{ file.error || file.reason }}</li></ul><p>最多显示前 100 项；重选目录会替换这列的照片清单。</p></details>
+          <details v-if="result.ignored.length || result.files.some(f => f.error)"><summary>查看跳过或无法导入的文件</summary><ul><li v-for="(file, i) in [...result.files.filter(f => f.error), ...result.ignored].slice(0, 100)" :key="i">{{ file.name }}：{{ toUserMessage(file.error || file.reason) }}</li></ul><p>最多显示前 100 项；重选目录会替换这列的照片清单。</p></details>
           <div class="photo-actions"><label>显示 <select v-model="filter"><option value="problems">待处理与空值</option><option value="all">全部记录</option></select></label><span>{{ filtered.length }} 行</span></div>
           <div class="photo-results">
             <table><thead><tr><th>行号</th><th>配图列的值</th><th>照片</th><th>匹配结果</th></tr></thead><tbody>

@@ -219,7 +219,7 @@ npm run electron:dev  # vite + electron 热更新开发
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：44 套件，断言统计见运行结果
+npm test                        # 领域层测试：45 套件，断言统计见运行结果
 npm run test:e2e                # 端到端：120 人真实 printToPDF（经启动器摘除破坏性环境变量）
 npm run build && npm run test:design-e2e # 图层：实际 PDF 保真、三种版式及编辑器保存
 npm run test:design-export-e2e   # PNG：真实像素尺寸、透明度、资源加载与系统显示缩放
@@ -246,7 +246,7 @@ node test/e2e-drag-snap.cjs     # 拖拽跟手性 + 居中吸附全链
 node test/e2e-column-hide.cjs   # 列显隐全链（跑源码版，需先 npm run build）
 ```
 
-领域层里有九个套件专门守数据安全、出片正确性与分层结构，值得单独跑：
+领域层里有十个套件专门守数据安全、出片正确性与分层结构，值得单独跑：
 
 ```bash
 node test/storage-guard.cjs     # 存储层：路径越界、文件损坏兜底、属性消毒
@@ -256,6 +256,7 @@ node test/robustness.cjs        # 健壮性：越界布局拒存、前端竞态�
 node test/ipc-hardening.cjs     # IPC：存储白名单、外链白名单、文件名消毒
 node test/ipc-wiring.cjs        # 装配：86 个操作全部挂上、参数归一化逐通道正确
 node test/api-cli.cjs           # 分层：api.cjs 零 electron 依赖、写权限闸门、CLI 端到端
+node test/user-error.cjs        # 文案：面向用户的报错里不许出现 IPC 壳 / 绝对路径 / errno（I-48）
 node test/e2e-harness.cjs       # e2e 夹具：启动器必须摘掉破坏性环境变量
 node test/invariants.cjs        # 不变量契约：docs/不变量契约.md 的每条守卫都还在、还挂在 npm test 里
 ```

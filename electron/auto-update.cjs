@@ -23,6 +23,7 @@
  * 所有对外仓库常量集中此处；换仓库只改 OWNER / REPO。
  */
 const { app, dialog, BrowserWindow } = require('electron')
+const { toUserMessage } = require('./user-error.cjs')
 
 const OWNER = 'Chandlersn'
 const REPO = 'Print-Workshop'
@@ -59,11 +60,16 @@ function setState(next) {
 /** 当前状态（供界面在打开时才订阅、或断线重连后补齐） */
 function currentState() { return state }
 
-/** 把任意异常收敛成一句能显示给用户的中文原因 */
+/**
+ * 把任意异常收敛成一句能显示给用户的中文原因。
+ *
+ * 这里**必须走 toUserMessage**：electron-updater 抛的是英文（`Cannot find latest.yml`、
+ * `HttpError: 404 …`），而 reason 会直接显示在顶部更新横幅上（I-48）。
+ * 曾经的实现是 `e.message || String(e)`——注释写着「收敛成中文」，实际原样透传。
+ */
 function reasonOf(e, fallback) {
   if (!e) return fallback
-  const msg = e.message || String(e)
-  return msg || fallback
+  return toUserMessage(e, fallback)
 }
 
 /**

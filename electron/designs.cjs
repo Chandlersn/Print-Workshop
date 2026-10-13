@@ -7,6 +7,7 @@ const os = require('os')
 const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
 const { imageSizeFromBuffer, sniffImageExt } = require('./images.cjs')
 const { normalizeDesign, collectFontFamilies, normalizeSource } = require('./design-layout.cjs')
+const { toUserMessage } = require('./user-error.cjs')
 
 const MAX_BYTES = 64 * 1024 * 1024
 const MAX_PROJECT_BYTES = 512 * 1024 * 1024
@@ -129,21 +130,40 @@ function guardedFile(relative, directory) {
   const root = fs.realpathSync(allowed)
   assertRealDataPath(root)
   const inside = path.relative(root, real)
-  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new Error('素材路径越界')
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw pathGuardError('素材路径越界')
   return real
 }
 function assertRealDataPath(file) {
   const root = fs.realpathSync(DATA_DIR)
   const real = fs.realpathSync(file)
   const relative = path.relative(root, real)
-  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('存储路径越界（符号链接）')
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw pathGuardError('存储路径越界（符号链接）')
+}
+/**
+ * 路径守卫错误的统一标记。
+ *
+ * 为什么要带 code：上层（如 `readAsset`）把「读不到」翻译成用户看得懂的「素材可能已被删除」，
+ * 而**路径越界是安全问题，语义完全不同**——不能被那层翻译吞掉。
+ * 守卫（test/designs.cjs 的 junction 出界用例）靠 code 后的错误文案证明
+ * 「拒绝的原因是路径守卫，而不是碰巧失败」。
+ */
+function pathGuardError(message) {
+  const err = new Error(message)
+  err.code = 'PATH_ESCAPED'
+  return err
 }
 function readAsset(id, claimedPath) {
   const match = typeof id === 'string' && ASSET_ID.exec(id)
   if (!match) throw new Error('素材标识无效')
   let asset
   try { asset = JSON.parse(fs.readFileSync(guardedFile(`design-assets/${match[1]}.json`, 'design-assets'), 'utf8')) } catch (err) {
-    throw new Error(`找不到底图素材 ${id}：${err.message}`)
+    // 这里**故意不拼 id、也不拼 err.message**：id 是内部标识（64 位十六进制），
+    // err.message 里带绝对路径与 errno。两者都会原样出现在用户的报错横幅上，
+    // 而用户既读不懂、也无法据此做任何事（2026-10-13 实际被投诉过，见 I-48）。
+    // 例外：路径越界是安全问题，语义与「素材丢了」完全不同，照原样往外抛。
+    // 详情不丢：原始 err 仍可在开发控制台看到（preload 的 invoke 包装会打）。
+    if (err && err.code === 'PATH_ESCAPED') throw err
+    throw new Error('找不到底图素材，可能已被删除或尚未同步。')
   }
   if (!asset || asset.id !== id || !['image/png', 'image/jpeg'].includes(asset.mime)) throw new Error('底图素材记录损坏')
   const expected = `design-assets/${match[1]}.${asset.mime === 'image/png' ? 'png' : 'jpg'}`
@@ -199,7 +219,10 @@ function canonicalFonts(doc, previous = {}) {
     try {
       const absolute = guardedFile(`print-fonts/${file}`, 'print-fonts')
       if (!fs.statSync(absolute).isFile() || fs.statSync(absolute).size === 0) throw new Error('文件为空')
-    } catch (err) { throw new Error(`底图所用上传字体缺失或不可读：${family}（${err.message}）`) }
+    } catch (err) {
+      // 保留「哪个字体」——用户据此能重装字体；丢掉 err.message（内含绝对路径与 errno，I-48）
+      throw new Error(`底图所用上传字体缺失或不可读：${family}（${toUserMessage(err, '文件可能已被删除')}）`)
+    }
     references[family] = file
   }
   doc.fontAssets = references
@@ -250,7 +273,9 @@ function getDesign(id, revision) {
   if (!Number.isSafeInteger(rev) || rev < 1 || rev > head.revision) throw new Error('底图版本不存在或尚未提交')
   let doc
   try { doc = normalizeDesign(readRevision(id, rev)) } catch (err) {
-    throw new Error(`读取底图工程失败：${err.message}`)
+    // 校验失败的原因（如「去色超出有效范围（0–1）」）是中文的、对报障有用，保留；
+    // 但过一遍 toUserMessage：万一抛的是英文引擎错误，也不会漏到界面上（I-48）
+    throw new Error(`读取底图工程失败：${toUserMessage(err, '文件可能已损坏')}`)
   }
   if (doc.id !== id || doc.revision !== rev) throw new Error('底图版本记录损坏')
   return canonicalFonts(canonicalAssets(doc))

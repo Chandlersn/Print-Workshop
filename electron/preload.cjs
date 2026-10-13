@@ -3,28 +3,58 @@
  * 原则：contextBridge 只暴露具名方法，不透传 ipcRenderer 对象。
  */
 const { contextBridge, ipcRenderer } = require('electron')
+const { toUserMessage, DEFAULT_FALLBACK } = require('./user-error.cjs')
+
+/**
+ * 所有 IPC 调用的**唯一收口**。
+ *
+ * 为什么收在这里，而不是让每个界面自己 try/catch：
+ * `ipcRenderer.invoke` 失败时抛的是 Electron 包的壳
+ *   `Error invoking remote method 'design:save': Error: <主进程原文>`
+ * 主进程原文里还常夹着绝对路径与内部 id。界面代码一律 `err.message || String(err)` 直接显示，
+ * 于是同一条错误在有的页面是英文、在有的页面是中文——取决于那个页面有没有自己洗一遍。
+ * 收在这里之后，**新增调用点自动就是干净的**，不用记得处理（见 I-48）。
+ *
+ * `cause` 上挂原始 err，开发时可从 devtools 里看到完整细节。
+ * **不无条件打 console.error**：这个应用里不少 IPC 失败是**预期内的**
+ * （例如「素材库里没有这个素材」是删除素材后界面主动查询会遇到的正常分支），
+ * 全部打成 error 会污染 e2e 的「界面无控制台错误」守卫，也会让真错误淹没在噪音里。
+ * 只对「认不出来历」（落到兜底文案）的失败打日志——那才是真正值得看一眼的。
+ *
+ * `api.cjs` 的 `toEnvelope` 是 CLI / agent 契约，**故意保留原文**，本包装不碰它。
+ */
+function invoke(channel, ...args) {
+  return ipcRenderer.invoke(channel, ...args).catch((err) => {
+    const message = toUserMessage(err)
+    if (message === DEFAULT_FALLBACK) console.error(`[ipc] ${channel} 未识别的失败：`, err)
+    const wrapped = new Error(message)
+    wrapped.userFacing = true
+    wrapped.cause = err
+    throw wrapped
+  })
+}
 
 contextBridge.exposeInMainWorld('printpress', {
   // 连通性
-  ping: () => ipcRenderer.invoke('app:ping'),
+  ping: () => invoke('app:ping'),
 
   // 数据目录信息
-  getEnv: () => ipcRenderer.invoke('app:env'),
+  getEnv: () => invoke('app:env'),
 
   // 数据目录自定义
-  changeDataDir: () => ipcRenderer.invoke('app:changeDataDir'),
-  resetDataDir: () => ipcRenderer.invoke('app:resetDataDir'),
-  openDataDir: () => ipcRenderer.invoke('app:openDataDir'),
-  relaunchApp: () => ipcRenderer.invoke('app:relaunch'),
+  changeDataDir: () => invoke('app:changeDataDir'),
+  resetDataDir: () => invoke('app:resetDataDir'),
+  openDataDir: () => invoke('app:openDataDir'),
+  relaunchApp: () => invoke('app:relaunch'),
 
   // 系统缓存：大小查询与一键释放
-  getCacheInfo: () => ipcRenderer.invoke('app:cacheInfo'),
-  clearCache: () => ipcRenderer.invoke('app:clearCache'),
+  getCacheInfo: () => invoke('app:cacheInfo'),
+  clearCache: () => invoke('app:clearCache'),
 
   // 版本与更新：meta 为版本号 + 出口链接；checkUpdate 手动触发检测；
   // onUpdateAvailable 订阅启动自动检测结果（返回退订函数）
-  getAppMeta: () => ipcRenderer.invoke('app:meta'),
-  checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+  getAppMeta: () => invoke('app:meta'),
+  checkUpdate: () => invoke('app:checkUpdate'),
   onUpdateAvailable: (cb) => {
     const handler = (_e, info) => cb(info)
     ipcRenderer.on('update:available', handler)
@@ -32,8 +62,8 @@ contextBridge.exposeInMainWorld('printpress', {
   },
   // 应用内更新：startUpdate 真正开始后台下载（以前只有徽标提示、没有下载入口），
   // installUpdate 在下载完成后重启安装，onUpdateState 订阅阶段与失败原因
-  startUpdate: () => ipcRenderer.invoke('app:startUpdate'),
-  installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
+  startUpdate: () => invoke('app:startUpdate'),
+  installUpdate: () => invoke('app:installUpdate'),
   onUpdateState: (cb) => {
     const handler = (_e, state) => cb(state)
     ipcRenderer.on('update:state', handler)
@@ -41,35 +71,35 @@ contextBridge.exposeInMainWorld('printpress', {
   },
 
   // 通用 JSON 存储（后续被领域通道取代，M1 起逐步收敛）
-  loadData: (name) => ipcRenderer.invoke('store:load', name),
-  saveData: (name, value) => ipcRenderer.invoke('store:save', name, value),
+  loadData: (name) => invoke('store:load', name),
+  saveData: (name, value) => invoke('store:save', name, value),
 
   // 数据集
-  importDatasetDialog: () => ipcRenderer.invoke('dataset:importDialog'),
-  inspectFile: (filePath) => ipcRenderer.invoke('dataset:inspect', filePath),
-  importSheets: (payload) => ipcRenderer.invoke('dataset:importSheets', payload),
+  importDatasetDialog: () => invoke('dataset:importDialog'),
+  inspectFile: (filePath) => invoke('dataset:inspect', filePath),
+  importSheets: (payload) => invoke('dataset:importSheets', payload),
   /** 订阅导入进度；返回取消订阅函数 */
   onImportProgress: (cb) => {
     const handler = (_e, p) => cb(p)
     ipcRenderer.on('import:progress', handler)
     return () => ipcRenderer.removeListener('import:progress', handler)
   },
-  listDatasets: () => ipcRenderer.invoke('dataset:list'),
-  getDataset: (id) => ipcRenderer.invoke('dataset:get', id),
-  deleteDataset: (id) => ipcRenderer.invoke('dataset:delete', id),
-  deleteBatch: (ids) => ipcRenderer.invoke('dataset:deleteBatch', { ids }),
-  renameColumn: (id, key, alias) => ipcRenderer.invoke('dataset:renameColumn', id, key, alias),
+  listDatasets: () => invoke('dataset:list'),
+  getDataset: (id) => invoke('dataset:get', id),
+  deleteDataset: (id) => invoke('dataset:delete', id),
+  deleteBatch: (ids) => invoke('dataset:deleteBatch', { ids }),
+  renameColumn: (id, key, alias) => invoke('dataset:renameColumn', id, key, alias),
   updateCell: (datasetId, rowIndex, key, value) =>
-    ipcRenderer.invoke('dataset:updateCell', { datasetId, rowIndex, key, value }),
-  addRow: (id) => ipcRenderer.invoke('dataset:addRow', id),
-  deleteRow: (datasetId, rowIndex) => ipcRenderer.invoke('dataset:deleteRow', { datasetId, rowIndex }),
+    invoke('dataset:updateCell', { datasetId, rowIndex, key, value }),
+  addRow: (id) => invoke('dataset:addRow', id),
+  deleteRow: (datasetId, rowIndex) => invoke('dataset:deleteRow', { datasetId, rowIndex }),
   setColumnPrint: (datasetId, key, printOn) =>
-    ipcRenderer.invoke('dataset:setColumnPrint', { datasetId, key, printOn }),
-  fieldCatalog: (id) => ipcRenderer.invoke('catalog:fields', id),
+    invoke('dataset:setColumnPrint', { datasetId, key, printOn }),
+  fieldCatalog: (id) => invoke('catalog:fields', id),
 
-  importPhotoFolder: (payload) => ipcRenderer.invoke('photo:importDialog', payload),
-  photoReport: (payload) => ipcRenderer.invoke('photo:report', payload),
-  setPhotoMatchColumn: (datasetId, key) => ipcRenderer.invoke('dataset:setPhotoMatchColumn', { datasetId, key }),
+  importPhotoFolder: (payload) => invoke('photo:importDialog', payload),
+  photoReport: (payload) => invoke('photo:report', payload),
+  setPhotoMatchColumn: (datasetId, key) => invoke('dataset:setPhotoMatchColumn', { datasetId, key }),
   onPhotoProgress: (cb) => {
     const handler = (_e, progress) => cb(progress)
     ipcRenderer.on('photo:progress', handler)
@@ -77,74 +107,74 @@ contextBridge.exposeInMainWorld('printpress', {
   },
 
   // 模板
-  listTemplates: () => ipcRenderer.invoke('template:list'),
-  getTemplate: (id) => ipcRenderer.invoke('template:get', id),
-  saveTemplate: (tpl) => ipcRenderer.invoke('template:save', tpl),
-  matchDataset: (templateId, datasetId) => ipcRenderer.invoke('template:matchDataset', templateId, datasetId),
-  rebindDataset: (templateId, datasetId) => ipcRenderer.invoke('template:rebindDataset', templateId, datasetId),
-  deleteTemplate: (id) => ipcRenderer.invoke('template:delete', id),
-  uploadBackgroundDialog: () => ipcRenderer.invoke('template:uploadBackgroundDialog'),
-  uploadBackgroundBytes: (payload) => ipcRenderer.invoke('template:uploadBackgroundBytes', payload),
-  discardBackground: (payload) => ipcRenderer.invoke('template:discardBackground', payload),
+  listTemplates: () => invoke('template:list'),
+  getTemplate: (id) => invoke('template:get', id),
+  saveTemplate: (tpl) => invoke('template:save', tpl),
+  matchDataset: (templateId, datasetId) => invoke('template:matchDataset', templateId, datasetId),
+  rebindDataset: (templateId, datasetId) => invoke('template:rebindDataset', templateId, datasetId),
+  deleteTemplate: (id) => invoke('template:delete', id),
+  uploadBackgroundDialog: () => invoke('template:uploadBackgroundDialog'),
+  uploadBackgroundBytes: (payload) => invoke('template:uploadBackgroundBytes', payload),
+  discardBackground: (payload) => invoke('template:discardBackground', payload),
 
   // 可编辑底图工程（素材只走受控导入，不暴露文件系统）
-  listDesigns: () => ipcRenderer.invoke('design:list'),
-  listDesignPresets: () => ipcRenderer.invoke('design:listPresets'),
-  createDesignFromPreset: (presetId, name) => ipcRenderer.invoke('design:createFromPreset', presetId, name),
-  touchDesign: (id) => ipcRenderer.invoke('design:touch', id),
-  getDesign: (id, revision) => ipcRenderer.invoke('design:get', id, revision),
-  saveDesign: (design) => ipcRenderer.invoke('design:save', design),
-  deleteDesign: (id) => ipcRenderer.invoke('design:delete', id),
-  purgeOrphanDesigns: () => ipcRenderer.invoke('design:purgeOrphanDirs'),
-  uploadDesignImageDialog: () => ipcRenderer.invoke('design:importDialog'),
-  uploadDesignImageBytes: (payload) => ipcRenderer.invoke('design:importBytes', payload),
-  importDesignBackground: (payload) => ipcRenderer.invoke('design:importBackground', payload),
-  exportDesignPng: (payload) => ipcRenderer.invoke('design:exportPng', payload),
+  listDesigns: () => invoke('design:list'),
+  listDesignPresets: () => invoke('design:listPresets'),
+  createDesignFromPreset: (presetId, name) => invoke('design:createFromPreset', presetId, name),
+  touchDesign: (id) => invoke('design:touch', id),
+  getDesign: (id, revision) => invoke('design:get', id, revision),
+  saveDesign: (design) => invoke('design:save', design),
+  deleteDesign: (id) => invoke('design:delete', id),
+  purgeOrphanDesigns: () => invoke('design:purgeOrphanDirs'),
+  uploadDesignImageDialog: () => invoke('design:importDialog'),
+  uploadDesignImageBytes: (payload) => invoke('design:importBytes', payload),
+  importDesignBackground: (payload) => invoke('design:importBackground', payload),
+  exportDesignPng: (payload) => invoke('design:exportPng', payload),
   // 无参：路径由主进程记着（最近一次成功导出的 PNG），渲染层传不了路径进来
-  revealDesignExport: () => ipcRenderer.invoke('design:revealExport'),
-  openDesignExport: () => ipcRenderer.invoke('design:openExport'),
+  revealDesignExport: () => invoke('design:revealExport'),
+  openDesignExport: () => invoke('design:openExport'),
 
   // 工程包 .ppdesign（v0.5.0 M2）：导出固定版本 / 检查 → 提交导入副本
-  exportDesignPackage: (payload) => ipcRenderer.invoke('design:packageExport', payload),
-  cancelExportDesignPackage: (taskId) => ipcRenderer.invoke('design:packageCancelExport', { taskId }),
+  exportDesignPackage: (payload) => invoke('design:packageExport', payload),
+  cancelExportDesignPackage: (taskId) => invoke('design:packageCancelExport', { taskId }),
   onDesignPackageProgress: (cb) => {
     const handler = (_e, progress) => cb(progress)
     ipcRenderer.on('design:packageProgress', handler)
     return () => ipcRenderer.removeListener('design:packageProgress', handler)
   },
-  inspectDesignPackage: (payload) => ipcRenderer.invoke('design:packageInspect', payload || {}),
-  commitDesignPackage: (payload) => ipcRenderer.invoke('design:packageCommit', payload),
-  cancelDesignPackage: (token) => ipcRenderer.invoke('design:packageCancel', { token }),
-  pickPackageFont: () => ipcRenderer.invoke('design:packagePickFont'),
+  inspectDesignPackage: (payload) => invoke('design:packageInspect', payload || {}),
+  commitDesignPackage: (payload) => invoke('design:packageCommit', payload),
+  cancelDesignPackage: (token) => invoke('design:packageCancel', { token }),
+  pickPackageFont: () => invoke('design:packagePickFont'),
 
   // 字体
-  listFonts: () => ipcRenderer.invoke('font:list'),
-  uploadFontDialog: () => ipcRenderer.invoke('font:uploadDialog'),
-  deleteFont: (file) => ipcRenderer.invoke('font:delete', file),
+  listFonts: () => invoke('font:list'),
+  uploadFontDialog: () => invoke('font:uploadDialog'),
+  deleteFont: (file) => invoke('font:delete', file),
 
   // 本地素材库（v0.5.0 M1）
-  listAssets: (opts) => ipcRenderer.invoke('asset:list', opts || {}),
-  listAssetTags: () => ipcRenderer.invoke('asset:listTags'),
-  getAsset: (id) => ipcRenderer.invoke('asset:get', id),
-  importAssetBytes: (payload) => ipcRenderer.invoke('asset:importBytes', payload),
-  importAssetDialog: () => ipcRenderer.invoke('asset:importDialog'),
-  updateAsset: (id, patch) => ipcRenderer.invoke('asset:update', id, patch),
-  archiveAsset: (id) => ipcRenderer.invoke('asset:archive', id),
-  restoreAsset: (id) => ipcRenderer.invoke('asset:restore', id),
-  adoptAsset: (id, meta) => ipcRenderer.invoke('asset:adopt', id, meta),
-  discardEphemeralAsset: (assetId, exceptDesignId) => ipcRenderer.invoke('asset:discardEphemeral', { assetId, exceptDesignId }),
-  rebuildAssetThumb: (id) => ipcRenderer.invoke('asset:rebuildThumb', id),
-  listAssetOrphans: () => ipcRenderer.invoke('asset:listOrphans'),
-  purgeAssetOrphans: (hashes) => ipcRenderer.invoke('asset:purgeOrphans', hashes),
-  openAssetFolder: () => ipcRenderer.invoke('asset:openFolder'),
+  listAssets: (opts) => invoke('asset:list', opts || {}),
+  listAssetTags: () => invoke('asset:listTags'),
+  getAsset: (id) => invoke('asset:get', id),
+  importAssetBytes: (payload) => invoke('asset:importBytes', payload),
+  importAssetDialog: () => invoke('asset:importDialog'),
+  updateAsset: (id, patch) => invoke('asset:update', id, patch),
+  archiveAsset: (id) => invoke('asset:archive', id),
+  restoreAsset: (id) => invoke('asset:restore', id),
+  adoptAsset: (id, meta) => invoke('asset:adopt', id, meta),
+  discardEphemeralAsset: (assetId, exceptDesignId) => invoke('asset:discardEphemeral', { assetId, exceptDesignId }),
+  rebuildAssetThumb: (id) => invoke('asset:rebuildThumb', id),
+  listAssetOrphans: () => invoke('asset:listOrphans'),
+  purgeAssetOrphans: (hashes) => invoke('asset:purgeOrphans', hashes),
+  openAssetFolder: () => invoke('asset:openFolder'),
 
   // 打印
-  printValidate: (payload) => ipcRenderer.invoke('print:validate', payload),
-  printGenerate: (payload) => ipcRenderer.invoke('print:generate', payload),
-  printExportPdf: (payload) => ipcRenderer.invoke('print:exportPdf', payload),
-  printSend: (payload) => ipcRenderer.invoke('print:send', payload),
+  printValidate: (payload) => invoke('print:validate', payload),
+  printGenerate: (payload) => invoke('print:generate', payload),
+  printExportPdf: (payload) => invoke('print:exportPdf', payload),
+  printSend: (payload) => invoke('print:send', payload),
   /** 取消进行中的打印/导出（S1.3-c）：批次边界生效，见 print:cancel */
-  printCancel: (jobKey) => ipcRenderer.invoke('print:cancel', { jobKey }),
+  printCancel: (jobKey) => invoke('print:cancel', { jobKey }),
   /** 订阅分批出片进度（jobKey / phase / index / batches / rows / pages…）；返回退订函数 */
   onPrintProgress: (cb) => {
     const handler = (_e, p) => cb(p)
@@ -153,7 +183,7 @@ contextBridge.exposeInMainWorld('printpress', {
   },
 
   // 打印历史
-  listJobs: () => ipcRenderer.invoke('job:list'),
-  openSnapshot: (jobId) => ipcRenderer.invoke('job:openSnapshot', jobId),
-  deleteJob: (jobId) => ipcRenderer.invoke('job:delete', jobId),
+  listJobs: () => invoke('job:list'),
+  openSnapshot: (jobId) => invoke('job:openSnapshot', jobId),
+  deleteJob: (jobId) => invoke('job:delete', jobId),
 })

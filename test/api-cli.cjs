@@ -440,9 +440,9 @@ async function run() {
 
     // 渲染层同样不给参数：contextBridge 上暴露的必须是零参函数
     const preloadSrc = stripComments(src('electron/preload.cjs'))
-    ok(/revealDesignExport:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('design:revealExport'\)/.test(preloadSrc),
+    ok(/revealDesignExport:\s*\(\)\s*=>\s*invoke\('design:revealExport'\)/.test(preloadSrc),
       'preload 暴露的 revealDesignExport 是零参函数（渲染层无处传路径）')
-    ok(/openDesignExport:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('design:openExport'\)/.test(preloadSrc),
+    ok(/openDesignExport:\s*\(\)\s*=>\s*invoke\('design:openExport'\)/.test(preloadSrc),
       'preload 暴露的 openDesignExport 是零参函数（渲染层无处传路径）')
 
     // printer.cjs 里记路径的只有一个模块级变量，且只在导出成功后写入
@@ -461,7 +461,7 @@ async function run() {
       '两条都标 gui: dialog —— CLI / agent 的 ctx.dialog 为 null，一律 GUI_REQUIRED')
     ok(folderOps.every((o) => Object.keys(o.params).length === 0),
       '两条都不声明任何参数（渲染层无从传路径进来）')
-    ok(/openAssetFolder:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('asset:openFolder'\)/.test(preloadSrc),
+    ok(/openAssetFolder:\s*\(\)\s*=>\s*invoke\('asset:openFolder'\)/.test(preloadSrc),
       'preload 暴露的 openAssetFolder 是零参函数（渲染层无处传路径）')
     const folderBlock = apiSrc.slice(apiSrc.indexOf("'asset:openFolder'"), apiSrc.indexOf("'asset:openFolder'") + 320)
     ok(/assetLibrary\.originalsDir\(\)/.test(folderBlock),

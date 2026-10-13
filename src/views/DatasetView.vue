@@ -10,6 +10,7 @@ import {
   sanitizeHidden, hiddenKeysOf, withHidden, visibleColumnsOf, canHideMore, pruneHidden,
 } from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
 const activeId = ref(activeDataset.value)
@@ -246,10 +247,12 @@ watch(shownDatasets, (list) => {
   }
 })
 
-function extractError(err) {
-  return String(err && err.message ? err.message : err).replace(
-    /^Error invoking remote method '[^']+': (Error: )?/, '')
-}
+/**
+ * 曾经这里自己写了一份「剥 Electron IPC 壳」的正则，`TemplateView.vue` 里还有一模一样的一份，
+ * 而别的页面一份都没有 ⇒ 同一条错误在有的页面干净、在有的页面是英文。
+ * 现在只留 `electron/user-error.cjs` 一份实现（I-48），本函数退化成别名，调用点不动。
+ */
+function extractError(err) { return toUserMessage(err) }
 
 async function refreshList(preferId) {
   if (preferId) {

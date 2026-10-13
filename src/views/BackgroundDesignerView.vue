@@ -8,6 +8,9 @@ import { activeDataset } from '../lib/active-dataset.js'
 import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, BLEND_MODES, CROP_RATIOS, fitCropToRatio } from '../../electron/design-layout.cjs'
 // 格式表与体积估算在纯模块里——出图实现读的是同一份，界面不抄第二遍（见 I-41）。
 import { FORMATS, normalizeQuality, estimateOutputBytes } from '../../electron/export-formats.cjs'
+// 报错文案的唯一整理入口（I-48）。IPC 侧 preload 已经洗过一遍，这里再兜一层是为了
+// **渲染进程自己抛的**（如 renderDesign 校验失败）也不漏英文。
+import { toUserMessage } from '../../electron/user-error.cjs'
 import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
   createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection,
@@ -336,7 +339,7 @@ let keyboardTimer = null
 const fontFaces = []
 const loadedFontFiles = new Set()
 
-function fail(err) { error.value = err?.message || String(err); message.value = '' }
+function fail(err) { error.value = toUserMessage(err); message.value = '' }
 function formatColor(value) { return value === 'transparent' ? '透明' : String(value || '').toUpperCase() }
 function clearFeedback() { error.value = ''; message.value = '' }
 /**
@@ -650,7 +653,7 @@ function persistDraft() {
   try {
     if (dirty.value) localStorage.setItem(DRAFT_KEY, JSON.stringify({ design: design.value, savedFingerprint: savedFingerprint.value, context: context.value }))
     else localStorage.removeItem(DRAFT_KEY)
-  } catch (err) { fail(`本地恢复草稿无法写入，请及时保存工程：${err.message || err}`) }
+  } catch (err) { fail(`本地恢复草稿无法写入，请及时保存工程：${toUserMessage(err)}`) }
 }
 watch([design, savedFingerprint], () => {
   designerNav.dirty = dirty.value
@@ -771,7 +774,7 @@ async function runExport() {
     // 不再走通用 message：导出成功要带「打开所在文件夹 / 用系统程序打开」两个动作，
     // 那条提示条承载不了按钮，所以单独渲染一个带按钮的完成条。
     lastExport.value = result
-  } catch (err) { exportError.value = err?.message || String(err) }
+  } catch (err) { exportError.value = toUserMessage(err) }
   finally { busy.value = false }
 }
 /**
@@ -842,7 +845,7 @@ async function runPackageExport(saveFirst) {
     }
     showPackageExport.value = false
     message.value = `工程包已导出：${result.entries} 个条目 · ${(result.bytes / 1024).toFixed(0)} KB`
-  } catch (err) { packageExportError.value = err?.message || String(err) }
+  } catch (err) { packageExportError.value = toUserMessage(err) }
   finally {
     stopProgress?.()
     busy.value = false
@@ -855,7 +858,7 @@ async function cancelPackageExport() {
   if (!taskId) return
   packageExportError.value = '正在取消导出…'
   try { await window.printpress.cancelExportDesignPackage(taskId) }
-  catch (err) { packageExportError.value = err?.message || String(err) }
+  catch (err) { packageExportError.value = toUserMessage(err) }
 }
 
 /**
@@ -911,7 +914,7 @@ async function commitImport(openCopy) {
       await loadProject({ id: ref.id })
     }
     message.value = `已导入副本：${ref.name}（第 ${ref.revision} 版）${openCopy ? '' : '，可在工程库打开'}`
-  } catch (err) { packageError.value = err?.message || String(err) }
+  } catch (err) { packageError.value = toUserMessage(err) }
   finally { busy.value = false }
 }
 function add(type, asset = null) {
@@ -1836,7 +1839,7 @@ onMounted(async () => {
       context.value = draft.context || null
       message.value = '已恢复上次未保存的底图草稿。'
     }
-  } catch (err) { fail(`恢复草稿失败：${err.message || err}`) }
+  } catch (err) { fail(`恢复草稿失败：${toUserMessage(err)}`) }
   try {
     // 内置预设必须**在这里**也刷一次，不能只靠 activate()：首次进入本页时
     // onActivated 早于 onMounted 的这轮 await 跑完（那时 initialized 还是 false），

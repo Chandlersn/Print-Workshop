@@ -22,6 +22,7 @@ import {
   clampPct, snapTo, snapshotOf, parseSnapshot, pushCapped,
   shouldStartNewNudge, alignedX, alignedY,
 } from '../lib/field-edit.cjs'
+import { toUserMessage } from '../../electron/user-error.cjs'
 
 const CANVAS_W = 760 // 画布显示宽度 px
 
@@ -486,11 +487,12 @@ async function refreshLists() {
   designs.value = await window.printpress.listDesigns()
 }
 
-function extractError(err) {
-  return String(err && err.message ? err.message : err).replace(
-    /^Error invoking remote method '[^']+': (Error: )?/, '')
-}
-
+/**
+ * 曾经这里自己写了一份「剥 Electron IPC 壳」的正则，`DatasetView.vue` 里还有一模一样的一份，
+ * 而别的页面一份都没有 ⇒ 同一条错误在有的页面干净、在有的页面是英文。
+ * 现在只留 `electron/user-error.cjs` 一份实现（I-48），本函数退化成别名，调用点不动。
+ */
+function extractError(err) { return toUserMessage(err) }
 /**
  * 成功提示的存活时长。与底图制作页的 MESSAGE_TTL 取同一个数（5000），
  * 两页行为一致；只作用于 `msg`，`errorMsg` 常驻由用户点「关闭」。

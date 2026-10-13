@@ -116,7 +116,10 @@ try {
       if (to === path.join(tmp, 'designs.json')) throw new Error('模拟磁盘故障')
       return rename.apply(this, arguments)
     }
-    try { assert.throws(() => designs.saveDesign({ ...second, name: '失败版本' }), /模拟磁盘故障/) } finally { fs.renameSync = rename }
+    // 这里断言的是「失败来自写入路径」。以前能通过 err.message 直接看到注入的故障文案；
+    // I-48 之后 store.cjs 不再把底层 err.message 拼进用户可见文案，所以改钉「写入失败」这个词，
+    // 而故障确实被注入过这件事由下面的「旧工程仍完整可读 + 没有半截版本文件」兜底证明。
+    try { assert.throws(() => designs.saveDesign({ ...second, name: '失败版本' }), /写入失败/) } finally { fs.renameSync = rename }
     assert.deepEqual(designs.getDesign(first.id), second)
     assert.equal(fs.existsSync(path.join(tmp, 'designs', first.id, '3.json')), false)
     second = designs.saveDesign({ ...second, name: '重试成功' })
@@ -346,7 +349,7 @@ try {
     assert.match(src, /if \(index\(\)\.some\(\(d\) => d\.id === name\)\) continue/, '删每个目录前重新读索引复核')
     assert.match(src, /resolveInsideDataDir\(`designs\/\$\{name\}`\)/, '路径由目录名经数据目录守卫推导')
     const pre = fs.readFileSync(path.join(root, 'electron/preload.cjs'), 'utf8')
-    assert.match(pre, /purgeOrphanDesigns:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('design:purgeOrphanDirs'\)/, 'preload 暴露零参函数')
+    assert.match(pre, /purgeOrphanDesigns:\s*\(\)\s*=>\s*invoke\('design:purgeOrphanDirs'\)/, 'preload 暴露零参函数')
   })
   console.log(`\n${passed} design domain acceptance groups passed`)
 } finally {

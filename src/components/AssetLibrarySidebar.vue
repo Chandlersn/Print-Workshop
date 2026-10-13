@@ -18,6 +18,7 @@ const reportedMissing = new Set()
  * 本组件不碰 design / commit，避免两边撤销栈打架。
  */
 import { ref, reactive, computed, onMounted } from 'vue'
+import { toUserMessage } from '../../electron/user-error.cjs'
 
 const emit = defineEmits(['insert', 'error'])
 
@@ -61,7 +62,7 @@ async function refresh() {
     pageSize.value = res.pageSize || pageSize.value
     noteMissing(res.missing)
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
     items.value = []
     total.value = 0
   } finally {
@@ -152,7 +153,7 @@ async function importDialog() {
       await refresh()
     }
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 
@@ -163,7 +164,7 @@ async function openFolder() {
   try {
     await pp.openAssetFolder()
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 
@@ -177,7 +178,7 @@ async function toggleFavoriteItem(item) {
     await pp.updateAsset(item.assetId, { favorite: !item.favorite })
     await refresh()
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 async function archiveItem(item) {
@@ -185,7 +186,7 @@ async function archiveItem(item) {
     await pp.archiveAsset(item.assetId)
     await refresh()
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 async function restoreItem(item) {
@@ -193,7 +194,7 @@ async function restoreItem(item) {
     await pp.restoreAsset(item.assetId)
     await refresh()
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 
@@ -217,7 +218,7 @@ async function saveEdit(item) {
     cancelEdit()
     await refresh()
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 
@@ -235,7 +236,7 @@ async function scanOrphans() {
     }
     purgePending.value = true
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
   }
 }
 async function confirmPurge() {
@@ -248,7 +249,7 @@ async function confirmPurge() {
     await refresh()
     error.value = `已清理 ${res.removed} 个孤立原件${res.kept ? `，${res.kept} 个因已被引用而跳过` : ''}。`
   } catch (err) {
-    error.value = err?.message || String(err)
+    error.value = toUserMessage(err)
     purgePending.value = false
   }
 }

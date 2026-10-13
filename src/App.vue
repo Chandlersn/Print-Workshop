@@ -10,6 +10,7 @@ import TemplateView from './views/TemplateView.vue'
 import PrintCenterView from './views/PrintCenterView.vue'
 import BackgroundDesignerView from './views/BackgroundDesignerView.vue'
 import GuideDialog from './components/GuideDialog.vue'
+import { toUserMessage } from '../electron/user-error.cjs'
 import { cellNav } from './lib/cell-nav.js'
 import { designerNav } from './lib/designer-nav.js'
 
@@ -47,7 +48,7 @@ async function onChangeDataDir() {
     pendingReset.value = false
     showRestart.value = true
   } catch (err) {
-    dataDirError.value = err.message || String(err)
+    dataDirError.value = toUserMessage(err)
   }
 }
 
@@ -58,7 +59,7 @@ async function onResetDataDir() {
     pendingReset.value = true
     showRestart.value = true
   } catch (err) {
-    dataDirError.value = err.message || String(err)
+    dataDirError.value = toUserMessage(err)
   }
 }
 
@@ -69,7 +70,7 @@ async function onRelaunch() {
 async function onOpenDataDir() {
   dataDirError.value = ''
   try { await window.printpress.openDataDir() } catch (err) {
-    dataDirError.value = err.message || String(err)
+    dataDirError.value = toUserMessage(err)
   }
 }
 
@@ -189,7 +190,7 @@ async function startRealUpdate() {
     const r = (await window.printpress.startUpdate()) || {}
     if (!r.started) updateMsg.value = r.reason || '当前环境不支持应用内更新'
   } catch (err) {
-    updateMsg.value = '无法启动更新：' + (err && err.message ? err.message : err)
+    updateMsg.value = '无法启动更新：' + toUserMessage(err)
   } finally {
     updateBusy.value = false
   }
@@ -201,7 +202,7 @@ async function onInstallUpdate() {
     const r = (await window.printpress.installUpdate()) || {}
     if (!r.ok) updateMsg.value = r.reason || '现在还不能安装更新'
   } catch (err) {
-    updateMsg.value = '安装失败：' + (err && err.message ? err.message : err)
+    updateMsg.value = '安装失败：' + toUserMessage(err)
   }
 }
 
@@ -273,14 +274,14 @@ async function onClearCache() {
       if (skipped) parts.push(`${skipped} 个工程残留被占用，未能清理`)
     } catch (err) {
       cacheMsgFail.value = true
-      parts.push('工程残留清理失败：' + (err && err.message ? err.message : err))
+      parts.push('工程残留清理失败：' + toUserMessage(err))
     }
     if (!parts.length) parts.push('已无可清理的缓存与残留')
     cacheMsg.value = parts.join('；')
     await refreshCacheInfo()
   } catch (err) {
     cacheMsgFail.value = true
-    cacheMsg.value = '清理失败：' + (err && err.message ? err.message : err)
+    cacheMsg.value = '清理失败：' + toUserMessage(err)
   } finally {
     clearingCache.value = false
   }
@@ -295,7 +296,7 @@ onMounted(async () => {
   try {
     env.value = await window.printpress.getEnv()
   } catch (err) {
-    env.value = { error: String(err) }
+    env.value = { error: toUserMessage(err) }
   }
   try { meta.value = await window.printpress.getAppMeta() } catch { /* 元信息失败不阻塞 */ }
   try {

@@ -683,9 +683,9 @@ console.log('== 10. 「检查更新」必须真能触发更新（前端静态核
   const apiSrc = src('electron/api.cjs')
   const updSrc = src('electron/auto-update.cjs')
 
-  ok(/startUpdate:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('app:startUpdate'\)/.test(preloadSrc),
+  ok(/startUpdate:\s*\(\)\s*=>\s*invoke\('app:startUpdate'\)/.test(preloadSrc),
     'preload 暴露 startUpdate（渲染层有「开始下载」的入口）')
-  ok(/installUpdate:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('app:installUpdate'\)/.test(preloadSrc),
+  ok(/installUpdate:\s*\(\)\s*=>\s*invoke\('app:installUpdate'\)/.test(preloadSrc),
     'preload 暴露 installUpdate（下载完成后能重启安装）')
   ok(/onUpdateState:\s*\(cb\)/.test(preloadSrc) && /ipcRenderer\.on\('update:state'/.test(preloadSrc),
     'preload 订阅 update:state（进度与失败原因能进界面）')

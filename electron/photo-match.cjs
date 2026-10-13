@@ -1,4 +1,7 @@
 /** Pure filename matching. Dataset values never become filesystem paths or URLs. */
+// 依赖的是另一个纯模块（零 fs / 零 electron），本模块的「纯」属性不变。
+// 这一层的 reason 会显示在「照片匹配」表格的备注列上，所以同样要过一遍（I-48）。
+const { toUserMessage } = require('./user-error.cjs')
 const PHOTO_EXT = /\.(png|jpe?g)$/i
 const ASSET_ID = /^asset_[a-f0-9]{64}$/
 
@@ -68,7 +71,7 @@ function matchPhotos(rows, column, files, rowIndexes) {
             uses.get(file.assetId).push(rowIndex)
           }
         }
-      } catch (err) { item.status = 'invalid'; item.reason = err.message }
+      } catch (err) { item.status = 'invalid'; item.reason = toUserMessage(err, '照片素材记录无效') }
     }
     counts[item.status]++
     results.push(item)

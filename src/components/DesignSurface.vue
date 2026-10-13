@@ -1,6 +1,8 @@
 <script setup>
 import { computed, getCurrentInstance, watch } from 'vue'
 import { renderDesign, normalizeFamily } from '../../electron/design-layout.cjs'
+// 渲染抛的是本地错误（不经过 IPC），同样要走同一份整理逻辑（I-48）
+import { toUserMessage } from '../../electron/user-error.cjs'
 
 const props = defineProps({
   design: { type: Object, required: true },
@@ -42,7 +44,7 @@ const content = computed(() => {
       photoUrl: layer => props.showEditorOnly ? undefined : (props.photos[layer.bindColumn] || null),
     })
   } catch (err) {
-    return { html: '', css: '', error: err.message || String(err) }
+    return { html: '', css: '', error: toUserMessage(err, '这张底图无法显示，工程数据可能已损坏。') }
   }
 })
 const scale = computed(() => props.width / (props.design.artboard.w * 96 / 25.4))

@@ -9,6 +9,7 @@ import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { reprintScope, layoutFallbackText, filterRowIndexes } from '../lib/print-scope.cjs'
+import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
 const templates = ref([])
@@ -47,7 +48,7 @@ async function cancelOutput() {
   try {
     const r = await window.printpress.printCancel(activeJobKey.value)
     if (r.ok) cancelRequested.value = true
-  } catch (err) { say(`取消失败：${err.message || err}`) }
+  } catch (err) { say(`取消失败：${toUserMessage(err)}`) }
 }
 const toast = ref('')
 /** 预览请求序号：晚到的旧响应据此丢弃（见 rebuildPreview） */
@@ -253,17 +254,17 @@ async function refreshAll() {
   try {
     datasets.value = await window.printpress.listDatasets()
   } catch (err) {
-    say(`数据集清单读取失败：${err.message || err}`)
+    say(`数据集清单读取失败：${toUserMessage(err)}`)
   }
   try {
     templates.value = await window.printpress.listTemplates()
   } catch (err) {
-    say(`模板清单读取失败：${err.message || err}`)
+    say(`模板清单读取失败：${toUserMessage(err)}`)
   }
   try {
     jobs.value = await window.printpress.listJobs()
   } catch (err) {
-    say(`打印历史读取失败：${err.message || err}`)
+    say(`打印历史读取失败：${toUserMessage(err)}`)
   }
   if (!datasets.value.some((d) => d.id === selDs.value)) selDs.value = ''
   if (!templates.value.some((t) => t.id === selTpl.value)) selTpl.value = ''
@@ -293,7 +294,7 @@ async function rebuildPreview() {
     if (seq !== previewSeq) return
     previewHtml.value = ''
     previewInfo.value = null
-    say(`预览失败：${err.message || err}`)
+    say(`预览失败：${toUserMessage(err)}`)
   } finally { if (seq === previewSeq) previewLoading.value = false }
 }
 
@@ -346,7 +347,7 @@ watch(rebindDsId, async () => {
   try {
     rebindResult.value = await window.printpress.matchDataset(selTpl.value, rebindDsId.value)
   } catch (err) {
-    say(`匹配校验失败：${err.message || err}`)
+    say(`匹配校验失败：${toUserMessage(err)}`)
   }
 })
 
@@ -361,7 +362,7 @@ async function confirmRebind() {
     await refreshAll()
     say(`已换绑到「${r.datasetName}」`)
   } catch (err) {
-    say(`换绑失败：${err.message || err}`)
+    say(`换绑失败：${toUserMessage(err)}`)
   } finally {
     rebindBusy.value = false
   }
@@ -394,7 +395,7 @@ async function runAction(action) {
     await execute(action)
   } catch (err) {
     // 不允许静默失败：守卫之外的任何异常都要给用户可见反馈
-    say(`操作失败：${err.message || err}`)
+    say(`操作失败：${toUserMessage(err)}`)
   } finally {
     busy.value = false
   }
@@ -471,10 +472,14 @@ async function execute(action) {
     } else {
       const r = await window.printpress.printSend(payload)
       if (r.ok) say('已发送打印机')
-      else say(`打印未完成：${r.error || ''}`)
+      // Chromium 的 print 回调给的是英文（'Print job canceled' / 'Invalid printer settings'），
+      // 不能直接贴给用户；给一个贴合场景的兜底（I-48）
+      else say(toUserMessage(r.error, '打印没有完成，可能被取消或打印机不可用。'))
     }
   } catch (err) {
-    say(`${String(err.message || err).includes('已取消') ? '' : '执行失败：'}${err.message || err}`)
+    // 用户自己点了取消不算「失败」，别加前缀吓人；只洗一次，别洗两遍
+    const msg = toUserMessage(err)
+    say(`${msg.includes('已取消') ? '' : '执行失败：'}${msg}`)
   } finally { activeJobKey.value = ''; taskProgress.value = null; cancelRequested.value = false }
   // 成功打印/导出会回写数据集状态（侧栏「已打 N」变色），两处清单都要刷新。
   // 刷新放回 try里：这两行原本在 try 之外，一次刷新失败（IPC 断开/库被锁）
@@ -492,7 +497,7 @@ async function openSnapshot(jobId) {
   try {
     await window.printpress.openSnapshot(jobId)
   } catch (err) {
-    say(`打开失败：${err.message || err}`)
+    say(`打开失败：${toUserMessage(err)}`)
   }
 }
 
@@ -519,7 +524,7 @@ async function confirmDelete() {
         ? '已删除记录及归档件，但历史恢复副本更新失败'
         : '已删除该打印记录及归档件')
   } catch (err) {
-    say(`删除失败：${err.message || err}`)
+    say(`删除失败：${toUserMessage(err)}`)
   }
 }
 
