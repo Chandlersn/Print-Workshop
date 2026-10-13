@@ -43,6 +43,8 @@ const designPackage = require('./design-package.cjs')
 const printDomain = require('./print.cjs')
 const printBatch = require('./print-batch.cjs')
 const dataDirModule = require('./data-dir.cjs')
+const photoSelections = new Map()
+const PHOTO_SELECTION_TTL = 10 * 60 * 1000
 const cache = require('./cache.cjs')
 
 // ---------------------------------------------------------------------------
@@ -486,21 +488,52 @@ const OPS = {
   'photo:importDialog': {
     write: true,
     gui: 'dialog',
-    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' } },
+    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, mode: { required: false, desc: 'append 补充或 replace 替换' } },
     run: async (p, ctx) => {
       const selected = await ctx.dialog.openFile({ title: '选择照片文件夹', properties: ['openDirectory'] })
       if (selected.canceled || !selected.filePaths?.length) return { canceled: true }
-      const report = await photoLibrary.importFolder({ datasetId: p.datasetId, column: p.column, folder: selected.filePaths[0] }, {
+      const now = Date.now()
+      for (const [token, value] of photoSelections) if (now - value.createdAt > PHOTO_SELECTION_TTL) photoSelections.delete(token)
+      const folder = selected.filePaths[0]
+      const preview = await photoLibrary.previewImport({ datasetId: p.datasetId, column: p.column, folder, mode: p.mode || 'append' })
+      const token = crypto.randomUUID()
+      while (photoSelections.size >= 50) photoSelections.delete(photoSelections.keys().next().value)
+      photoSelections.set(token, { datasetId: p.datasetId, column: p.column, folder, mode: p.mode || 'append', createdAt: Date.now() })
+      return { canceled: false, token, preview }
+    },
+  },
+  'photo:commitSelection': {
+    write: true,
+    params: { token: { required: true, desc: '照片目录预检凭证' }, taskId: { required: true, desc: '照片导入任务标识' } },
+    run: async (p, ctx) => {
+      const selection = photoSelections.get(String(p.token))
+      photoSelections.delete(String(p.token))
+      if (!selection || Date.now() - selection.createdAt > PHOTO_SELECTION_TTL) throw new Error('照片目录预检已过期，请重新选择文件夹')
+      const report = await photoLibrary.importFolder({ ...selection, taskId: p.taskId }, {
         makeThumbnail: ctx.thumbs?.makeThumbnail,
-        onProgress: progress => ctx.emit('photo:progress', { datasetId: p.datasetId, column: p.column, ...progress }),
+        onProgress: progress => ctx.emit('photo:progress', { datasetId: selection.datasetId, column: selection.column, taskId: p.taskId, ...progress }),
       })
       return { canceled: false, report }
     },
   },
+  'photo:cancelSelection': {
+    write: true,
+    params: { token: { required: true, desc: '照片目录预检凭证' } },
+    run: p => ({ canceled: photoSelections.delete(String(p.token)) }),
+  },
   'photo:importFolder': {
     write: true,
-    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, folder: { required: true, desc: '受授权的本地照片目录（CLI）' } },
+    params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, folder: { required: true, desc: '受授权的本地照片目录（CLI）' }, taskId: { required: false, desc: '照片导入任务标识' }, mode: { required: false, desc: 'append 补充或 replace 替换，缺省为 append' } },
     run: p => photoLibrary.importFolder(p),
+  },
+  'photo:cancelImport': {
+    write: true,
+    params: { taskId: { required: true, desc: '照片导入任务标识' } },
+    run: p => photoLibrary.cancelImport(p.taskId),
+  },
+  'photo:tasks': {
+    params: { datasetId: { required: false, desc: '可选名单 id' } },
+    run: p => photoLibrary.listTasks(p.datasetId),
   },
   'photo:report': {
     params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, rows: { required: false, desc: '原始行号数组（0 基）' } },
@@ -1211,6 +1244,7 @@ const OPS = {
           totalRows: built.scope.total,
           partial: built.scope.partial,
           selection: built.selection,
+          selectionIds: built.selectionIds,
           snapshotHtml: built.snapshotHtml,
           photoAssets: built.photoAssets,
           status: 'ok',
@@ -1231,6 +1265,7 @@ const OPS = {
           totalRows: built.scope.total,
           partial: built.scope.partial,
           selection: built.selection,
+          selectionIds: built.selectionIds,
           snapshotHtml: built.snapshotHtml,
           photoAssets: built.photoAssets,
           status: err && err.canceled ? 'canceled' : 'failed',
@@ -1304,6 +1339,7 @@ const OPS = {
           totalRows: built.scope.total,
           partial: built.scope.partial,
           selection: built.selection,
+          selectionIds: built.selectionIds,
           snapshotHtml: built.snapshotHtml,
           photoAssets: built.photoAssets,
           status: err && err.canceled ? 'canceled' : 'failed',
@@ -1325,6 +1361,7 @@ const OPS = {
         totalRows: built.scope.total,
         partial: built.scope.partial,
         selection: built.selection,
+        selectionIds: built.selectionIds,
         snapshotHtml: built.snapshotHtml,
         photoAssets: built.photoAssets,
         status: r.ok ? 'ok' : 'canceled',

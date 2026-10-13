@@ -19,7 +19,11 @@ const { listSheets, readWorkbookGrids, detectHeaderRow, sliceFromHeader } = requ
 const STORE_NAME = 'datasets'
 
 function loadAll() {
-  return loadJson(STORE_NAME, { expect: 'array' }) || []
+  const list = loadJson(STORE_NAME, { expect: 'array' }) || []
+  let migrated = false
+  for (const ds of list) migrated = ensureRecordIds(ds) || migrated
+  if (migrated) persistAll(list)
+  return list
 }
 
 function persistAll(list) {
@@ -28,6 +32,24 @@ function persistAll(list) {
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`
+}
+
+/** Internal row identity is parallel metadata: it never becomes a printable/user column. */
+function ensureRecordIds(ds) {
+  if (!ds || !Array.isArray(ds.rows)) return false
+  const existing = Array.isArray(ds.recordIds) ? ds.recordIds : []
+  const seen = new Set()
+  const next = ds.rows.map((_, index) => {
+    const id = existing[index]
+    if (typeof id === 'string' && id && !seen.has(id)) { seen.add(id); return id }
+    let generated
+    do { generated = newId('row') } while (seen.has(generated))
+    seen.add(generated)
+    return generated
+  })
+  if (next.length === existing.length && next.every((id, index) => id === existing[index])) return false
+  ds.recordIds = next
+  return true
 }
 
 function isEmpty(v) {
@@ -81,6 +103,7 @@ function gridToDataset(grid, name, sourceMeta) {
     source: sourceMeta,
     columns,
     rows,
+    recordIds: rows.map(() => newId('row')),
   }
   const list = loadAll()
   list.push(ds)
@@ -256,7 +279,7 @@ function findDs(id) {
 
 function getDataset(id) {
   const ds = findDs(id)
-  return { ...summary(ds), columns: ds.columns, rows: ds.rows }
+  return { ...summary(ds), columns: ds.columns, rows: ds.rows, recordIds: ds.recordIds }
 }
 
 function deleteDataset(id) {
@@ -344,6 +367,7 @@ function addRow(id) {
   const rec = {}
   ds.columns.forEach((c) => { rec[c.key] = '' })
   ds.rows.push(rec)
+  ds.recordIds.push(newId('row'))
   recomputeColumnStats(ds)
   persistAll(list)
   return { ok: true, rowIndex: ds.rows.length - 1, rowCount: ds.rows.length }
@@ -356,6 +380,7 @@ function deleteRow(id, rowIndex) {
   if (!ds) throw new Error(`所选数据集已不存在（可能已被删除），请刷新后重新选择`)
   const i = assertRowIndex(ds, rowIndex)
   ds.rows.splice(i, 1)
+  ds.recordIds.splice(i, 1)
   recomputeColumnStats(ds)
   persistAll(list)
   return { ok: true, rowCount: ds.rows.length }

@@ -326,6 +326,7 @@ function buildBatchHtml(datasetId, templateId, rows, { range, previewPage } = {}
     page: { id: spec.id, name: spec.name, w: spec.w, h: spec.h },
     scope: scopeInfo(scope.selection, ds.rows.length),
     selection: scope.selection,
+    selectionIds: scope.selection === null ? null : scope.selection.map(index => ds.recordIds[index]),
   }
 }
 
@@ -349,13 +350,41 @@ function sanitizeFilename(name) {
   return WIN_RESERVED.test(base) ? `_${base}` : base
 }
 
+function archiveDirectoryForJob(job) {
+  if (!job || !job.snapshot) return null
+  const parts = typeof job.snapshot === 'string' ? job.snapshot.split('/') : []
+  if (!/^job_[a-zA-Z0-9_-]+$/.test(String(job.id))
+      || parts.length !== 4 || parts[0] !== 'archive'
+      || !/^\d{4}-(0[1-9]|1[0-2])$/.test(parts[1])
+      || parts[2] !== job.id || parts[3] !== 'snapshot.html') {
+    throw new Error('归档路径异常，保留归档文件')
+  }
+  const dir = resolveInsideDataDir(parts.slice(0, 3).join('/'))
+  for (let i = 1; i <= 3; i++) {
+    const part = resolveInsideDataDir(parts.slice(0, i).join('/'))
+    let stat
+    try { stat = fs.lstatSync(part) } catch (err) { if (err.code === 'ENOENT') continue; throw err }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('归档目录异常，保留归档文件')
+  }
+  return dir
+}
+
+function removeArchiveDirectory(job) {
+  const dir = archiveDirectoryForJob(job)
+  if (!dir || !fs.existsSync(dir)) return false
+  fs.rmSync(dir, { recursive: true, force: true })
+  if (fs.existsSync(dir)) throw new Error('归档目录仍存在')
+  try { fs.rmdirSync(path.dirname(dir)) } catch { /* keep a non-empty month directory */ }
+  return true
+}
+
 /**
  * 留痕：快照 HTML 写入 archive/年-月/<jobId>/snapshot.html，
  * 任务元数据原子写入 print-jobs 存储。
  * 范围字段：partial 标记部分出片（供 UI 标注「部分 N/总」并与全量区分），
  * selection 仅在部分出片时落盘（全量为 null，避免冗余）。
  */
-function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, snapshotHtml, photoAssets = [], status, detail }) {
+function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, selectionIds, snapshotHtml, photoAssets = [], status, detail }) {
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const jobId = `job_${now.getTime().toString(36)}${crypto.randomBytes(3).toString('hex')}`
@@ -384,6 +413,7 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     totalRows: Number(totalRows) || recordCount || 0,
     partial: isPartial,
     selection: isPartial && Array.isArray(selection) ? selection : null,
+    selectionIds: isPartial && Array.isArray(selectionIds) ? selectionIds : null,
     status: status || 'ok', // 'ok' | 'failed' | 'canceled'
     detail: detail || '',
     snapshot: snapshotRel,
@@ -391,9 +421,32 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
   const prev = loadJson(JOBS_STORE, { expect: 'array' }) || []
   // 只保留最近 200 条：历史无上限会让 print-jobs.json 无限膨胀（实测 60 条
   // 带 5000 行 selection 即 3.4MB），而 listJobs 每次都要全量解析，久了会卡主进程。
-  // 快照目录不在此清理范围内——删记录走 deleteJob，保留期内的归档留在盘上由用户自行处理。
-  saveJson(JOBS_STORE, [job, ...prev].slice(0, 200))
-  return job
+  // 达到留存上限时，在新索引与恢复备份同步后清理已淘汰任务的归档目录。
+  const next = [job, ...prev].slice(0, 200)
+  const evicted = [job, ...prev].slice(200)
+  saveJson(JOBS_STORE, next)
+  const retentionCleanup = { evicted: evicted.length, removedArchives: 0, retainedArchives: 0, backupUpdated: null }
+  if (evicted.length) {
+    try {
+      fs.copyFileSync(path.join(DATA_DIR, `${JOBS_STORE}.json`), path.join(DATA_DIR, `${JOBS_STORE}.json.bak`))
+      retentionCleanup.backupUpdated = true
+    } catch { retentionCleanup.backupUpdated = false }
+    if (retentionCleanup.backupUpdated) {
+      for (const oldJob of evicted) {
+        if (!oldJob.snapshot) continue
+        if (next.some(item => item.id === oldJob.id || item.snapshot === oldJob.snapshot)) {
+          retentionCleanup.retainedArchives++
+          continue
+        }
+        try {
+          if (removeArchiveDirectory(oldJob)) retentionCleanup.removedArchives++
+        } catch {
+          retentionCleanup.retainedArchives++
+        }
+      }
+    } else retentionCleanup.retainedArchives = evicted.filter(item => item.snapshot).length
+  }
+  return { ...job, retentionCleanup }
 }
 
 function listJobs() {

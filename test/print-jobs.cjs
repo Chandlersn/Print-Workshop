@@ -158,6 +158,20 @@ function main() {
   } finally { fs.copyFileSync = originalCopy }
   ok(backupResult.backupUpdated === false && !print.listJobs().some(j => j.id === backupFail.id), '恢复副本更新失败准确返回，界面可提示残留')
 
+  console.log('== 200 条历史留存同步清理已淘汰归档 ==')
+  store.saveJson('print-jobs', [])
+  const firstRetainedTestJob = print.createJob({ status: 'failed', snapshotHtml: 'retention-0' })
+  for (let i = 1; i < 200; i++) print.createJob({ status: 'failed', snapshotHtml: `retention-${i}` })
+  ok(print.listJobs().length === 200 && fs.existsSync(path.join(TMP, firstRetainedTestJob.snapshot)),
+    '达到 200 条前保留最早一份历史归档')
+  const evicting = print.createJob({ status: 'failed', snapshotHtml: 'retention-200' })
+  ok(print.listJobs().length === 200 && !print.listJobs().some(item => item.id === firstRetainedTestJob.id),
+    '历史索引只保留最近 200 条')
+  ok(!fs.existsSync(path.join(TMP, firstRetainedTestJob.snapshot)) && evicting.retentionCleanup.removedArchives === 1,
+    '索引淘汰后同步释放对应快照目录')
+  ok(JSON.parse(fs.readFileSync(path.join(TMP, 'print-jobs.json.bak'), 'utf8')).length === 200,
+    '清理归档前先同步恢复备份，避免备份复活已清理记录')
+
   rmDeep(TMP)
   console.log(`\n结果: ${passed} 项断言通过, ${failed} 项失败`)
   process.exit(failed ? 1 : 0)

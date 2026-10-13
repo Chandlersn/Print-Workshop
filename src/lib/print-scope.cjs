@@ -27,6 +27,24 @@ function reprintScope(job) {
   return [...new Set(rows)].sort((a, b) => a - b)
 }
 
+/** Resolve a partial print against persistent row identities, never today's row numbers. */
+function resolveReprintScope(job, recordIds) {
+  if (!job || job.partial !== true) return { rows: null, missing: 0, reason: '' }
+  const ids = job.selectionIds
+  if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !id)
+      || new Set(ids).size !== ids.length
+      || (Array.isArray(job.selection) && job.selection.length !== ids.length)) {
+    return { rows: null, missing: 0, reason: '这条旧记录没有完整的人员身份信息，请手动重新选择补打范围。' }
+  }
+  if (!Array.isArray(recordIds)) return { rows: null, missing: ids.length, reason: '无法读取当前名单的人员身份，请刷新后重试。' }
+  const indexById = new Map()
+  recordIds.forEach((id, index) => { if (typeof id === 'string' && !indexById.has(id)) indexById.set(id, index) })
+  const rows = ids.map(id => indexById.get(id))
+  const missing = rows.filter(index => index === undefined).length
+  if (missing) return { rows: null, missing, reason: `原选择中有 ${missing} 条记录已从名单删除，已停止自动补打。请手动核对并重新选择。` }
+  return { rows: [...new Set(rows)].sort((a, b) => a - b), missing: 0, reason: '' }
+}
+
 /**
  * 多联回退提示文案。
  *
@@ -65,4 +83,4 @@ function filterRowIndexes(rows, keyword) {
   })
 }
 
-module.exports = { reprintScope, layoutFallbackText, filterRowIndexes }
+module.exports = { reprintScope, resolveReprintScope, layoutFallbackText, filterRowIndexes }

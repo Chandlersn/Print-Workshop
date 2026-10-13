@@ -98,6 +98,10 @@ contextBridge.exposeInMainWorld('printpress', {
   fieldCatalog: (id) => invoke('catalog:fields', id),
 
   importPhotoFolder: (payload) => invoke('photo:importDialog', payload),
+  commitPhotoFolder: (token, taskId) => invoke('photo:commitSelection', { token, taskId }),
+  cancelPhotoSelection: (token) => invoke('photo:cancelSelection', { token }),
+  cancelPhotoImport: (taskId) => invoke('photo:cancelImport', { taskId }),
+  photoImportTasks: (datasetId) => invoke('photo:tasks', datasetId ? { datasetId } : {}),
   photoReport: (payload) => invoke('photo:report', payload),
   setPhotoMatchColumn: (datasetId, key) => invoke('dataset:setPhotoMatchColumn', { datasetId, key }),
   onPhotoProgress: (cb) => {

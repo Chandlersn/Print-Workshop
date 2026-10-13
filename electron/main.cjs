@@ -144,8 +144,14 @@ function main() {
     const purged = designPackage.purgeStaging()
     if (purged.removed.length) console.log(`清理过期导入暂存 ${purged.removed.length} 项`)
   } catch (err) {
-    console.error('工程包事务收敛异常:', err)
+    console.error('启动事务恢复异常:', err)
   }
+  try {
+    const photoRecovery = require('./photo-library.cjs').recoverPendingImports()
+    if (photoRecovery.recovered.length || photoRecovery.rolledBack.length || photoRecovery.failed.length) {
+      console.log(`照片导入恢复：完成 ${photoRecovery.recovered.length} 个，回滚 ${photoRecovery.rolledBack.length} 个，失败 ${photoRecovery.failed.length} 个`)
+    }
+  } catch (err) { console.error('照片导入恢复异常:', err) }
 
   // 产品化接口位（M5 预留，不提前实现）：
   // 1. 自动更新：当前用 version-check.cjs 做轻量版本信标检测（只提示不自装），

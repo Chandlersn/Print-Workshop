@@ -2,6 +2,8 @@
 const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
+const { spawnSync } = require('child_process')
 const { rmDeep } = require('./helpers/rm.cjs')
 const tmp = fs.mkdtempSync(path.join(__dirname, '.tmp-photos-'))
 process.env.PRINTPRESS_DATA_DIR = path.join(tmp, 'data')
@@ -9,6 +11,7 @@ const { photoKey, matchPhotos } = require('../electron/photo-match.cjs')
 const photos = require('../electron/photo-library.cjs')
 const output = require('../electron/photo-output.cjs')
 const designs = require('../electron/designs.cjs')
+const library = require('../electron/asset-library.cjs')
 const dataset = require('../electron/dataset.cjs')
 const store = require('../electron/store.cjs')
 const api = require('../electron/api.cjs')
@@ -115,7 +118,8 @@ async function run() {
   await check('目录入库保留原图字节；坏图在入库阶段给出原因', async () => {
     const progress = []
     report = await photos.importFolder({ ...args, folder }, { onProgress: p => progress.push(p) })
-    assert.equal(progress.length, 3)
+    assert.equal(progress.length, 4, '包含一次扫描状态和三张匹配候选的处理进度')
+    assert.equal(progress[0].stage, 'scanning')
     assert.equal(report.counts.matched, 3)
     assert.equal(report.counts.broken, 1)
     assert.equal(report.counts.missing, 1)
@@ -199,6 +203,41 @@ async function run() {
     const before = store.loadJson('photo-bindings')
     await assert.rejects(photos.importFolder({ ...args, folder }, { onProgress: () => { throw new Error('test interrupted') } }), /interrupted/)
     assert.deepEqual(store.loadJson('photo-bindings'), before)
+    const taskId = crypto.randomUUID()
+    await assert.rejects(photos.importFolder({ ...args, folder, taskId }, {
+      onCheckpoint: phase => { if (phase === 'after-assets-staged') throw new Error('simulated crash before publish') },
+    }), /simulated crash/)
+    assert.deepEqual(store.loadJson('photo-bindings'), before, '发布前故障不改变旧绑定')
+    assert.equal(photos.listTasks(args.datasetId)[0].state, 'rolled-back', '任务日志记录发布前回滚结果')
+
+    const crashTaskId = crypto.randomUUID()
+    const crash = spawnSync(process.execPath, [path.join(__dirname, 'helpers/photo-import-crash.cjs'), args.datasetId, args.column, folder, crashTaskId], {
+      env: process.env, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+    })
+    assert.equal(crash.status, 73, `子进程在提交前被强制终止：${crash.stderr || crash.error?.message || ''}`)
+    assert.ok(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-import-staging', 'active.lock')), '模拟强退留下任务锁供启动恢复识别')
+    const crashRecovery = photos.recoverPendingImports()
+    assert.ok(crashRecovery.rolledBack.includes(crashTaskId), '下一次启动恢复回滚强退任务')
+    assert.deepEqual(store.loadJson('photo-bindings'), before, '进程强退后旧绑定保持完整')
+    assert.ok(!fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-import-staging', 'active.lock')), '恢复后释放过期任务锁')
+
+    const recoveryTaskId = crypto.randomUUID()
+    await assert.rejects(photos.importFolder({ ...args, folder, taskId: recoveryTaskId }, {
+      onCheckpoint: phase => { if (phase === 'after-publish') throw new Error('simulated crash after publish') },
+    }), /simulated crash/)
+    assert.equal(photos.listTasks(args.datasetId)[0].state, 'published-recovery-pending', '提交后的中断留下可恢复任务')
+    const recovery = photos.recoverPendingImports()
+    assert.ok(recovery.recovered.includes(recoveryTaskId), '启动恢复识别已发布任务并完成素材状态收尾')
+    assert.equal(photos.listTasks(args.datasetId)[0].state, 'recovered', '恢复结果可查询')
+
+    const lockPath = path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-import-staging', 'active.lock')
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true })
+    fs.writeFileSync(lockPath, JSON.stringify({ taskId: 'other-process-task', pid: process.pid }))
+    await assert.rejects(photos.importFolder({ ...args, folder }), /另一进程/)
+    assert.ok(fs.existsSync(lockPath), '拒绝并发时不移除另一进程的锁')
+    assert.equal(photos.recoverPendingImports().deferred, true, '存在活动导入时不并发执行其他任务的恢复清理')
+    fs.unlinkSync(lockPath)
+
     const pending = photos.importFolder({ ...args, folder })
     await assert.rejects(photos.importFolder({ ...args, folder }), /已有照片/)
     await pending
@@ -208,11 +247,34 @@ async function run() {
     assert.deepEqual(store.loadJson('photo-bindings'), beforeDeletion)
     store.saveJson('datasets', saved)
   })
-  await check('重新导入替换列清单，旧文件不混入新目录', async () => {
+  await check('默认补图保留旧匹配；显式替换才重建照片清单', async () => {
     const replacement = path.join(tmp, 'replacement')
     fs.mkdirSync(replacement)
     fs.writeFileSync(path.join(replacement, '部门照.png'), png)
-    const res = await photos.importFolder({ ...args, folder: replacement })
+    const oldReport = await photos.report(args)
+    const oldMatched = oldReport.counts.matched
+    const old001 = oldReport.results.find(row => row.name === '001.jpeg').assetId
+    const rowIndex = dataset.addRow(args.datasetId).rowIndex
+    dataset.updateCell(args.datasetId, rowIndex, 'photo', 'new-photo')
+    const supplementFolder = path.join(tmp, 'supplement')
+    fs.mkdirSync(supplementFolder)
+    fs.writeFileSync(path.join(supplementFolder, '001.png'), png) // 同名但内容不同，补充时保留旧图
+    fs.writeFileSync(path.join(supplementFolder, 'new-photo.jpg'), jpg)
+    const supplemented = await photos.importFolder({ ...args, folder: supplementFolder })
+    assert.equal(supplemented.counts.matched, oldMatched + 1, '只为新增缺图记录补入照片')
+    assert.equal(supplemented.results[rowIndex].status, 'matched', '新匹配项自动显示为已匹配')
+    assert.equal(supplemented.results.find(row => row.name === '001.jpeg').assetId, old001, '同名异内容时保留既有照片')
+    assert.ok(supplemented.ignored.some(f => /保留旧图/.test(f.reason)), '补充报告说明冲突文件被保留')
+    const afterSupplement = fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')).filter(f => /\.(png|jpg)$/.test(f)).length
+    await photos.importFolder({ ...args, folder: supplementFolder })
+    assert.equal(fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')).filter(f => /\.(png|jpg)$/.test(f)).length, afterSupplement,
+      '重复补图复用同一原件，不重复增长资源')
+
+    const beforeReplace = await photos.report(args)
+    const replacePlan = await photos.previewImport({ ...args, folder: replacement, mode: 'replace' })
+    assert.equal(replacePlan.counts.remove, new Set(beforeReplace.files.map(file => require('../electron/photo-match.cjs').photoKey(file.name))).size,
+      '替换预览包含将被移除的旧关联')
+    const res = await photos.importFolder({ ...args, folder: replacement, mode: 'replace' })
     assert.equal(res.counts.matched, 0)
     assert.equal(res.files.length, 0)
     assert.ok(res.ignored.some(f => f.name === '部门照.png'))
@@ -241,7 +303,22 @@ async function run() {
     assert.throws(() => api.call('photo:importFolder', { ...args, folder }, {}), err => err.code === 'WRITE_FORBIDDEN')
     assert.throws(() => api.call('photo:importDialog', args, { allowWrite: true }), err => err.code === 'GUI_REQUIRED')
     assert.deepEqual(await api.call('photo:importDialog', args, { allowWrite: true, dialog: { openFile: async () => ({ canceled: true }) } }), { canceled: true })
-    assert.equal((await api.call('photo:report', args)).total, 5)
+    const beforePreview = fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')).filter(f => /\.(png|jpg)$/.test(f)).length
+    const selection = await api.call('photo:importDialog', { ...args, mode: 'append' }, {
+      allowWrite: true, dialog: { openFile: async () => ({ canceled: false, filePaths: [folder] }) },
+    })
+    assert.ok(selection.token && selection.preview.mode === 'append' && selection.preview.counts.same > 0, '目录预检返回内容与合并计划')
+    assert.equal(fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')).filter(f => /\.(png|jpg)$/.test(f)).length, beforePreview,
+      '预检阶段不写入照片原件')
+    assert.ok((await api.call('photo:cancelSelection', { token: selection.token }, { allowWrite: true })).canceled, '取消预检凭证不入库')
+    const selectedAgain = await api.call('photo:importDialog', { ...args, mode: 'append' }, {
+      allowWrite: true, dialog: { openFile: async () => ({ canceled: false, filePaths: [folder] }) },
+    })
+    const selectedResult = await api.call('photo:commitSelection', { token: selectedAgain.token, taskId: crypto.randomUUID() }, { allowWrite: true })
+    assert.ok(selectedResult.report.counts.matched > 0, '确认后使用受控凭证执行照片导入')
+    await assert.rejects(api.call('photo:commitSelection', { token: selectedAgain.token, taskId: crypto.randomUUID() }, { allowWrite: true }), /过期/)
+    assert.equal((await api.call('photo:report', args)).total, 6, '增补名单行后报告使用当前行数')
+    assert.deepEqual(api.call('photo:tasks', { datasetId: args.datasetId }, {}), photos.listTasks(args.datasetId), '任务查询接口只读返回持久化状态')
     assert.equal((await photos.report({ ...args, column: 'absent' })).column, 'photo', '当前配图列是权威选择，不使用模板旧字段')
   })
   await check('实际任务留痕写入照片目录，清单缺失不能记录为成功快照', () => {
@@ -256,6 +333,15 @@ async function run() {
     assert.ok(!fs.existsSync(path.dirname(snapshot)))
     assert.deepEqual(designs.assetBytes(assetId).buffer, jpg)
     assert.throws(() => print.createJob({ status: 'ok', snapshotHtml, recordCount: 1 }), /清单不完整/)
+  })
+  await check('照片绑定直接参与引用审计，即使素材库条目被移除也不会误删原件', () => {
+    const assetId = report.results.find(item => item.status === 'matched').assetId
+    const info = designs.assetInfo(assetId)
+    store.saveJson('asset-library', store.loadJson('asset-library').filter(entry => entry.assetId !== assetId))
+    const removal = library.removeImportAssetIfUnreferenced(assetId)
+    assert.equal(removal.removed, false)
+    assert.ok(library.referencedAssetIds().has(assetId))
+    assert.ok(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, info.path)))
   })
   console.log(`${passed} photo acceptance groups passed`)
 }

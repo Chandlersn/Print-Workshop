@@ -209,6 +209,9 @@ check('工程引用保护：磁盘引用不删；exceptDesignId 跳过当前工�
   const res2 = library.discardIfEphemeral(adopted.id, { exceptDesignId: saved.id })
   assert.equal(res2.removed, false, '已加入素材库 → 保留')
   assert.ok(fs.existsSync(path.join(assetsDir, `${shaOf(adopted.id)}.png`)), '受管理原件应保留')
+  // 删除临时图后当前保存版本会暂时含有悬空引用；清理工程索引，避免后续
+  // 对其他资源做 fail-closed 引用扫描时把这个刻意构造的损坏夹具带入测试。
+  designs.deleteDesign(saved.id)
 })
 
 // 11. 旧值兼容：磁盘上仍是 template/library 的原件，读时归一为 ephemeral/managed（无需迁移存量）

@@ -226,6 +226,21 @@ function listBackgroundAssetIds() {
   return ids
 }
 
+/** Asset references captured by templates, including a pinned historical design revision. */
+function listReferencedAssetIds() {
+  const ids = new Set(listBackgroundAssetIds())
+  for (const template of loadAll()) {
+    const ref = template?.backgroundDesign
+    if (ref === undefined || ref === null) continue
+    if (typeof ref.id !== 'string' || !Number.isSafeInteger(ref.revision) || ref.revision < 1) {
+      throw new Error('模板固定底图版本引用无效，已停止素材清理')
+    }
+    const design = designs.getDesign(ref.id, ref.revision)
+    for (const assetId of Object.keys(design.assets || {})) ids.add(assetId)
+  }
+  return [...ids]
+}
+
 /**
  * 存量迁移：把旧 `print-bg/` 路径背景转为素材库 assetId（幂等，已是 assetId 跳过）。
  * 迁移后 `print-bg/` 目录留空，不主动删用户数据。损坏/已删文件跳过，前端 onBgError 兜底。
@@ -427,5 +442,6 @@ module.exports = {
   matchDataset,
   rebindDataset,
   listBackgroundAssetIds,
+  listReferencedAssetIds,
   migrateBackgrounds,
 }

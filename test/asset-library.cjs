@@ -218,7 +218,10 @@ try {
   check('清理未引用原件：只删真孤儿，工程/库里的都保留，且删除前复核仍孤儿（I-32）', () => {
     // A：被工程引用 → 不是孤儿
     const assetA2 = designs.importImageBytes({ name: '工程引用的图.png', base64: pngA.toString('base64') })
-    designs.saveDesign(designWith(assetA2, '引用A的工程'))
+    const designA2 = designs.saveDesign(designWith(assetA2, '引用A的工程'))
+    designs.saveDesign({ ...designA2, assets: {}, layers: [] })
+    const store = require('../electron/store.cjs')
+    store.saveJson('templates', [{ id: 'template-pinned-old-design', backgroundDesign: { id: designA2.id, revision: designA2.revision } }])
     // B：收进素材库（含归档）→ 不是孤儿
     const assetB2 = designs.importImageBytes({ name: '库里的图.png', base64: jpgB.toString('base64') })
     library.upsert(assetB2, { displayName: '库里的图' })
@@ -232,7 +235,19 @@ try {
 
     const orphanHashes = library.findOrphanOriginals().map((o) => o.hash)
     assert.ok(orphanHashes.includes(hashC) && orphanHashes.includes(hashD), 'C、D 都是孤儿')
-    assert.ok(!orphanHashes.includes(hashA) && !orphanHashes.includes(hashB), 'A(工程引用)、B(在库/归档) 都不算孤儿')
+    assert.ok(!orphanHashes.includes(hashA) && !orphanHashes.includes(hashB), 'A(模板固定引用旧工程版本)、B(在库/归档) 都不算孤儿')
+
+    const templateRows = store.loadJson('templates')
+    store.saveJson('templates', [{ id: 'template-invalid-design', backgroundDesign: { id: designA2.id, revision: 99 } }])
+    assert.throws(() => library.purgeOrphanOriginals([hashC]), /底图版本不存在/)
+    assert.ok(fs.existsSync(path.join(assetsDir, `${hashC}.png`)), '模板固定版本损坏时拒绝删除孤儿候选')
+    store.saveJson('templates', templateRows)
+
+    // A corrupt required consumer index must stop deletion rather than be treated as empty.
+    fs.writeFileSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-bindings.json'), '{broken', 'utf8')
+    assert.throws(() => library.purgeOrphanOriginals([hashC]), /photo-bindings\.json/)
+    assert.ok(fs.existsSync(path.join(assetsDir, `${hashC}.png`)), '照片绑定索引损坏时拒绝删除候选原件')
+    require('../electron/store.cjs').saveJson('photo-bindings', [])
 
     // 竞态复核：把 D 也收进库 → 再 purge D 应跳过，不删（绝不静默删被引用的图）
     library.upsert(assetD, { displayName: 'D 后来收库' })

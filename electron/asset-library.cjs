@@ -207,6 +207,19 @@ function getEntry(assetId) {
   return found
 }
 
+function snapshotImportEntry(assetId) {
+  const id = assetIdOf(assetId)
+  return index().find(entry => entry.assetId === id) || null
+}
+function restoreImportEntry(assetId, previous, removeOriginal = true) {
+  const id = assetIdOf(assetId)
+  const all = index().filter(entry => entry.assetId !== id)
+  if (previous && previous.assetId === id) all.push(previous)
+  persist(all)
+  if (!previous && removeOriginal) return removeImportAssetIfUnreferenced(id)
+  return { removed: false }
+}
+
 /** 全部标签（供筛选器用），按使用次数倒序。 */
 function listTags() {
   const counts = new Map()
@@ -322,22 +335,24 @@ const HASH_RE = /^[a-f0-9]{64}$/
  */
 function referencedAssetIds(options = {}) {
   const exceptDesignId = options && options.exceptDesignId ? options.exceptDesignId : null
+  const excludedLibraryIds = new Set(options && Array.isArray(options.excludeLibraryAssetIds) ? options.excludeLibraryAssetIds : [])
   const refs = new Set()
   // 素材库（含已归档）：在库里就可能被恢复，算引用
-  for (const entry of index()) if (entry.assetId) refs.add(entry.assetId)
+  for (const entry of index()) if (entry.assetId && !excludedLibraryIds.has(entry.assetId)) refs.add(entry.assetId)
+  // Photo bindings are durable consumers even when a library entry is missing or archived.
+  // If this index cannot be read, fail closed: treating it as empty could delete a live photo.
+  for (const binding of loadJson('photo-bindings', { expect: 'array' }) || []) {
+    for (const file of binding.files || []) if (file.assetId) refs.add(file.assetId)
+  }
   // 所有工程的图层引用的原件
   for (const head of designs.listDesigns()) {
     if (exceptDesignId && head.id === exceptDesignId) continue
-    try {
-      const doc = designs.getDesign(head.id)
-      for (const assetId of Object.keys(doc.assets || {})) refs.add(assetId)
-    } catch { /* 工程读不出不影响其余统计 */ }
+    const doc = designs.getDesign(head.id)
+    for (const assetId of Object.keys(doc.assets || {})) refs.add(assetId)
   }
   // 模板背景（assetId）也算引用：否则清理未引用会误删正在用的模板底图
-  try {
-    const templates = require('./templates.cjs')
-    for (const assetId of templates.listBackgroundAssetIds()) refs.add(assetId)
-  } catch { /* 模板模块读不出不影响其余统计 */ }
+  const templates = require('./templates.cjs')
+  for (const assetId of templates.listReferencedAssetIds()) refs.add(assetId)
   return refs
 }
 
@@ -388,6 +403,16 @@ function purgeOrphanOriginals(hashes) {
   return { removed, kept }
 }
 
+/** Remove one failed photo-import asset after callers have rechecked non-library references. */
+function removeImportAssetIfUnreferenced(assetId) {
+  const id = assetIdOf(assetId)
+  if (referencedAssetIds({ excludeLibraryAssetIds: [id] }).has(id)) return { removed: false }
+  const all = index()
+  persist(all.filter(entry => entry.assetId !== id))
+  const result = purgeOrphanOriginals([hashOf(id)])
+  return { removed: result.removed > 0 }
+}
+
 /**
  * 即时删除分流入口（I-33）。
  *
@@ -420,7 +445,7 @@ function discardIfEphemeral(assetId, options = {}) {
 }
 
 module.exports = {
-  listLibrary, getEntry, listTags, upsert, adopt, updateMetadata, archive, restore, rebuildThumbnail,
-  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, discardIfEphemeral, originalsDir,
+  listLibrary, getEntry, snapshotImportEntry, restoreImportEntry, listTags, upsert, adopt, updateMetadata, archive, restore, rebuildThumbnail,
+  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, removeImportAssetIfUnreferenced, discardIfEphemeral, originalsDir,
   THUMB_MAX_SIDE, LIMITS,
 }

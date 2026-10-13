@@ -38,6 +38,9 @@ function main() {
   const ds = dataset.importFromFile(csvPath)
   const d0 = dataset.getDataset(ds.id)
   ok(d0.rowCount === 4 && d0.columnCount === 3, '基线 4 行 3 列', d0)
+  const stableIds = [...d0.recordIds]
+  ok(stableIds.length === d0.rows.length && new Set(stableIds).size === stableIds.length,
+    '每条记录有唯一内部 ID，不增加用户列')
   const scoreCol = d0.columns.find((c) => c.key === '分数')
   ok(scoreCol.type === 'number' && scoreCol.filled === 3, '分数列基线：number，填充 3/4', scoreCol)
 
@@ -46,6 +49,7 @@ function main() {
   ok(r1.ok && r1.value === '金奖', '修改返回新值')
   const d1 = dataset.getDataset(ds.id)
   ok(d1.rows[1]['奖级'] === '金奖', '修改已持久化')
+  ok(d1.recordIds[1] === stableIds[1], '编辑字段不改变记录 ID')
   ok(d1.rows[1]['分数'] === '88', '同行其他单元格不受影响')
   const gradeCol = d1.columns.find((c) => c.key === '奖级')
   ok(gradeCol.filled === 4, '奖级列填充 3 → 4（空补值后重算）', gradeCol)
@@ -71,6 +75,7 @@ function main() {
   ok(a1.rowIndex === 4 && a1.rowCount === 5, '追加后行数 4 → 5，新行号 4', a1)
   const d3 = dataset.getDataset(ds.id)
   ok(d3.rows[4]['姓名'] === '' && d3.rows[4]['分数'] === '', '新行全部为空串')
+  ok(d3.recordIds[4] && !stableIds.includes(d3.recordIds[4]), '新增行获得新记录 ID')
   ok(d3.columns.find((c) => c.key === '姓名').filled === 4, '姓名列填充随空行回落 4/5')
 
   console.log('== 6. deleteRow（删行 + 重算） ==')
@@ -78,6 +83,7 @@ function main() {
   ok(del1.rowCount === 4, '删行后 5 → 4', del1)
   const d4 = dataset.getDataset(ds.id)
   ok(d4.rows[0]['姓名'] === '乙', '删除首行后行序前移')
+  ok(d4.recordIds[0] === stableIds[1] && !d4.recordIds.includes(stableIds[0]), '删行只移除该行 ID，其余身份随记录移动')
   ok(!d4.rows.some((r) => r['姓名'] === '甲'), '被删行不存在')
   throws(() => dataset.deleteRow(ds.id, 4), '删除后旧行号越界抛错')
 
@@ -185,6 +191,9 @@ function main() {
     const legacy = dataset.getDataset('legacy-no-source')
     ok(legacy.source === undefined && legacy.rowCount === 1 && legacy.lastPrintedAt === '',
       '没有 source 的记录仍可读取，且 lastPrintedAt 为空串——前端必须容忍这种形状')
+    ok(legacy.recordIds.length === 1 && typeof legacy.recordIds[0] === 'string', '旧数据首次读取时迁移并持久化记录 ID')
+    ok(!legacy.columns.some(c => c.key === 'recordIds') && Object.keys(legacy.rows[0]).join() === 'name',
+      '迁移 ID 不进入用户字段或名单行')
   }
 
   console.log(`\n共 ${passCount + failCount} 项断言：${passCount} 通过，${failCount} 失败`)

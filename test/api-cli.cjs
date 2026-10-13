@@ -67,6 +67,7 @@ const LEGACY_CHANNELS = [
 
 /**
  * 抽取时新增的通道：
+ * - 照片导入预览确认与任务恢复（photo:commitSelection / cancelSelection / cancelImport / tasks）
  * - 路径版（dataset:importFile / template:uploadBackground / font:upload）：
  *   替 agent 去掉「弹窗选文件」这一步
  * - dataset:deleteBatch：导入会话整批删除
@@ -78,7 +79,11 @@ const LEGACY_CHANNELS = [
  */
 const ADDED_CHANNELS = [
   'photo:importDialog',
+  'photo:commitSelection',
+  'photo:cancelSelection',
   'photo:importFolder',
+  'photo:cancelImport',
+  'photo:tasks',
   'photo:report',
   'dataset:setPhotoMatchColumn',
   'dataset:importFile',

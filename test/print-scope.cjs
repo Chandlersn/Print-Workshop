@@ -37,6 +37,18 @@ function main() {
   ok(JSON.stringify(normalizeSelection(['3', 1.5, 1], 6)) === '[1,3]', '非整数丢弃、字符串数字归一')
   ok(JSON.stringify(normalizeSelection([], 6)) === '[]', '空集合 → 空数组')
 
+  console.log('== 1.1 部分补打按稳定记录 ID 回到当前行号 ==')
+  const { resolveReprintScope } = require('../src/lib/print-scope.cjs')
+  const identities = ['row-a', 'row-b', 'row-c', 'row-d']
+  ok(JSON.stringify(resolveReprintScope({ partial: true, selectionIds: ['row-b', 'row-d'] }, identities).rows) === '[1,3]',
+    '按 ID 找回原选择')
+  ok(resolveReprintScope({ partial: true, selectionIds: ['row-b'] }, ['row-a', 'row-x', 'row-b']).rows[0] === 2,
+    '前方插入其他记录后仍定位到原人员')
+  ok(resolveReprintScope({ partial: true, selectionIds: ['row-b'] }, ['row-a']).missing === 1,
+    '人员已删除时停止，不把旧行号套给其他人')
+  ok(Boolean(resolveReprintScope({ partial: true, selection: [2] }, identities).reason),
+    '旧历史缺少稳定 ID 时要求手动选择')
+
   console.log('== 2. resolveScope（rows 优先 / 空选择拦截 / 缺省全量） ==')
   const fakeDs = { rows: [{ n: 'a' }, { n: 'b' }, { n: 'c' }] }
   ok(resolveScope(fakeDs, { rows: [2, 0] }).rows.map((r) => r.n).join('') === 'ac', 'rows 选出并按行序排列')
@@ -106,6 +118,8 @@ function main() {
   const builtPart = printDomain.buildBatchHtml(ds.id, tpl.id, [4, 0, 2])
   ok(builtPart.recordCount === 3, '批量 HTML 按行级范围组装 3 页', builtPart.recordCount)
   ok(JSON.stringify(builtPart.selection) === '[0,2,4]', 'selection 规范化落盘', builtPart.selection)
+  ok(JSON.stringify(builtPart.selectionIds) === JSON.stringify([0, 2, 4].map(i => ds.recordIds[i])),
+    '出片构建结果把行范围绑定到稳定 ID')
   ok(builtPart.html.includes('甲') && builtPart.html.includes('丙') && builtPart.html.includes('戊')
     && !builtPart.html.includes('乙') && !builtPart.html.includes('丁') && !builtPart.html.includes('己'),
   'HTML 只含勾选行')
@@ -127,11 +141,13 @@ function main() {
     totalRows: 6,
     partial: true,
     selection: [0, 2, 4],
+    selectionIds: [0, 2, 4].map(i => ds.recordIds[i]),
     snapshotHtml: '<html>x</html>',
     status: 'ok',
   })
   ok(jobPart.partial === true && jobPart.totalRows === 6, '部分任务记录 partial + totalRows', jobPart)
   ok(JSON.stringify(jobPart.selection) === '[0,2,4]', '部分任务落盘 selection（打了哪几行可回溯）')
+  ok(JSON.stringify(jobPart.selectionIds) === JSON.stringify([0, 2, 4].map(i => ds.recordIds[i])), '部分任务同时落盘稳定人员 ID')
   ok(fs.existsSync(path.join(TMP, jobPart.snapshot)), '部分出片同样写入归档快照（留痕必全）')
 
   const jobFull = printDomain.createJob({

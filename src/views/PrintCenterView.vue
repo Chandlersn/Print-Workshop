@@ -4,11 +4,11 @@
  * → 导出 PDF / 直接送打印 → 打印历史留痕与归档件回看。
  * 预览用 iframe srcdoc 直接承载渲染引擎输出的批量 HTML。
  */
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { gotoCell } from '../lib/cell-nav.js'
-import { reprintScope, layoutFallbackText, filterRowIndexes } from '../lib/print-scope.cjs'
+import { resolveReprintScope, layoutFallbackText, filterRowIndexes } from '../lib/print-scope.cjs'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
@@ -529,21 +529,40 @@ async function confirmDelete() {
 }
 
 /** 一键重打：回填任务的模板（数据集由模板绑定自动带出），走同样的校验→执行流程 */
-function reprint(job) {
+async function reprint(job) {
   if (busy.value) return
   if (!templates.value.some((t) => t.id === job.templateId)) {
     say('原模板已删除，无法重打')
     return
   }
   const tpl = templates.value.find((t) => t.id === job.templateId)
+  const datasetId = job.datasetId || tpl.datasetId || ''
+  if (!datasetId || !datasets.value.some((d) => d.id === datasetId)) {
+    say('原名单已删除，无法按原记录补打')
+    return
+  }
+  if (tpl.datasetId && tpl.datasetId !== datasetId) {
+    say('原模板已换绑到其他名单，无法安全补打这条历史记录')
+    return
+  }
+  let rows = null
+  if (job.partial) {
+    try {
+      const current = await window.printpress.getDataset(datasetId)
+      const resolved = resolveReprintScope(job, current.recordIds)
+      if (resolved.reason) { say(resolved.reason); return }
+      rows = resolved.rows
+    } catch (err) {
+      say(`读取原名单失败：${toUserMessage(err)}`)
+      return
+    }
+  }
   selTpl.value = job.templateId
-  // 数据集按模板绑定设置（与 watch 语义一致，这里显式赋值避免时序问题）
-  selDs.value = (tpl && tpl.datasetId && datasets.value.some((d) => d.id === tpl.datasetId))
-    ? tpl.datasetId
-    : ''
-  // 恢复当时的出片范围：漏掉这一步，补打 3 个人会打出全部 100 个人。
-  // 留痕里 selection 记的是 0 基行号，直接喂回 setScope 即可。
-  setScope(reprintScope(job))
+  selDs.value = datasetId
+  await nextTick()
+  await loadDetail()
+  // 部分历史按稳定 ID 解析；旧记录缺少 ID 或名单有人被删除时已在上面拦下。
+  setScope(rows)
   runAction(job.mode === 'print' ? 'print' : 'pdf')
 }
 
