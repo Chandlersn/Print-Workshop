@@ -111,6 +111,22 @@ jobs:
             if [ -d ".workbuddy-ai/tmp/$d" ]; then cp -r ".workbuddy-ai/tmp/$d" "e2e-logs/"; fi
           done
           find e2e-logs -type f | head -60
+      # artifact 匿名下载要走 API（要 token），job logs 也要 admin——都拿不到。
+      # 失败时把日志直接推到 ci-logs 分支：本地 git fetch 就能读到失败现场。
+      - name: 失败时把端到端日志推到 ci-logs 分支
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "ci-logs"
+          git config user.email "ci-logs@users.noreply.github.com"
+          git fetch origin main --depth=1
+          git checkout -B ci-logs origin/main
+          git add -f e2e-logs/
+          git commit -m "ci e2e logs for ${GITHUB_SHA}"
+          git push -f origin ci-logs
+
       - name: 上传失败现场（日志 + 失败截图 + 量测）
         if: always()
         uses: actions/upload-artifact@v4
