@@ -81,7 +81,11 @@ app.whenReady().then(async () => {
   const relocated = path.join(tmp, 'moved-archive')
   fs.cpSync(archive, relocated, { recursive: true })
   ok(!snapshot.includes('pp://') && !snapshot.includes('data:image'), '快照引用相对照片文件，无内联照片')
-  const browser = new BrowserWindow({ show: false, webPreferences: { sandbox: true, nodeIntegration: false } })
+  // 这步的意图是「无应用特权的普通文件页面也能解码归档里的相对路径照片」。
+  // 不能用 sandbox:true 模拟：Electron 28.3.3 的沙箱渲染器连 file:// 顶层加载都
+  // 全部 ERR_FAILED（探针实测：trivial html 在 C:\Temp 也挂，loadURL/loadFile 同样），
+  // CI 与本机一致复现。「无特权」由 nodeIntegration:false + 快照不含 pp:// 保证。
+  const browser = new BrowserWindow({ show: false, webPreferences: { sandbox: false, nodeIntegration: false } })
   try {
     await browser.loadURL(pathToFileURL(path.join(relocated, 'snapshot.html')).href)
     await browser.webContents.executeJavaScript(`(${printer.waitPrintResources.toString()})()`)
