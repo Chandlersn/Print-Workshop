@@ -221,13 +221,13 @@ async function cancelImport() {
 <template>
   <div :class="embedded ? 'photo-embedded' : 'photo-mask'" @click.self="!embedded && !busy && emit('close')">
     <section class="photo-panel" :role="embedded ? 'region' : 'dialog'" :aria-modal="embedded ? undefined : true" aria-labelledby="photo-title">
-      <header><div><h2 id="photo-title">{{ embedded ? '照片与名单关联' : '变量照片库' }}</h2><p>按数据页选中的“配图”列筛选同名照片，例如姓名“张三”匹配“张三.jpg”。仅匹配成功的照片入库，未匹配和冲突照片跳过；缺图留白，原图不压缩。导入默认补充缺失照片，已有有效照片会保留。</p></div><button v-if="!embedded" :disabled="busy" aria-label="关闭" @click="emit('close')">×</button></header>
+      <header><div><h2 id="photo-title">{{ embedded ? '照片与名单关联' : '变量照片库' }}</h2><p>按数据页选中的“配图”列筛选同名照片，例如姓名“张三”匹配“张三.jpg”或“张三.png”。仅匹配成功的照片入库，未匹配和冲突照片跳过；缺图留白，原图不压缩。导入默认补充缺失照片，已有有效照片会保留。</p></div><button v-if="!embedded" :disabled="busy" aria-label="关闭" @click="emit('close')">×</button></header>
       <div class="photo-actions">
         <strong>配图列：{{ columns.find(c => c.key === column)?.alias || column || '未选择' }}</strong>
         <button class="btn-primary" :disabled="busy || loading || !column" @click="importFolder('append')">{{ busy ? '正在导入…' : loading ? '正在检查…' : result?.imported ? '补充缺失照片' : '导入照片' }}</button>
         <button v-if="result?.imported" class="btn-ghost" :disabled="busy || loading || !column" @click="importFolder('replace')">替换当前名单照片</button>
         <button v-if="busy && progress?.taskId === importTaskId" class="btn-ghost" :disabled="cancelling" @click="cancelImport">{{ cancelling ? '正在取消…' : '取消导入' }}</button>
-        <button class="btn-ghost" :disabled="busy || loading || !column" @click="refresh">重新检查</button>
+        <button class="btn-ghost" :disabled="busy || loading || !column" title="只检查已入库照片；要扫描本地 PNG/JPEG 文件，请重新选择文件夹导入" @click="refresh">重新检查</button>
       </div>
       <p v-if="!column" class="photo-note">请先到数据页，点击姓名、编号或其他列头的“配图”开关。每份名单只能启用一列；再次点击可关闭。</p>
       <p v-if="busy" role="status">{{ progress?.stage === 'scanning' ? '正在扫描照片目录…' : progress ? `已处理 ${progress.done} / ${progress.total}：${progress.name}` : '正在选择照片文件夹…' }}</p>
@@ -256,7 +256,7 @@ async function cancelImport() {
         </footer>
       </section>
       <template v-if="result && !loading">
-        <p v-if="!result.imported" class="photo-note">尚未导入照片。名单可填写 1001、1001.jpg 或 子目录/1001.jpg；同名多图会报告冲突。</p>
+        <p v-if="!result.imported" class="photo-note">尚未扫描照片文件夹，当前匹配数为 0 不代表 PNG 匹配失败。请点击“导入照片”选择文件夹，再在预览中点击“开始补充”。名单可填写 1001、1001.jpg、1001.png 或 子目录/1001.png；同名多图会报告冲突。</p>
         <div class="photo-report">
           <p class="photo-note photo-match-summary">{{ result.imported ? `来源：${result.folderName}` : '尚未导入照片' }} · 匹配 {{ result.counts.matched }} / {{ result.total }} 行 · 待处理 {{ result.blocking }} 行 · 未填写 {{ result.counts.empty }} 行</p>
           <p class="photo-note">已入库 {{ result.files.filter(f => f.assetId && !f.error).length }} 张 · 已跳过 {{ result.ignored.length + result.files.filter(f => f.error).length }} 个文件。切换配图列后，新匹配的照片需重新选择文件夹导入。</p>

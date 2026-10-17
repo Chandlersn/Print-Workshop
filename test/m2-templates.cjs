@@ -105,12 +105,16 @@ async function main() {
     background: bg.background,
     bgSize: { width: 1, height: 1 },
     datasetId: ds.id,
+    editorGuides: [{ id: 'guide_x_50', axis: 'x', position: 50 }, { id: 'guide_y_25', axis: 'y', position: 25 }],
     fields: [{ key: '姓名', label: '姓名', x: 50, y: 60, fontSize: 28, color: '#2b2622', align: 'center', bold: true, fontFamily: '楷体' }],
   })
   assert(tpl.id && tpl.id.startsWith('tpl_'), '新建生成 id', tpl.id)
   assert(tpl.datasetId === ds.id, '模板绑定数据集持久化')
   const got = templates.getTemplate(tpl.id)
   assert(got.fields.length === 1 && got.fields[0].key === '姓名', '字段快照完整')
+  assert(got.editorGuides.length === 2 && got.editorGuides[1].position === 25, '模板编辑参考线持久化')
+  throws(() => templates.saveTemplate({ ...got, editorGuides: [{ id: 'bad', axis: 'x', position: Infinity }] }), '无效参考线拒绝保存')
+  assert(!require('../electron/render-engine.cjs').buildHtml(got, [{ 姓名: '测试' }], { withToolbar: false }).includes('guide_x_50'), '编辑参考线不会进入打印 HTML')
   const before = got.updatedAt
   templates.saveTemplate({ ...JSON.parse(JSON.stringify(got)), name: '测试证书改' })
   const got2 = templates.getTemplate(tpl.id)

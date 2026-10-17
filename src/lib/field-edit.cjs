@@ -34,20 +34,35 @@ function snapTo(valueEdges, targets, threshold = SNAP_PX) {
   return best
 }
 
+/** Convert paper-wide editor guides into the active cell or fold-half's pixel coordinates. */
+function guideTargetsForFrame(guides, pageRect, frameRect, pxPerMm) {
+  const x = [], y = []
+  for (const guide of guides || []) {
+    if (guide.axis === 'x') {
+      const local = guide.position * pxPerMm + pageRect.left - frameRect.left
+      if (local >= 0 && local <= frameRect.width) x.push(local)
+    } else if (guide.axis === 'y') {
+      const local = guide.position * pxPerMm + pageRect.top - frameRect.top
+      if (local >= 0 && local <= frameRect.height) y.push(local)
+    }
+  }
+  return { x, y }
+}
+
 /**
- * 撤销快照。必须含 layout：成品尺寸、裁切线也是模板的一部分，只快照 fields 的话
+ * 撤销快照。必须含 layout 和 editorGuides：成品尺寸、裁切线和参考线也是模板编辑的一部分，只快照 fields 的话
  * 误改尺寸后按撤销救不回来（字段没变，去重还会把它挡掉）。
  * 底图**故意不进快照**：换图 / 删图会真删文件，撤销回来只会是张破图。
  */
 function snapshotOf(tpl) {
-  return JSON.stringify(tpl ? { fields: tpl.fields, layout: tpl.layout || null } : { fields: [] })
+  return JSON.stringify(tpl ? { fields: tpl.fields, layout: tpl.layout || null, editorGuides: tpl.editorGuides || [] } : { fields: [] })
 }
 
 /** 解析快照（兼容早期只存 fields 数组的形态） */
 function parseSnapshot(json) {
   const snap = JSON.parse(json)
-  if (Array.isArray(snap)) return { fields: snap, layout: null }
-  return { fields: snap.fields, layout: snap.layout || null }
+  if (Array.isArray(snap)) return { fields: snap, layout: null, editorGuides: null }
+  return { fields: snap.fields, layout: snap.layout || null, editorGuides: Array.isArray(snap.editorGuides) ? snap.editorGuides : null }
 }
 
 /**
@@ -95,6 +110,7 @@ module.exports = {
   NUDGE_MERGE_MS,
   clampPct,
   snapTo,
+  guideTargetsForFrame,
   snapshotOf,
   parseSnapshot,
   pushCapped,

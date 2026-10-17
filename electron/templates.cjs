@@ -161,6 +161,17 @@ function removeBgFile(bgPath) {
 function saveTemplate(template, options = {}) {
   if (!template || typeof template !== 'object') throw new Error('模板数据为空')
   if (!template.name || !String(template.name).trim()) throw new Error('模板名称不能为空')
+  // 参考线只用于编辑视图；仍需校验持久化数据，避免损坏的坐标进入模板快照。
+  if (template.editorGuides !== undefined) {
+    if (!Array.isArray(template.editorGuides) || template.editorGuides.length > 100) throw new Error('模板参考线最多支持 100 条')
+    const ids = new Set()
+    for (const guide of template.editorGuides) {
+      if (!guide || typeof guide.id !== 'string' || !guide.id || ids.has(guide.id)
+        || !['x', 'y'].includes(guide.axis) || !Number.isFinite(guide.position)
+        || guide.position < -10000 || guide.position > 10000) throw new Error('模板参考线数据无效')
+      ids.add(guide.id)
+    }
+  }
   // 延迟加载避免 render-engine 引用本文件纸张常量时产生循环初始化。
   if (template.backgroundDesign) require('./render-engine.cjs').resolveTemplateDesign(template)
   if (!template.datasetId) throw new Error('模板必须关联数据集（先在工具栏选择数据集）')

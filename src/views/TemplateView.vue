@@ -24,8 +24,9 @@ import {
 } from '../lib/template-layout.cjs'
 import {
   clampPct, snapTo, snapshotOf, parseSnapshot, pushCapped,
-  shouldStartNewNudge, alignedX, alignedY,
+  shouldStartNewNudge, alignedX, alignedY, guideTargetsForFrame,
 } from '../lib/field-edit.cjs'
+import { rulerTicks, guidePositionFromOffset } from '../lib/designer-aids.cjs'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const CANVAS_W = 760 // 画布基准宽度 px，缩放只改变编辑视图
@@ -43,7 +44,7 @@ function stepCanvasZoomBy(direction) {
 }
 
 function fitCanvasToWidth() {
-  canvasZoom.value = fitCanvasZoom(canvasViewportEl.value?.clientWidth, CANVAS_W)
+  canvasZoom.value = fitCanvasZoom((canvasViewportEl.value?.clientWidth || 0) - (showRulers.value ? 20 : 0), CANVAS_W)
 }
 
 // ---- 多联版式 ----
@@ -397,6 +398,78 @@ const undoStack = ref([])            // 字段快照栈（撤销）
 const redoStack = ref([])            // 重做栈
 const guideV = ref(null)             // 垂直辅助线（画布内 px 坐标）
 const guideH = ref(null)             // 水平辅助线
+const showRulers = ref(false)
+const showGuides = ref(true)
+const newGuideAxis = ref('x')
+const newGuidePosition = ref(50)
+const rulerDrag = ref(null)
+const pagePxPerMm = computed(() => canvasDisplayW.value / Number(activeTpl.value?.pageSize?.w || 1))
+const rulerTicksX = computed(() => showRulers.value ? rulerTicks(activeTpl.value?.pageSize?.w, pagePxPerMm.value) : [])
+const rulerTicksY = computed(() => showRulers.value ? rulerTicks(activeTpl.value?.pageSize?.h, pagePxPerMm.value) : [])
+const visibleEditorGuides = computed(() => showGuides.value ? (activeTpl.value?.editorGuides || []).filter(guide =>
+  guide.position >= 0 && guide.position <= Number(activeTpl.value?.pageSize?.[guide.axis === 'x' ? 'w' : 'h']),
+) : [])
+
+function guideOutside(guide) {
+  return guide.position < 0 || guide.position > Number(activeTpl.value?.pageSize?.[guide.axis === 'x' ? 'w' : 'h'])
+}
+function addEditorGuide(axis = newGuideAxis.value, position = newGuidePosition.value) {
+  const t = activeTpl.value
+  if (!t) return
+  const numeric = Number(position)
+  if ((t.editorGuides || []).length >= 100) { errorMsg.value = '最多支持 100 条参考线'; return }
+  if (!['x', 'y'].includes(axis) || String(position).trim() === '' || !Number.isFinite(numeric) || numeric < -10000 || numeric > 10000) {
+    errorMsg.value = '参考线位置须为 -10000 到 10000 毫米之间的数字'; return
+  }
+  pushUndo()
+  t.editorGuides = [...(t.editorGuides || []), { id: `guide_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`, axis, position: Math.round(numeric * 10) / 10 }]
+  errorMsg.value = ''
+}
+function editEditorGuide(id, value) {
+  const position = Number(value)
+  if (String(value).trim() === '' || !Number.isFinite(position) || position < -10000 || position > 10000) {
+    errorMsg.value = '参考线位置须为 -10000 到 10000 毫米之间的数字'; return
+  }
+  const guide = activeTpl.value?.editorGuides?.find(item => item.id === id)
+  if (!guide || guide.position === position) return
+  pushUndo()
+  guide.position = Math.round(position * 10) / 10
+  errorMsg.value = ''
+}
+function removeEditorGuide(id) {
+  if (!activeTpl.value?.editorGuides?.some(item => item.id === id)) return
+  pushUndo()
+  activeTpl.value.editorGuides = activeTpl.value.editorGuides.filter(item => item.id !== id)
+}
+function rulerPointerPosition(event, axis) {
+  const rect = canvasEl.value?.getBoundingClientRect()
+  const offset = axis === 'x' ? event.clientX - rect.left : event.clientY - rect.top
+  return guidePositionFromOffset(offset, pagePxPerMm.value, activeTpl.value.pageSize[axis === 'x' ? 'w' : 'h'])
+}
+function onRulerPointerDown(event, axis) {
+  if (!activeTpl.value || !canvasEl.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  rulerDrag.value = { axis, position: rulerPointerPosition(event, axis) }
+  window.addEventListener('pointermove', onRulerPointerMove)
+  window.addEventListener('pointerup', onRulerPointerUp)
+  window.addEventListener('pointercancel', cancelRulerDrag)
+}
+function onRulerPointerMove(event) {
+  if (!rulerDrag.value || !canvasEl.value) return
+  rulerDrag.value = { axis: rulerDrag.value.axis, position: rulerPointerPosition(event, rulerDrag.value.axis) }
+}
+function onRulerPointerUp() {
+  const pending = rulerDrag.value
+  cancelRulerDrag()
+  if (pending) addEditorGuide(pending.axis, pending.position)
+}
+function cancelRulerDrag() {
+  rulerDrag.value = null
+  window.removeEventListener('pointermove', onRulerPointerMove)
+  window.removeEventListener('pointerup', onRulerPointerUp)
+  window.removeEventListener('pointercancel', cancelRulerDrag)
+}
 
 const pageSizeOptions = computed(() => {
   const sizes = window.__PAGE_SIZES__ || []
@@ -562,6 +635,7 @@ const showStatusBand = computed(() => Boolean(
 ))
 
 function newTemplate() {
+  cancelRulerDrag()
   errorMsg.value = '' // 切换编辑对象前清掉上一次的报错，避免提示张冠李戴
   msg.value = ''
   templateTab.value = 'user'
@@ -573,6 +647,7 @@ function newTemplate() {
     bgSize: null,
     datasetId: '',
     fields: [],
+    editorGuides: [],
     // 版式：默认单页；切到多联后画布变成「单个成品」，成品尺寸决定每页排几列几行
     layout: { mode: 'single', itemW: 85, itemH: 54, showCutMarks: true },
   }
@@ -588,6 +663,7 @@ function newTemplate() {
 
 async function openTemplate(id) {
   try {
+    cancelRulerDrag()
     errorMsg.value = '' // 换模板即清掉旧报错——错误属于上一个模板，不该跟过来
     msg.value = ''
     activeTpl.value = await window.printpress.getTemplate(id)
@@ -876,9 +952,10 @@ function pushUndo() {
 
 function restoreSnapshot(json) {
   if (!activeTpl.value) return
-  const { fields, layout } = parseSnapshot(json)
+  const { fields, layout, editorGuides } = parseSnapshot(json)
   activeTpl.value.fields = fields
   if (layout) activeTpl.value.layout = layout
+  if (editorGuides) activeTpl.value.editorGuides = editorGuides
   if (selectedIdx.value >= activeTpl.value.fields.length) {
     selectedIdx.value = activeTpl.value.fields.length - 1
   }
@@ -1013,6 +1090,11 @@ function onFieldPointerDown(e, idx) {
     targetsV.push(r.left - rect.left, r.left - rect.left + r.width / 2, r.right - rect.left)
     targetsH.push(r.top - rect.top, r.top - rect.top + r.height / 2, r.bottom - rect.top)
   })
+  // Persistent guides are measured on the whole sheet. Convert each one into
+  // the active cell/half's local pixels so grid and fold dragging stay aligned.
+  const guideTargets = guideTargetsForFrame(visibleEditorGuides.value, canvasEl.value.getBoundingClientRect(), rect, pagePxPerMm.value)
+  targetsV.push(...guideTargets.x)
+  targetsH.push(...guideTargets.y)
 
   dragState.value = {
     idx,
@@ -1287,6 +1369,7 @@ function bindTemplateEvents() {
   window.addEventListener('paste', onPaste)
 }
 function unbindTemplateEvents() {
+  cancelRulerDrag()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('paste', onPaste)
   window.removeEventListener('pointermove', onPointerMove)
@@ -1614,6 +1697,8 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="canvas-view-toolbar" role="group" aria-label="画布缩放">
+          <label class="template-ruler-toggle"><input v-model="showRulers" data-testid="template-rulers" type="checkbox"> 标尺</label>
+          <label class="template-ruler-toggle"><input v-model="showGuides" data-testid="template-guides-visible" type="checkbox"> 参考线</label>
           <span class="tb-label">画布缩放</span>
           <button
             class="btn-ghost btn-icon"
@@ -1640,6 +1725,20 @@ onBeforeUnmount(() => {
           >＋</button>
           <button class="btn-ghost" type="button" title="按当前可用宽度缩放画布" @click="fitCanvasToWidth">适合宽度</button>
         </div>
+        <details class="template-guide-panel">
+          <summary>参考线（{{ activeTpl.editorGuides?.length || 0 }}）<span>可从标尺拖出；仅供编辑定位，不会打印</span></summary>
+          <div class="template-guide-controls">
+            <label>方向<select v-model="newGuideAxis" data-testid="template-guide-axis"><option value="x">垂直线（X）</option><option value="y">水平线（Y）</option></select></label>
+            <label>位置 mm<input v-model.number="newGuidePosition" data-testid="template-guide-position" type="number" min="-10000" max="10000" step="0.1"></label>
+            <button type="button" data-testid="template-guide-add" :disabled="(activeTpl.editorGuides?.length || 0) >= 100" @click="addEditorGuide()">添加参考线</button>
+          </div>
+          <div v-for="guide in activeTpl.editorGuides || []" :key="guide.id" class="template-guide-row" :data-template-guide-id="guide.id">
+            <span>{{ guide.axis.toUpperCase() }}</span>
+            <input type="number" min="-10000" max="10000" step="0.1" :aria-label="`${guide.axis.toUpperCase()}参考线位置，毫米`" :value="guide.position" @change="editEditorGuide(guide.id, $event.target.value)">
+            <small v-if="guideOutside(guide)">画布外</small>
+            <button type="button" data-testid="template-guide-delete" aria-label="删除参考线" @click="removeEditorGuide(guide.id)">×</button>
+          </div>
+        </details>
 
         <div class="workbench">
           <div v-if="activeDatasetId || selectedField || bgSelected" class="field-dock">
@@ -1731,12 +1830,13 @@ onBeforeUnmount(() => {
           <div
             ref="canvasViewportEl"
             class="canvas-wrap"
-            :class="{ 'drop-active': dragging }"
+            :class="{ 'drop-active': dragging, 'rulers-on': showRulers }"
             @dragenter.prevent="onDragEnter"
             @dragover.prevent="onDragOver"
             @dragleave="onDragLeave"
             @drop.prevent="onDrop"
           >
+            <div class="template-canvas-frame">
             <div
               ref="canvasEl"
               class="canvas"
@@ -1897,8 +1997,10 @@ onBeforeUnmount(() => {
               </template>
 
               <!-- 吸附辅助线（朱砂红，拖拽靠近时出现；按画布坐标系定位） -->
+              <div v-for="guide in visibleEditorGuides" :key="guide.id" class="template-guide-line" :class="guide.axis === 'x' ? 'guide-v' : 'guide-h'" :style="guide.axis === 'x' ? { left: `${guide.position * pagePxPerMm}px` } : { top: `${guide.position * pagePxPerMm}px` }" :data-template-guide-line="guide.id"></div>
               <div v-if="guideV !== null" class="snap-guide guide-v" :style="{ left: guideV + 'px' }"></div>
               <div v-if="guideH !== null" class="snap-guide guide-h" :style="{ top: guideH + 'px' }"></div>
+              <div v-if="rulerDrag" class="template-guide-drag" :class="rulerDrag.axis === 'x' ? 'guide-v' : 'guide-h'" :style="rulerDrag.axis === 'x' ? { left: `${rulerDrag.position * pagePxPerMm}px` } : { top: `${rulerDrag.position * pagePxPerMm}px` }" data-testid="template-guide-drag"></div>
 
               <p v-if="hasBackground && !isGrid && !isFold && activeTpl.fields.length === 0" class="canvas-hint">
                 {{ activeDatasetId ? '点击上方字段面板，把字段加入画布' : '选择数据集后添加字段' }}
@@ -1911,6 +2013,15 @@ onBeforeUnmount(() => {
               <p v-if="hasBackground && !selectedField" class="bg-tip">
                 {{ bgSelected ? '按 Delete 键移除底图' : '点击底图选中，再按 Delete 移除' }}
               </p>
+            </div>
+            <template v-if="showRulers">
+              <div class="template-ruler template-ruler-h" :style="{ width: `${canvasDisplayW}px` }" data-testid="template-ruler-h" @pointerdown="onRulerPointerDown($event, 'x')">
+                <span v-for="tick in rulerTicksX" :key="`x-${tick.mm}`" class="template-ruler-tick" :class="{ major: tick.major }" :style="{ left: `${tick.mm * pagePxPerMm}px` }"><span v-if="tick.major" class="template-ruler-label">{{ tick.mm }}</span></span>
+              </div>
+              <div class="template-ruler template-ruler-v" :style="{ height: `${canvasH}px` }" data-testid="template-ruler-v" @pointerdown="onRulerPointerDown($event, 'y')">
+                <span v-for="tick in rulerTicksY" :key="`y-${tick.mm}`" class="template-ruler-tick" :class="{ major: tick.major }" :style="{ top: `${tick.mm * pagePxPerMm}px` }"><span v-if="tick.major" class="template-ruler-label">{{ tick.mm }}</span></span>
+              </div>
+            </template>
             </div>
           </div>
 
@@ -2207,6 +2318,30 @@ onBeforeUnmount(() => {
 .workbench { position: relative; display: flex; gap: 16px; align-items: flex-start; }
 
 .canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
+.canvas-wrap.rulers-on { padding: 20px 0 0 20px; }
+.template-canvas-frame { position: relative; width: max-content; }
+.template-ruler-toggle { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.template-ruler-toggle input { margin: 0; }
+.template-guide-panel { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-card); font-size: 12px; }
+.template-guide-panel summary { cursor: pointer; font-weight: 600; }
+.template-guide-panel summary span { margin-left: 8px; font-weight: 400; color: var(--stone); }
+.template-guide-controls, .template-guide-row { display: flex; align-items: end; gap: 8px; margin-top: 8px; }
+.template-guide-controls label { display: flex; flex-direction: column; gap: 3px; color: var(--ink-2); }
+.template-guide-controls input, .template-guide-controls select, .template-guide-row input { width: 120px; min-width: 0; padding: 5px 6px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--input-bg); color: var(--ink); }
+.template-guide-controls button, .template-guide-row button { padding: 5px 9px; }
+.template-guide-row input { width: 105px; }
+.template-guide-row small { color: var(--warn); }
+.template-ruler { position: absolute; z-index: 11; overflow: hidden; background: var(--paper-card); color: var(--stone); font-size: 9px; line-height: 1; cursor: crosshair; touch-action: none; user-select: none; }
+.template-ruler-h { left: 0; bottom: 100%; height: 18px; border-bottom: 1px solid var(--line-strong); }
+.template-ruler-v { top: 0; right: 100%; width: 18px; border-right: 1px solid var(--line-strong); }
+.template-ruler-tick { position: absolute; background: var(--line-strong); pointer-events: none; }
+.template-ruler-h .template-ruler-tick { top: 0; width: 1px; height: 4px; }
+.template-ruler-h .template-ruler-tick.major { height: 9px; }
+.template-ruler-v .template-ruler-tick { left: 0; height: 1px; width: 4px; }
+.template-ruler-v .template-ruler-tick.major { width: 9px; }
+.template-ruler-label { position: absolute; white-space: nowrap; }
+.template-ruler-h .template-ruler-label { left: 2px; top: 8px; }
+.template-ruler-v .template-ruler-label { top: 10px; left: 1px; writing-mode: vertical-rl; }
 
 .canvas-view-toolbar {
   display: flex;
@@ -2572,6 +2707,12 @@ onBeforeUnmount(() => {
 
 .guide-v { top: 0; bottom: 0; width: 1px; }
 .guide-h { left: 0; right: 0; height: 1px; }
+.template-guide-line, .template-guide-drag { position: absolute; pointer-events: none; z-index: 9; }
+.template-guide-line.guide-v { border-left: 1px solid #2689c9; }
+.template-guide-line.guide-h { border-top: 1px solid #2689c9; }
+.template-guide-drag { z-index: 10; }
+.template-guide-drag.guide-v { border-left: 1px dashed #d02775; }
+.template-guide-drag.guide-h { border-top: 1px dashed #d02775; }
 
 /* 多选成员：用 box-shadow 画环，这样能和 .selected 的 outline 同时显示
    （一个元素只有一条 outline，若这里也用 outline 会把选中态盖掉）。

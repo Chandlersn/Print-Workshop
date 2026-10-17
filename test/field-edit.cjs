@@ -10,7 +10,7 @@ const assert = require('assert')
 const {
   SNAP_PX, UNDO_CAP, NUDGE_MERGE_MS,
   clampPct, snapTo, snapshotOf, parseSnapshot, pushCapped,
-  shouldStartNewNudge, alignedX, alignedY,
+  shouldStartNewNudge, alignedX, alignedY, guideTargetsForFrame,
 } = require('../src/lib/field-edit.cjs')
 
 let pass = 0
@@ -49,15 +49,28 @@ console.log('== 3. 吸附（阈值内取最近） ==')
   ok(withLabel && withLabel.line === 12, '兼容 [offset, label] 形态')
 }
 
+console.log('== 3.5 纸张参考线换算到多联格子与对折编辑联 ==')
+{
+  const page = { left: 100, top: 200, width: 400, height: 300 }
+  const frame = { left: 200, top: 300, width: 100, height: 100 }
+  const targets = guideTargetsForFrame([
+    { axis: 'x', position: 60 }, { axis: 'x', position: 20 },
+    { axis: 'y', position: 75 }, { axis: 'y', position: 20 },
+  ], page, frame, 2)
+  ok(targets.x.length === 1 && targets.x[0] === 20, '多联格子只吸格内的垂直参考线')
+  ok(targets.y.length === 1 && targets.y[0] === 50, '对折下半联使用相对编辑联的水平参考线')
+}
+
 console.log('== 4. 撤销快照：含 fields+layout、不含底图、兼容旧形态 ==')
 {
   ok(snapshotOf(null) === JSON.stringify({ fields: [] }), 'null 模板 → 空 fields 快照')
-  const tpl = { fields: [{ x: 1 }], layout: { mode: 'grid' }, background: 'print-bg/x.png' }
+  const tpl = { fields: [{ x: 1 }], layout: { mode: 'grid' }, editorGuides: [{ id: 'g1', axis: 'x', position: 25 }], background: 'print-bg/x.png' }
   const snap = snapshotOf(tpl)
   ok(!/background/.test(snap), '底图不进快照（换/删图会真删文件）')
   const parsed = parseSnapshot(snap)
   ok(JSON.stringify(parsed.fields) === JSON.stringify([{ x: 1 }]), 'fields 往返一致')
   ok(parsed.layout && parsed.layout.mode === 'grid', 'layout 往返一致')
+  ok(parsed.editorGuides?.[0]?.position === 25, '编辑参考线随撤销快照往返')
   const legacy = parseSnapshot(JSON.stringify([{ x: 2 }]))
   ok(Array.isArray(legacy.fields) && legacy.fields[0].x === 2 && legacy.layout === null,
     '兼容早期「只存 fields 数组」的快照', legacy)
