@@ -46,6 +46,9 @@ const dataDirModule = require('./data-dir.cjs')
 const photoSelections = new Map()
 const PHOTO_SELECTION_TTL = 10 * 60 * 1000
 const cache = require('./cache.cjs')
+// 出片派生件（I-49）也是磁盘缓存，必须能被统计与回收——否则它只会一直涨。
+// 本模块只用到它的纯函数（统计/清理），编码路径才惰性 require electron。
+const outputDpi = require('./output-dpi.cjs')
 
 // ---------------------------------------------------------------------------
 // 分批出片任务（S1.3-b/c）：jobKey → { canceled }。
@@ -70,6 +73,28 @@ function guardedPrintDomain(datasetId, templateId, fingerprint) {
     if (printInputFingerprint(datasetId, templateId) !== fingerprint) throw new Error('出片期间名单、模板或照片发生变化，请重新预览后出片')
     return printDomain.buildBatchHtml(...args)
   } }
+}
+
+/**
+ * 留痕里怎么描述这次出片（契约 I-49「不静默」）。
+ * 照片那一项只说**照片**——底图的分辨率是另一件事（见 buildBatchHtml 的 bgDpi），不混在一句话里。
+ * `bake` 是固定图片烘焙的统计（契约 I-50）：带 `adjust`/`shadow` 的固定图层已被烘成单张图，
+ * 不烘它们会让 PDF 体积随页数线性增长（A4 满版实测 19.67 MB/页），所以这件事必须留痕。
+ */
+function describeOutput(stats, bake) {
+  const bits = []
+  if (stats) {
+    if (stats.dpi == null) bits.push('出片分辨率：原图')
+    else {
+      bits.push(`${stats.dpi}dpi`)
+      if (stats.optimized) bits.push(`照片降采样 ${stats.optimized} 张`)
+      if (stats.keptOriginal) bits.push(`保持原件 ${stats.keptOriginal} 张`)
+      if (stats.failed) bits.push(`读取失败保持原件 ${stats.failed} 张`)
+    }
+  }
+  if (bake && bake.baked) bits.push(`带效果的底图烘焙 ${bake.baked} 层`)
+  if (bake && bake.failed) bits.push(`底图烘焙失败 ${bake.failed} 层`)
+  return bits.length ? `（${bits.join('，')}）` : ''
 }
 
 function cancelPrintTask(jobKey) {
@@ -213,7 +238,12 @@ const OPS = {
 
   'app:cacheInfo': {
     params: {},
-    run: (_p, ctx) => cache.cacheInfo(ctx.app.userDataDir),
+    // 出片派生件（I-49）单独报：它不在 userDataDir 里，而在数据目录的 photo-out/，
+    // 但同属「可再生的缓存」，界面要把它的体积一起说给用户听。
+    run: (_p, ctx) => ({
+      ...cache.cacheInfo(ctx.app.userDataDir),
+      derivatives: outputDpi.derivativeStats(),
+    }),
   },
 
   'app:clearCache': {
@@ -221,7 +251,20 @@ const OPS = {
     params: {},
     // 运行中的 GPU / Dawn 缓存删不掉（EPERM），会排队到下次启动清；
     // 返回值带 failed / queued，界面据此如实反馈，不再「点了没反应」
-    run: (_p, ctx) => cache.clearCache(ctx.app.userDataDir),
+    run: (_p, ctx) => {
+      const system = cache.clearCache(ctx.app.userDataDir)
+      /**
+       * 出片派生件一并回收（内容寻址、可重建，删了下次出片会重新生成）。
+       *
+       * **正在出片时不能删**：出片中的页面正按 `pp://media/photo-out/…` 加载图片，
+       * 删掉会让这一批的图片全部 404——用户看到的是「导出失败」，
+       * 而真正的原因是他在出片时点了清理。宁可不删，并把原因说出来。
+       */
+      const derivatives = printTasks.size
+        ? { skipped: true, reason: '正在出片，派生件已保留', count: 0, bytes: 0 }
+        : outputDpi.clearDerivatives()
+      return { ...system, derivatives }
+    },
   },
 
   // 选择新目录 → 可写校验 + 嵌套守卫 → 整目录迁移现有数据 → 写引导配置 → 重启生效
@@ -538,6 +581,31 @@ const OPS = {
   'photo:report': {
     params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, rows: { required: false, desc: '原始行号数组（0 基）' } },
     run: p => photoLibrary.report(p),
+  },
+  'photo:exportIssues': {
+    write: true,
+    params: {
+      datasetId: { required: true, desc: '数据集 id' },
+      column: { required: true, desc: '当前配图列 key' },
+      rows: { required: false, desc: '当前筛选命中的原始行号数组（0 基）；缺省为全部' },
+      identifierKey: { required: true, desc: '导出的识别字段 key' },
+      savePath: { required: false, desc: 'Excel 文件绝对路径；缺省时弹保存对话框' },
+    },
+    run: (p, ctx) => photoLibrary.exportIssues(p, { saveFile: ctx.dialog?.saveFile }),
+  },
+  'photo:overrideGet': {
+    params: { datasetId: { required: true }, templateId: { required: true }, rowId: { required: true }, layerId: { required: true } },
+    run: p => require('./photo-overrides.cjs').inspect(p),
+  },
+  'photo:overrideSet': {
+    write: true,
+    params: { datasetId: { required: true }, templateId: { required: true }, rowId: { required: true }, layerId: { required: true }, fit: { required: true }, focal: { required: true } },
+    run: p => require('./photo-overrides.cjs').set(p),
+  },
+  'photo:overrideClear': {
+    write: true,
+    params: { datasetId: { required: true }, templateId: { required: true }, rowId: { required: true }, layerId: { required: true } },
+    run: p => require('./photo-overrides.cjs').clear(p),
   },
 
   'catalog:fields': {
@@ -930,6 +998,7 @@ const OPS = {
 
   'asset:list': {
     params: {
+      category: { required: false, desc: 'design 设计素材（默认）、photo 名单照片或 all 全部' },
       query: { required: false, desc: '按展示名或标签模糊搜' },
       tags: { required: false, desc: '标签数组；多标签是收窄（AND）' },
       favoriteOnly: { required: false, desc: 'true 只列收藏' },
@@ -1026,6 +1095,10 @@ const OPS = {
   /**
    * 把「已有工程里的图片」建成素材库条目：不导入任何新字节，只补展示元数据。
    * 原件缺失会报错——不会给用户建一条点开就丢图的条目。
+   *
+   * adopt 会把临时件原件**迁进素材库池**（I-51）；返回的 `asset` 是搬迁后的原件记录
+   * （纯信息字段）。界面手里未同步的旧路径不影响显示：pp://media 对 `<pool>/<hash>.<ext>`
+   * 按 hash 解析真身（见 media-protocol.cjs），下次保存时主进程也会把文档 path 规范化。
    */
   'asset:adopt': {
     write: true,
@@ -1035,7 +1108,10 @@ const OPS = {
       tags: { required: false, desc: '标签数组' },
     },
     fromIpc: (id, meta) => ({ id, ...(meta || {}) }),
-    run: (p, ctx) => assetLibrary.adopt(p.id, { displayName: p.displayName, tags: p.tags }, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail }),
+    run: (p, ctx) => {
+      const entry = assetLibrary.adopt(p.id, { displayName: p.displayName, tags: p.tags }, { makeThumbnail: ctx.thumbs && ctx.thumbs.makeThumbnail })
+      return { entry, asset: designs.assetInfo(p.id) }
+    },
   },
 
   /** 缩略图缓存被清掉后重建；原件不在会明确报错，不会静默留下坏缓存。 */
@@ -1066,19 +1142,24 @@ const OPS = {
    * 只读、纯展示，不入任何库。
    */
   'asset:listOrphans': {
-    params: {},
-    run: () => assetLibrary.findOrphanOriginals(),
+    params: { protectedIds: { required: false, desc: '当前未保存草稿持有的素材标识列表' } },
+    run: p => assetLibrary.findOrphanOriginals({ protectedIds: p.protectedIds }),
   },
 
   /**
    * 删除孤立原件；删除前**再次**核对仍孤儿，期间被引用的（竞态）一律跳过（I-32）。
-   * 入参是 64 位十六进制 hash 列表，路径只由本函数按 hash 拼 `design-assets/` 与
-   * `design-thumbnails/`，绝不接受任意文件路径，避免越界删文件。
+   * 入参是 64 位十六进制 hash 列表，路径只由本函数按 hash 拼两个原件池
+   * （`design-assets/`、`ephemeral-assets/`，I-51）与 `design-thumbnails/`，
+   * 绝不接受任意文件路径，避免越界删文件。
    */
   'asset:purgeOrphans': {
     write: true,
-    params: { hashes: { required: true, desc: '要清理的孤立原件 hash 列表（64 位十六进制）' } },
-    run: (p) => assetLibrary.purgeOrphanOriginals(p.hashes),
+    params: { hashes: { required: true, desc: '要清理的孤立原件 hash 列表（64 位十六进制）' }, protectedIds: { required: false, desc: '当前未保存草稿持有的素材标识列表' } },
+    run: (p) => assetLibrary.purgeOrphanOriginals(p.hashes, { protectedIds: p.protectedIds }),
+  },
+  'asset:usage': {
+    params: {},
+    run: () => assetLibrary.resourceUsage(),
   },
 
   /**
@@ -1151,15 +1232,31 @@ const OPS = {
     run: (p) => printDomain.validateBatch(String(p.datasetId), String(p.templateId), p.rows),
   },
 
+  'print:photoPreflight': {
+    params: {
+      datasetId: { required: true, desc: '数据集 id' },
+      templateId: { required: true, desc: '模板 id' },
+      rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
+    },
+    run: p => printDomain.photoPreflight(String(p.datasetId), String(p.templateId), p.rows),
+  },
+
   // 组装批量 HTML（预览用，不落盘不留痕）
+  // 出片分辨率在此**只做规划、不生成派生件**：预览照旧用原件，但能零额外 I/O
+  // 报出「这次大约多大」。真正的降采样发生在 print:exportPdf / print:send。
   'print:generate': {
     params: {
       datasetId: { required: true, desc: '数据集 id' },
       templateId: { required: true, desc: '模板 id' },
       rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
       previewPage: { required: false, desc: '仅生成指定物理纸张的预览，0 基；保留全作业统计' },
+      outputDpi: { required: false, desc: '出片分辨率 150/300/600 或 original；缺省 300。仅用于体积预估' },
     },
-    run: (p) => printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { previewPage: p.previewPage }),
+    run: (p) => printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, {
+      previewPage: p.previewPage,
+      outputDpi: p.outputDpi,
+      encodeDerivatives: false,
+    }),
   },
 
   /**
@@ -1184,9 +1281,15 @@ const OPS = {
       savePath: { required: false, desc: 'PDF 保存绝对路径；缺省时经 GUI 保存对话框询问' },
       batchRows: { required: false, desc: '每批目标记录数；照片缺省25，普通作业缺省100' },
       jobKey: { required: false, desc: '任务键（进度/取消关联）；缺省自动生成并随结果返回' },
+      outputDpi: { required: false, desc: '出片分辨率 150/300/600 或 original；缺省 300。照片先降到图框需要的像素再出片' },
+      preflightFingerprint: { required: false, desc: '页面预检快照；数据、模板或照片关联变化时拒绝使用旧结果' },
     },
     run: async (p, ctx) => {
-      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
+      await printDomain.assertPhotoPreflight(String(p.datasetId), String(p.templateId), p.rows, p.preflightFingerprint)
+      // 固定图片烘焙（I-50）：必须在同步的 buildBatchHtml **之前** await——它要拉离屏窗口截图。
+      // 放在保存/打印对话框之前是有意的：烘出来的是内容寻址的缓存件，用户取消也只是白热一次缓存。
+      await printDomain.warmBatchBakes(String(p.templateId), p.outputDpi)
+      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { outputDpi: p.outputDpi })
       const fingerprint = printInputFingerprint(String(p.datasetId), String(p.templateId))
 
       let savePath = p.savePath ? String(p.savePath) : ''
@@ -1228,6 +1331,7 @@ const OPS = {
             rows: p.rows,
             savePath,
             batches,
+            outputDpi: p.outputDpi,
             onProgress,
             shouldCancel: () => task.canceled,
           })
@@ -1249,11 +1353,11 @@ const OPS = {
           snapshotHtml: built.snapshotHtml,
           photoAssets: built.photoAssets,
           status: 'ok',
-          detail: batches.length > 1
+          detail: `${batches.length > 1
             ? `${r.bytes} bytes → ${r.path}（${r.batches} 批合并，${r.pages} 页）`
-            : `${r.bytes} bytes → ${r.path}`,
+            : `${r.bytes} bytes → ${r.path}`}${describeOutput(r.output || built.output, r.bake || built.bake)}`,
         })
-        return { canceled: false, ...r, jobId: job.id, jobKey, scope: built.scope }
+        return { canceled: false, ...r, output: r.output || built.output, jobId: job.id, jobKey, scope: built.scope }
       } catch (err) {
         // 取消与失败都留痕，但状态不同：取消 = 用户主动叫停（无半成品、无最终文件）
         printDomain.createJob({
@@ -1298,9 +1402,15 @@ const OPS = {
       silent: { required: false, desc: 'true 静默直打；缺省 false 弹系统打印对话框' },
       batchRows: { required: false, desc: '每批目标记录数；照片缺省25，普通作业缺省100' },
       jobKey: { required: false, desc: '任务键（进度/取消关联）；缺省自动生成并随结果返回' },
+      outputDpi: { required: false, desc: '出片分辨率 150/300/600 或 original；缺省 300。照片先降到图框需要的像素再送打' },
+      preflightFingerprint: { required: false, desc: '页面预检快照；数据、模板或照片关联变化时拒绝使用旧结果' },
     },
     run: async (p, ctx) => {
-      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows)
+      await printDomain.assertPhotoPreflight(String(p.datasetId), String(p.templateId), p.rows, p.preflightFingerprint)
+      // 固定图片烘焙（I-50）：必须在同步的 buildBatchHtml **之前** await——它要拉离屏窗口截图。
+      // 放在保存/打印对话框之前是有意的：烘出来的是内容寻址的缓存件，用户取消也只是白热一次缓存。
+      await printDomain.warmBatchBakes(String(p.templateId), p.outputDpi)
+      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { outputDpi: p.outputDpi })
       const fingerprint = printInputFingerprint(String(p.datasetId), String(p.templateId))
       const silent = Boolean(p && p.silent)
       const jobKey = p.jobKey ? String(p.jobKey) : newJobKey()
@@ -1326,6 +1436,7 @@ const OPS = {
             rows: p.rows,
             silent,
             batches,
+            outputDpi: p.outputDpi,
             onProgress,
             shouldCancel: () => task.canceled,
           })
@@ -1367,10 +1478,10 @@ const OPS = {
         photoAssets: built.photoAssets,
         status: r.ok ? 'ok' : 'canceled',
         detail: r.ok
-          ? `${silent ? '静默直打' : '打印对话框确认'}${r.batches > 1 ? `（${r.batches} 批）` : ''}`
+          ? `${silent ? '静默直打' : '打印对话框确认'}${r.batches > 1 ? `（${r.batches} 批）` : ''}${describeOutput(r.output || built.output, r.bake || built.bake)}`
           : String(r.error || ''),
       })
-      return { ...r, jobKey, scope: built.scope }
+      return { ...r, output: r.output || built.output, jobKey, scope: built.scope }
     },
   },
 

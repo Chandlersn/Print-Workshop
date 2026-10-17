@@ -239,9 +239,22 @@ function normalizeDesign(input) {
     const asset = object(raw, '素材')
     if (asset.id !== id) throw new Error('素材标识与索引不一致')
     const assetPath = string(asset.path, '', 200, '素材路径')
-    if (!/^design-assets\/[a-f0-9]{64}\.(png|jpg)$/.test(assetPath)) throw new Error('素材路径不在底图素材目录内')
+    // 两个原件池都合法（I-51）：design-assets/ 素材库、ephemeral-assets/ 临时底图。
+    // 主进程每次保存都按 readAsset 的真身把 path 改写一遍，所以两个值都是不动点。
+    if (!/^(design-assets|ephemeral-assets)\/[a-f0-9]{64}\.(png|jpg)$/.test(assetPath)) throw new Error('素材路径不在底图素材目录内')
     assets[id] = { id, path: assetPath, width: number(asset.width, 1, 1, 24000, '图片宽度'), height: number(asset.height, 1, 1, 24000, '图片高度'), name: string(asset.name, '图片', 200, '素材名称'), mime: asset.mime, source: normalizeSource(asset.source) }
     if (!['image/png', 'image/jpeg'].includes(asset.mime)) throw new Error('素材格式无效')
+    /*
+     * EXIF 方向（I-49 出片分辨率）：主进程 `readAsset` 每次保存都按**受信任的原件**把
+     * `orientation` 重新量一遍写回素材记录（≥5 时上面的 width/height 已是显示坐标，
+     * 存储尺寸要靠它换算，见 output-dpi.storageSize）。
+     *
+     * 规范化这里必须放行：否则「保存 → 主进程写回 → 再规范化」不是不动点，
+     * 渲染侧 `fingerprint(design)` 与 `fingerprint(已保存文档)` 永远差这一个字段——
+     * 带图工程一保存就仍旧显示「未保存」，且保存按钮看着像没生效。
+     * 老工程没这个字段时保持没有，不凭空给旧数据加字段。
+     */
+    if (asset.orientation !== undefined) assets[id].orientation = number(asset.orientation, 1, 1, 8, 'EXIF 方向')
   }
   const ids = new Set()
   const result = {
@@ -457,7 +470,20 @@ function renderDesign(input, options = {}) {
   const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly)).map(l => {
     let body = ''
     const effectiveOpacity = Math.min(1, Math.max(0, l.opacity * (groupOpacity.get(l.id) ?? 1)))
-    const style = [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${effectiveOpacity}`]
+    /*
+     * 烘焙覆盖（契约 I-50）：带 CSS `filter` 或 `drop-shadow` 的固定图片会让 Chromium
+     * **每页各栅格化一份**（A4 满版 19.67 MB/页 ⇒ 500 页约 9.8 GB）。出片前那一层已经被
+     * 烘成一张 PNG（连旋转/裁切/翻转/调整/投影/描边一起），这里就把它当**全素的轴对齐图片**画，
+     * 于是回到「复用同一份 XObject」。
+     *
+     * `opacity` 与 `blend` **不烘进像素**、留在替换层上——两者都被实测证明不破坏复用，
+     * 而且留在外层才能让「组透明度 × 图层透明度」只生效一次（烘进去再乘一遍会变暗）。
+     * 这是渲染期覆盖，不动存盘 schema（与变量图的 `photoUrl` 同一个模式）。
+     */
+    const baked = (l.type === 'image' && !l.variable) ? options.bakedLayer?.(l) : null
+    const style = baked
+      ? [`left:${baked.x}mm`, `top:${baked.y}mm`, `width:${baked.w}mm`, `height:${baked.h}mm`, `opacity:${effectiveOpacity}`]
+      : [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${effectiveOpacity}`]
     if (l.blend && l.blend !== 'normal') style.push(`mix-blend-mode:${l.blend}`)
     // 图片图层的描边与投影（v0.7 §6）。两条都**不碰几何**，这是刻意的：
     // - 描边走一个**叠层元素** + `inset box-shadow`，画在框的内侧。
@@ -467,7 +493,7 @@ function renderDesign(input, options = {}) {
     //   也别用 `border`：会挤掉内容盒，可见源区域的比例与帧比例不再相等 ⇒ 等于把照片拉长。
     // - 投影走 `filter: drop-shadow()`，**按图层 alpha 走**。别图省事用 `box-shadow`：
     //   后者按包围盒投，一张抠过底的签名图会被投出一个方盒。
-    if (l.type === 'image') {
+    if (l.type === 'image' && !baked) {
       if (l.shadow) style.push(`filter:drop-shadow(${l.shadow.dxMm}mm ${l.shadow.dyMm}mm ${l.shadow.blurMm}mm ${withAlpha(l.shadow.color, l.shadow.opacity)})`)
     }
     // 变量图：`border-radius` 留在图层外框上（描边的 `outline` 要跟着圆角走），
@@ -475,22 +501,42 @@ function renderDesign(input, options = {}) {
     // 而「描边 + 投影」正是证件照衬边最常见的组合，不能赌浏览器的裁剪语义。
     if (l.type === 'image' && l.variable) {
       const url = options.photoUrl?.(l)
+      const photoStyle = options.photoStyle?.(l)
+      const fit = photoStyle?.fit || l.fit
+      const focal = photoStyle?.focal || l.focal
       style.push(`border-radius:${l.radius}mm`)
       const clip = `position:absolute;inset:0;overflow:hidden;border-radius:${l.radius}mm`
       const filter = filterOf(l.adjust)
-      if (url) body = `<div style="${clip}"><img data-photo-column="${escapeHtml(l.bindColumn)}" src="${escapeHtml(url)}" style="display:block;width:100%;height:100%;object-fit:${l.fit};object-position:${l.focal.x * 100}% ${l.focal.y * 100}%${filter ? `;${filter}` : ''}"></div>`
+      if (url) body = `<div style="${clip}"><img data-photo-column="${escapeHtml(l.bindColumn)}" data-photo-layer-id="${escapeHtml(l.id)}" src="${escapeHtml(url)}" style="display:block;width:100%;height:100%;object-fit:${fit};object-position:${focal.x * 100}% ${focal.y * 100}%${filter ? `;${filter}` : ''}"></div>`
       else if (url !== null && options.showPhotoPlaceholder) body = `<div style="${clip}"><div style="box-sizing:border-box;width:100%;height:100%;border:0.3mm dashed #987b57;background:#eee7d9;display:flex;align-items:center;justify-content:center;text-align:center;color:#725a3c;font:10pt sans-serif;overflow:hidden">变量图<br>按名单配图列匹配</div></div>`
       else if (url !== null && options.requirePhotos) throw new Error(`变量图未关联照片：${l.bindColumn}`)
     } else if (l.type === 'image') {
-      let cls = assetClasses.get(l.assetId)
-      if (!cls) {
-        cls = `${prefix}-asset-${assetClasses.size}`
-        assetClasses.set(l.assetId, cls)
-        if (!geometryOnly) css.push(`.${cls}{background-image:url(${cssString(assetUrl(doc.assets[l.assetId]))})}`)
+      if (baked) {
+        /*
+         * 烘焙层：效果已在像素里，这里只把那张 PNG 铺满外框（外框已是烘焙后的轴对齐外接框）。
+         *
+         * ⚠️ 两个必须写全、否则「看着替换成功、其实整张图丢了」的点：
+         * ① `escapeHtml` 包住整个 style 值——`cssString` 返回的是**带双引号**的 `"pp://…"`，
+         *    直接拼进 `style="…"` 会让属性在 url( 之后就提前闭合，`background-image` 变成
+         *    非法声明被整条丢掉，而 `data-design-baked` 还在、filter 也不残留 ⇒ 断言全过、
+         *    PDF 里一张图都没有。实测就是这么安静地丢的（0 个图片对象、还不报错）。
+         * ② `position:absolute;inset:0` 必须内联写死，不能指望 `-image` 那个类：
+         *    `geometryOnly` 模式**不输出任何 CSS**（css 为空串），靠类名定位的层会退化成
+         *    「auto 尺寸的零面积块」⇒ 同样是一张图都不出。
+         */
+        const bakedStyle = `position:absolute;inset:0;background-image:url(${cssString(baked.url)});background-size:100% 100%;background-repeat:no-repeat`
+        body = `<div class="${prefix}-image" data-design-baked="${escapeHtml(l.id)}" style="${escapeHtml(bakedStyle)}"></div>`
+      } else {
+        let cls = assetClasses.get(l.assetId)
+        if (!cls) {
+          cls = `${prefix}-asset-${assetClasses.size}`
+          assetClasses.set(l.assetId, cls)
+          if (!geometryOnly) css.push(`.${cls}{background-image:url(${cssString(assetUrl(doc.assets[l.assetId]))})}`)
+        }
+        const c = l.crop
+        const filter = filterOf(l.adjust)
+        body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%${filter ? `;${filter}` : ''}"></div></div>`
       }
-      const c = l.crop
-      const filter = filterOf(l.adjust)
-      body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%${filter ? `;${filter}` : ''}"></div></div>`
     } else if (l.type === 'text') {
       const fam = family(l.fontFamily)
       style.push(`font-family:${fam ? `${cssString(fam)},sans-serif` : DEFAULT_FONT_STACK}`, `font-size:${l.fontSize}pt`, `font-weight:${l.bold ? 700 : 400}`, `line-height:${l.lineHeight}`, `letter-spacing:${l.letterSpacing}pt`, `color:${l.color}`, `text-align:${l.align}`, 'white-space:pre-wrap', 'overflow-wrap:anywhere', 'overflow:hidden')
@@ -516,7 +562,7 @@ function renderDesign(input, options = {}) {
     }
     // 图片描边：叠层元素 + `inset box-shadow`（必须压在图片之上，见上面那段注释）。
     // 变量图的圆角在外框上，叠层也要带上同一个 `border-radius`，衬边才会跟着圆角走。
-    if (l.type === 'image' && l.strokeWidth > 0) {
+    if (l.type === 'image' && !baked && l.strokeWidth > 0) {
       const radius = l.variable ? `;border-radius:${l.radius}mm` : ''
       body += `<div data-design-stroke="${escapeHtml(l.id)}" style="position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 0 ${l.strokeWidth}mm ${l.stroke}${radius}"></div>`
     }
@@ -554,4 +600,4 @@ function shadowMarkup(id, w, h, shadow) {
     '<feComposite in="color" in2="shift" operator="in"/></filter>'
 }
 
-module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, linearEndpoints, shadowRegion, fitCropToRatio, DEFAULT_FONT_STACK, LIMITS, BLEND_MODES, SCHEMA_VERSIONS, CROP_RATIOS }
+module.exports = { normalizeDesign, renderDesign, collectFontFamilies, imageDpi, normalizeFamily, normalizeSource, linearEndpoints, shadowRegion, fitCropToRatio, filterOf, DEFAULT_FONT_STACK, LIMITS, BLEND_MODES, SCHEMA_VERSIONS, CROP_RATIOS }

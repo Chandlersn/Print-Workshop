@@ -7,14 +7,17 @@ const designs = require('./designs.cjs')
 const { fontFaceCss } = require('./render-engine.cjs')
 const { normalizeFamily } = require('./fonts.cjs')
 const { resolveInsideDataDir } = require('./store.cjs')
+const { resolveAssetPath, poolDir, MANAGED_POOL } = require('./asset-storage.cjs')
 const { imageSizeFromBuffer } = require('./images.cjs')
 // 格式表与体积估算在纯模块里，渲染进程的导出面板读的是同一份（见 export-formats.cjs）。
 const {
   FORMATS, KNOWN_EXTS, normalizeFormat, normalizeQuality, extensionOf, formatOfPath, estimateOutputBytes,
+  OUTPUT_DPI_VALUES,
 } = require('./export-formats.cjs')
 
 const LIMITS = Object.freeze({ edge: 16384, pixels: 40000000, workingBytes: 768 * 1024 * 1024 })
-const DPI_VALUES = [150, 300, 600]
+// 档位不在这里定义：出片分辨率与画布导出问的是同一个问题，权威源只有 export-formats.cjs 一份。
+const DPI_VALUES = OUTPUT_DPI_VALUES
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
 
 function outputSize(artboard, dpi) {
@@ -41,7 +44,7 @@ function prepareExport({ design, dpi = 300, transparent = false, format, quality
   let estimated = size.width * size.height * 12
   for (const id of usedAssets) {
     const asset = doc.assets[id]
-    estimated += asset.width * asset.height * 4 + fs.statSync(resolveInsideDataDir(asset.path)).size * 3
+    estimated += asset.width * asset.height * 4 + fs.statSync(resolveAssetPath(asset.path)).size * 3
   }
   for (const layer of doc.layers) {
     if (!layer.visible || layer.editorOnly || layer.opacity === 0 || !layer.shadow) continue
@@ -67,7 +70,7 @@ function prepareExport({ design, dpi = 300, transparent = false, format, quality
   else if (flattened && doc.artboard.background === 'transparent') doc.artboard.background = '#ffffff'
   const output = renderDesign(doc, {
     classPrefix: 'export-design', fontFamily: normalizeFamily,
-    assetUrl: asset => `data:${asset.mime};base64,${fs.readFileSync(resolveInsideDataDir(asset.path)).toString('base64')}`,
+    assetUrl: asset => `data:${asset.mime};base64,${fs.readFileSync(resolveAssetPath(asset.path)).toString('base64')}`,
   })
   const background = wantsTransparent ? 'transparent' : '#ffffff'
   const scale = dpi / 96
@@ -166,19 +169,25 @@ function outputPath(filePath, format) {
     throw new Error(`保存路径的扩展名与 ${FORMATS[kind].label} 不符，请用 .${FORMATS[kind].exts.join(' / .')} 结尾`)
   }
   const target = path.resolve(filePath)
-  const realParent = fs.realpathSync(path.dirname(target))
-  const targets = [target, path.join(realParent, path.basename(target))]
-  if (fs.existsSync(target)) targets.push(fs.realpathSync(target))
   const root = process.env.PRINTPRESS_DATA_DIR
   if (root) {
     const roots = [path.resolve(root)]
     if (fs.existsSync(root)) roots.push(fs.realpathSync(root))
-    const managed = roots.flatMap(dir => ['design-assets', 'designs', 'print-fonts', 'print-bg'].map(name => path.join(dir, name)))
+    // 两个原件池（design-assets / ephemeral-assets，I-51）+ 版本工程 + 字体 + 旧底图目录：
+    // 导出文件落进这些目录会覆盖 / 污染受管数据，一律拒绝。
+    const managed = [poolDir(MANAGED_POOL), ...roots.flatMap(dir => [...designs.ASSET_POOLS, 'designs', 'print-fonts', 'print-bg'].map(name => path.join(dir, name)))]
     for (const directory of [...managed]) if (fs.existsSync(directory)) managed.push(fs.realpathSync(directory))
-    if (managed.some(directory => targets.some(file => {
+    const insideManaged = (file) => managed.some(directory => {
       const relative = path.relative(directory, file)
       return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))
-    }))) throw new Error('不能将导出文件写入应用管理的素材目录，请选择其他位置')
+    })
+    // 字面前缀拒绝先于 realpathSync：受管目录可能尚未创建（临时底图池从没来过文件时不存在），
+    // 不存在也一样不许写入；符号链接绕过仍由下面的真身路径判断兜住。
+    if (insideManaged(target)) throw new Error('不能将导出文件写入应用管理的素材目录，请选择其他位置')
+    const realParent = fs.realpathSync(path.dirname(target))
+    const targets = [target, path.join(realParent, path.basename(target))]
+    if (fs.existsSync(target)) targets.push(fs.realpathSync(target))
+    if (targets.some(insideManaged)) throw new Error('不能将导出文件写入应用管理的素材目录，请选择其他位置')
   }
   return target
 }

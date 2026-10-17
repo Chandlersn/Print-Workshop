@@ -50,7 +50,7 @@ function main() {
   const jobDir = path.join(TMP, path.dirname(job.snapshot))
   fs.mkdirSync(path.join(jobDir, 'photos'))
   fs.writeFileSync(path.join(jobDir, 'photos', 'portrait.jpg'), 'ARCHIVE COPY')
-  const protectedFiles = ['export.pdf', 'datasets.json', 'templates.json', 'photo-bindings.json', 'design-assets/original.jpg', 'design-thumbnails/thumb.png', 'asset-library.json', 'designs/project.json']
+  const protectedFiles = ['export.pdf', 'datasets.json', 'templates.json', 'photo-bindings.json', 'design-assets/original.jpg', 'ephemeral-assets/original.jpg', 'design-thumbnails/thumb.png', 'asset-library.json', 'designs/project.json']
   for (const rel of protectedFiles) {
     fs.mkdirSync(path.dirname(path.join(TMP, rel)), { recursive: true })
     fs.writeFileSync(path.join(TMP, rel), rel === 'datasets.json' ? '[{"id":"ds_d1","printCount":2}]' : 'KEEP')

@@ -18,6 +18,7 @@ const { toUserMessage } = require('./user-error.cjs')
 const dataset = require('./dataset.cjs')
 const templates = require('./templates.cjs')
 const renderEngine = require('./render-engine.cjs')
+const { estimatePdfBytes } = require('./output-dpi.cjs')
 const { isPlaceholder } = require('./placeholder.cjs')
 
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
@@ -107,6 +108,54 @@ function resolveScope(ds, { rows, range } = {}) {
     return { rows: indexes.map((i) => ds.rows[i]), selection: null, batch: { from, to, size: to - from }, rowIndexes: indexes }
   }
   return { rows: ds.rows, selection: null, rowIndexes: null }
+}
+
+/** Full selected-scope photo check shared by the page and both output paths. */
+async function photoPreflight(datasetId, templateId, rows) {
+  const ds = dataset.getDataset(String(datasetId))
+  const tpl = templates.getTemplate(String(templateId))
+  const scope = resolveScope(ds, { rows })
+  const design = renderEngine.resolveTemplateDesign(tpl)
+  const photoLayers = (design?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly)
+  const spec = renderEngine.pageSpec(tpl.pageSize)
+  const layout = renderEngine.resolveLayout(tpl.layout, spec)
+  const indexes = scope.rowIndexes || ds.rows.map((_, index) => index)
+  const photo = photoLayers.length
+    ? await require('./photo-library.cjs').preflightRows(ds, indexes)
+    : { column: null, enabled: false, total: indexes.length,
+      counts: { matched: 0, empty: 0, missing: 0, ambiguous: 0, invalid: 0, broken: 0 },
+      results: [], bindingRevision: null }
+  const selectionFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    datasetId: ds.id, indexes, recordIds: indexes.map(index => ds.recordIds?.[index]),
+    rows: indexes.map(index => ds.rows[index]), photoMatchColumn: ds.photoMatchColumn,
+  })).digest('hex')
+  const templateRevision = crypto.createHash('sha256').update(JSON.stringify(tpl)).digest('hex')
+  const overrideRevision = require('./photo-overrides.cjs').revisionFor(ds.id, tpl.id, indexes.map(index => ds.recordIds?.[index]))
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    selectionFingerprint, templateRevision, bindingRevision: photo.bindingRevision, overrideRevision,
+  })).digest('hex')
+  const issues = photo.results.filter(item => !['matched', 'empty'].includes(item.status))
+    .map(item => ({ ...item, rowId: ds.recordIds?.[item.rowIndex] || null,
+      ...(item.reason ? { reason: toUserMessage(item.reason) } : {}) }))
+  return {
+    selectionFingerprint, templateRevision, bindingRevision: photo.bindingRevision, overrideRevision, fingerprint,
+    recordCount: indexes.length, pageCount: Math.ceil(indexes.length / (layout.enabled ? layout.perPage : 1)),
+    photoLayerCount: photoLayers.length, photoFrameCount: photoLayers.length * indexes.length,
+    photoEnabled: photo.enabled, photoColumn: photo.column, counts: photo.counts, issues,
+    canOutput: !issues.some(item => ['ambiguous', 'invalid', 'broken'].includes(item.status)),
+  }
+}
+
+async function assertPhotoPreflight(datasetId, templateId, rows, expectedFingerprint) {
+  const result = await photoPreflight(datasetId, templateId, rows)
+  if (expectedFingerprint && result.fingerprint !== expectedFingerprint) {
+    throw new Error('打印预检后名单、模板或照片关联已变化，请重新检查后出片')
+  }
+  if (!result.canOutput) {
+    const issue = result.issues.find(item => ['ambiguous', 'invalid', 'broken'].includes(item.status))
+    throw new Error(`第 ${issue.rowIndex + 1} 行照片${{ ambiguous: '同名冲突', invalid: '名称无效', broken: '素材损坏' }[issue.status]}，请处理后再出片`)
+  }
+  return result
 }
 
 /**
@@ -267,13 +316,44 @@ function validateBatch(datasetId, templateId, rows) {
   }
 }
 
-/** 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；范围由 rows（行级勾选）限定；
- *  range 为分批导出的行区间（S1.3-b），只影响本次渲染的行，不改 selection 口径 */
-function buildBatchHtml(datasetId, templateId, rows, { range, previewPage } = {}) {
+/**
+ * 出片前预热：把带 `adjust` / `shadow` 的固定图片图层烘成单张 PNG（契约 I-50）。
+ *
+ * **必须在异步上下文里 await**——它要拉离屏窗口截图，而 `buildBatchHtml` 是同步的。
+ * 预跑之后，同步链路里的 `renderEngine.prepareTemplateDesign` 只做缓存命中替换。
+ *
+ * 这是**设计级**的事（跟有多少行无关），所以整个作业跑一次就够，分批时不必每批都烘。
+ * 返回 `{ stats, overrides }`；不烘任何东西时 `stats.baked === 0`。
+ */
+async function warmBatchBakes(templateId, outputDpi) {
+  const tpl = templates.getTemplate(String(templateId))
+  const design = renderEngine.resolveTemplateDesign(tpl)
+  if (!design) return null
+  try {
+    return await require('./output-dpi.cjs').prepareFixedBakes({ design, dpi: outputDpi })
+  } catch {
+    // 烘焙是优化，不是出片的前置条件：失败只能是「不烘」，绝不能拦住出片
+    return null
+  }
+}
+
+/**
+ * 组装批量 HTML（不落盘，供预览 / PDF / 直打共用）；范围由 rows（行级勾选）限定；
+ *  range 为分批导出的行区间（S1.3-b），只影响本次渲染的行，不改 selection 口径。
+ *
+ * `outputDpi` 是出片分辨率（契约 I-49）：照片降到图框需要的像素后再出片。
+ * **它只作用于出片用的 `html`**；归档快照 `snapshotHtml` 始终用原件——
+ * 归档要能脱离本机逐字节核对，留降采样件等于把「原件保真」换成「出片表征」。
+ *
+ * `encodeDerivatives` 缺省 true（出片）。预览传 false：只规划、不生成派生件，
+ * 整批预估为其他页读取尺寸元数据，不读取所有照片字节，也不为预览生成派生件。
+ */
+function buildBatchHtml(datasetId, templateId, rows, { range, previewPage, outputDpi, encodeDerivatives } = {}) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
   const spec = renderEngine.pageSpec(tpl.pageSize)
   let scope = resolveScope(ds, { rows, range })
+  const fullScope = scope
   // 多联：一页装多条记录，页数 ≠ 记录数，必须分开报，否则预览会按记录数撑高
   const layout = renderEngine.resolveLayout(tpl.layout, spec)
   const fullCount = scope.rows.length
@@ -289,8 +369,24 @@ function buildBatchHtml(datasetId, templateId, rows, { range, previewPage } = {}
   const pageCount = layout.enabled ? Math.ceil(list.length / layout.perPage) : list.length
   const doc = renderEngine.resolveTemplateDesign(tpl)
   const photoColumns = (doc?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly).map(layer => layer.bindColumn)
-  const photos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, list, scope.rowIndexes)
-  const preparedDesign = renderEngine.prepareTemplateDesign(tpl, photos)
+  const photos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, list, scope.rowIndexes, { templateId: tpl.id })
+  const preparedDesign = renderEngine.prepareTemplateDesign(tpl, photos, { outputDpi, encodeDerivatives })
+  // 预览只渲染一页，但预估覆盖用户选定的全部记录。其余页只读尺寸元数据，
+  // 不解码或哈希所有照片；出片时仍逐张验证原件。缺失信息时不显示不完整的体积数字。
+  let output = preparedDesign.output
+  let outputEstimateIncomplete = false
+  if (shownPage !== null && doc) {
+    const allPhotos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, fullScope.rows, fullScope.rowIndexes,
+      { estimateOnly: true, knownGeometry: photos.geometry, templateId: tpl.id })
+    output = require('./output-dpi.cjs').planDerivatives({ design: doc, photos: allPhotos, dpi: outputDpi }).stats
+    outputEstimateIncomplete = allPhotos.unresolved > 0 || output.failed > 0
+  }
+  // 归档快照显式按「原图 + 不烘焙」再准备一次，不复用出片用的那份。
+  // 出片档位本来就是「原图」、且没有烘焙件时两者等价，直接复用，不白做一遍。
+  const canReuseForArchive = preparedDesign.output?.dpi == null && !(preparedDesign.bake?.baked > 0)
+  const archiveDesign = canReuseForArchive
+    ? preparedDesign
+    : renderEngine.prepareTemplateDesign(tpl, photos, { outputDpi: null, encodeDerivatives: false, bake: false })
   // 底图输出分辨率：交给界面提示「印出来够不够清」。
   // 成品口径与渲染一致——多联是单格、对折是半页、单页是整张纸。
   const itemW = layout.enabled ? layout.itemW : spec.w
@@ -306,7 +402,8 @@ function buildBatchHtml(datasetId, templateId, rows, { range, previewPage } = {}
     : null
   return {
     html: renderEngine.buildHtml(tpl, list, { withToolbar: false, preparedDesign }),
-    snapshotHtml: renderEngine.buildHtml(tpl, list, { withToolbar: true, preparedDesign }),
+    // 归档快照用 archiveDesign（原件），与出片用的 preparedDesign 分开——见函数头注释
+    snapshotHtml: renderEngine.buildHtml(tpl, list, { withToolbar: true, preparedDesign: archiveDesign }),
     recordCount: shownPage === null ? list.length : fullCount,
     photoAssets: photos.assets,
     pageCount: shownPage === null ? pageCount : fullPages,
@@ -314,6 +411,18 @@ function buildBatchHtml(datasetId, templateId, rows, { range, previewPage } = {}
     previewPage: shownPage,
     bgDpi,
     designInfo: preparedDesign.info,
+    // 出片分辨率与本次实际优化结果：界面据此如实显示「多少张降到了目标 DPI、省了多少」
+    outputDpi: output?.dpi ?? null,
+    // 体积是**模型**不是预言（见 output-dpi 顶部）：界面必须带「约」字，
+    // 导出完成后一律用真实字节数覆盖它。
+    // 烘焙件（I-50）只嵌一份，所以按 1 份计入——它恰好把「带效果的固定图片逐页各栅格化一份」
+    // 那部分体积从预估里去掉（那部分以前根本没被算进来，等于对 9.8 GB 一声不吭）。
+    outputEstimateBytes: outputEstimateIncomplete ? null : estimatePdfBytes((output?.embeddedPixels || 0) + (preparedDesign.bake?.pixels || 0)),
+    outputOriginalEstimateBytes: outputEstimateIncomplete ? null : estimatePdfBytes(output?.originalEmbeddedPixels),
+    outputEstimateIncomplete,
+    output,
+    // 固定图片烘焙统计（I-50）：界面据此说明「几个带效果的底图已烘焙成单张图」
+    bake: preparedDesign.bake,
     layout: layout.enabled
       ? (layout.fold
         ? { enabled: true, fold: true, perPage: 1 }
@@ -523,7 +632,10 @@ function deleteJob(jobId) {
 
 module.exports = {
   validateBatch,
+  photoPreflight,
+  assertPhotoPreflight,
   buildBatchHtml,
+  warmBatchBakes,
   createJob,
   listJobs,
   deleteJob,

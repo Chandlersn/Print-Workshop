@@ -19,8 +19,10 @@ const reportedMissing = new Set()
  */
 import { ref, reactive, computed, onMounted } from 'vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
+import { formatBytes } from '../lib/format-bytes.cjs'
 
 const emit = defineEmits(['insert', 'error'])
+const props = defineProps({ draftAssetIds: { type: Array, default: () => [] } })
 
 const pp = window.printpress
 const mediaUrl = (relative) =>
@@ -35,6 +37,9 @@ const query = ref('')
 const activeTags = ref([])
 const favoriteOnly = ref(false)
 const includeArchived = ref(false)
+const category = ref('design')
+const usage = ref(null)
+const usageOpen = ref(false)
 const loading = ref(false)
 const error = ref('')
 const editing = reactive({ id: null, name: '', tags: '' })
@@ -50,6 +55,7 @@ async function refresh() {
   try {
     const res = await pp.listAssets({
       query: query.value.trim() || undefined,
+      category: category.value,
       tags: activeTags.value.length ? activeTags.value : undefined,
       favoriteOnly: favoriteOnly.value || undefined,
       includeArchived: includeArchived.value || undefined,
@@ -131,6 +137,17 @@ function toggleArchived() {
   resetPage()
   refresh()
 }
+function selectCategory(value) {
+  category.value = value
+  resetPage()
+  refresh()
+}
+async function toggleUsage() {
+  if (usageOpen.value) { usageOpen.value = false; return }
+  error.value = ''
+  try { usage.value = await pp.assetUsage(); usageOpen.value = true }
+  catch (err) { error.value = toUserMessage(err) }
+}
 function prevPage() {
   if (page.value > 1) {
     page.value--
@@ -169,8 +186,12 @@ async function openFolder() {
 }
 
 // 点击素材 → 交给父组件做会话保护 + 入画板（一次性撤销）
-function pick(item) {
-  emit('insert', item.assetId)
+async function pick(item) {
+  try {
+    if (category.value === 'photo') await pp.adoptAsset(item.assetId)
+    emit('insert', item.assetId)
+    if (category.value === 'photo') await refresh()
+  } catch (err) { error.value = toUserMessage(err) }
 }
 
 async function toggleFavoriteItem(item) {
@@ -228,7 +249,7 @@ const purgePending = ref(false)
 async function scanOrphans() {
   error.value = ''
   try {
-    const items = (await pp.listAssetOrphans()) || []
+    const items = (await pp.listAssetOrphans([...props.draftAssetIds])) || []
     orphans.value = { items, bytes: items.reduce((s, i) => s + (i.bytes || 0), 0) }
     if (!items.length) {
       error.value = '没有未引用的原件，无需清理。'
@@ -243,11 +264,11 @@ async function confirmPurge() {
   if (!orphans.value?.items.length) return
   const hashes = orphans.value.items.map((i) => i.hash)
   try {
-    const res = await pp.purgeAssetOrphans(hashes)
+    const res = await pp.purgeAssetOrphans(hashes, [...props.draftAssetIds])
     purgePending.value = false
     orphans.value = null
     await refresh()
-    error.value = `已清理 ${res.removed} 个孤立原件${res.kept ? `，${res.kept} 个因已被引用而跳过` : ''}。`
+    error.value = `已清理 ${res.removed} 个孤立原件，实际释放 ${formatBytes(res.bytes || 0)}${res.kept ? `；${res.kept} 个因已被引用而跳过` : ''}${res.failed?.length ? `；${res.failed.length} 个删除失败，请重新扫描` : ''}。`
   } catch (err) {
     error.value = toUserMessage(err)
     purgePending.value = false
@@ -271,8 +292,19 @@ onMounted(() => {
     <div class="asset-actions">
       <button data-testid="asset-import" :disabled="loading" @click="importDialog">＋ 导入图片</button>
       <button data-testid="asset-cleanup" :disabled="loading" title="扫描并清理不被任何工程或素材库引用的孤立原件" @click="scanOrphans">清理未引用</button>
+      <button data-testid="asset-usage" :disabled="loading" @click="toggleUsage">{{ usageOpen ? '收起盘点' : '空间盘点' }}</button>
       <button data-testid="asset-reset-filter" v-if="hasFilters" @click="() => { query=''; activeTags=[]; favoriteOnly=false; includeArchived=false; resetPage(); refresh() }">清除筛选</button>
       <button class="asset-open-folder" data-testid="asset-open-folder" :disabled="loading" title="在系统文件管理器里打开素材库原件所在的文件夹" @click="openFolder">打开素材库文件夹</button>
+    </div>
+
+    <div v-if="usageOpen && usage" class="asset-usage" data-testid="asset-usage-panel">
+      <strong>本机资源占用</strong>
+      <p>原件 {{ usage.uniqueOriginals }} 份 · {{ formatBytes(usage.originalBytes) }}；缩略图 {{ formatBytes(usage.thumbnailBytes) }}；打印归档 {{ formatBytes(usage.archiveBytes) }}；导入暂存 {{ formatBytes(usage.stagingBytes) }}</p>
+      <p>可检查的孤立原件 {{ usage.orphanCount }} 份 · {{ formatBytes(usage.orphanBytes) }}（清理前会再次核对引用）</p>
+      <div v-for="item in usage.datasets" :key="item.datasetId" class="asset-usage-row">
+        <b>{{ item.name }}</b> · 照片 {{ item.photoCount }} 张 · 匹配 {{ item.matchedPeople }}/{{ item.rowCount }} 人<br>
+        逻辑占用 {{ formatBytes(item.logicalBytes) }} · 独占 {{ formatBytes(item.exclusiveBytes) }} · 共享 {{ formatBytes(item.sharedBytes) }}
+      </div>
     </div>
 
     <input
@@ -285,6 +317,8 @@ onMounted(() => {
     />
 
     <div class="asset-filters" v-if="allTags.length || true">
+      <button class="chip" :class="{ on: category === 'design' }" data-testid="asset-category-design" @click="selectCategory('design')">设计素材</button>
+      <button class="chip" :class="{ on: category === 'photo' }" data-testid="asset-category-photo" @click="selectCategory('photo')">名单照片</button>
       <button class="chip" :class="{ on: favoriteOnly }" data-testid="asset-fav-filter" @click="toggleFavorite">★ 收藏</button>
       <button class="chip" :class="{ on: includeArchived }" data-testid="asset-archived-filter" @click="toggleArchived">含归档</button>
       <button
@@ -394,6 +428,9 @@ onMounted(() => {
 .asset-purge-actions button { flex: 1; font-size: 12px; padding: 6px; }
 .asset-purge-actions button:first-child { border-color: var(--warn); color: var(--warn); background: var(--paper-card); }
 .asset-list { display: flex; flex-direction: column; gap: 7px; max-height: calc(100vh - 360px); overflow: auto; }
+.asset-usage{padding:9px;margin:8px 0;border:1px solid var(--line);border-radius:7px;background:var(--paper);font-size:11px;line-height:1.6;max-height:230px;overflow:auto}
+.asset-usage p{margin:5px 0;color:var(--stone)}
+.asset-usage-row{padding:5px 0;border-top:1px solid var(--line)}
 .asset-card { display: grid; grid-template-columns: 46px 1fr auto; grid-template-areas: 'thumb meta actions' 'edit edit edit'; gap: 6px 8px; align-items: center; padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); cursor: pointer; }
 .asset-card.archived { opacity: 0.6; }
 .asset-thumb { grid-area: thumb; width: 46px; height: 46px; border-radius: 5px; overflow: hidden; background: var(--paper-card); display: flex; align-items: center; justify-content: center; }

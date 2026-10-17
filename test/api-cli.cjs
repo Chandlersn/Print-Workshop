@@ -85,6 +85,10 @@ const ADDED_CHANNELS = [
   'photo:cancelImport',
   'photo:tasks',
   'photo:report',
+  'photo:exportIssues',
+  'photo:overrideGet',
+  'photo:overrideSet',
+  'photo:overrideClear',
   'dataset:setPhotoMatchColumn',
   'dataset:importFile',
   'dataset:deleteBatch',
@@ -121,6 +125,7 @@ const ADDED_CHANNELS = [
   'asset:listOrphans',
   'asset:purgeOrphans',
   'asset:openFolder',
+  'asset:usage',
   // 应用内更新（I-35）：信标只负责提示，这两条才真下载 / 真安装；能力经 ctx.autoUpdate 注入
   'app:startUpdate',
   'app:installUpdate',
@@ -132,6 +137,7 @@ const ADDED_CHANNELS = [
   'design:packageCancelExport',
   'design:packagePickFont',
   // 分批出片（S1.3-b/c）：按整纸切批的进度与取消（进度是事件，取消是操作）
+  'print:photoPreflight',
   'print:cancel',
 ]
 

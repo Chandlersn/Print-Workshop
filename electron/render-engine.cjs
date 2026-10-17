@@ -40,7 +40,10 @@ function mimeFor(rel) {
 function readMediaFile(rel) {
   if (!DATA_DIR || !rel) return null
   try {
-    const abs = resolveInsideDataDir(String(rel).replace(/\\/g, '/'))
+    const relative = String(rel).replace(/\\/g, '/')
+    const abs = /^(design-assets|ephemeral-assets)\//.test(relative)
+      ? require('./asset-storage.cjs').resolveAssetPath(relative)
+      : resolveInsideDataDir(relative)
     if (!fs.existsSync(abs)) return null
     return fs.readFileSync(abs)
   } catch {
@@ -57,7 +60,8 @@ function inlineUrl(rel) {
 
 /**
  * 模板底图可能是两种形态（向后兼容）：
- * - `asset_<sha256>`（新）：原件在素材库池 `design-assets/`，取回其相对路径供 inlineUrl 读；
+ * - `asset_<sha256>`（新）：原件在两个池子之一（`design-assets/` 素材库、
+ *   `ephemeral-assets/` 临时底图，I-51），取回其相对路径供 inlineUrl 读；
  * - `print-bg/...`（旧，未迁移）：原样返回，inlineUrl 按数据目录相对路径读。
  */
 function resolveBackgroundMedia(background) {
@@ -196,11 +200,29 @@ function resolveTemplateDesign(template) {
   return doc
 }
 
-/** 一次批量任务共用经过校验的静态工程资源，预览与归档不重复读取大图。 */
-function prepareTemplateDesign(template, photos = null) {
+/**
+ * 一次批量任务共用经过校验的静态工程资源，预览与归档不重复读取大图。
+ *
+ * `options.outputDpi` 是出片分辨率（契约 I-49）：照片按图框毫米尺寸降到目标 DPI 再交给
+ * Chromium，PDF 体积随嵌入像素数等比下降。**传 `null` 表示原图**——归档快照必须走这条路，
+ * 它留的是原件字节，不是出片表征。预览同样不受影响（预览读的是 `html`，但只渲染一页）。
+ */
+function prepareTemplateDesign(template, photos = null, options = {}) {
   const design = resolveTemplateDesign(template)
-  if (!design) return { html: '', css: '', fontFamilies: [], info: null }
+  if (!design) return { html: '', css: '', fontFamilies: [], info: null, output: null, bake: null }
   const { renderDesign, imageDpi } = require('./design-layout.cjs')
+  const outputDpi = require('./output-dpi.cjs')
+  /**
+   * 固定图片烘焙（契约 I-50）。**这里只读缓存、不渲染**：真正把带效果的固定图层烘成 PNG
+   * 要拉离屏窗口截图（异步），而本函数是同步的（`buildBatchHtml` 被预览、CLI、二十来个
+   * 测试同步调用）。所以出片动作前先 `await printDomain.warmBatchBakes(...)` 预跑，
+   * 到这里只做命中替换；**没命中就不烘**，该图层照旧按原样渲染，绝不为了烘焙把链路改成异步。
+   *
+   * `bake: false` 显式关掉（归档快照用）：归档留原件，不留出片表征——与 I-49 同一条纪律。
+   */
+  const bake = options.bake === false
+    ? { stats: null, overrides: new Map() }
+    : outputDpi.readFixedBakes({ design, dpi: options.outputDpi })
   const assetUrls = new Map()
   const renderOptions = {
     classPrefix: 'print-design',
@@ -213,17 +235,55 @@ function prepareTemplateDesign(template, photos = null) {
       assetUrls.set(asset.path, url)
       return url
     },
+    // 命中烘焙件的图层改画那张 PNG；未命中的图层原样返回 null（渲染侧照旧走 CSS 效果）
+    ...(bake.overrides.size ? { bakedLayer: (layer) => bake.overrides.get(layer.id) || null } : {}),
   }
   const rendered = renderDesign(design, renderOptions)
+  /**
+   * 出片分辨率（契约 I-49）。
+   *
+   * **规划与编码分开**：规划只靠 `photos.geometry`（prepareRows 顺手量到的），零额外 I/O，
+   * 所以预览也能准确报出「这次大约多大」；编码才真的读原件、缩放、落盘。
+   *
+   * `encodeDerivatives:false`（预览用）时**不生成派生件**，照片照旧走原件 URL——
+   * 预览要的是「排版对不对」，而 500 张首编码约 25 秒，不该让每次预览都卡这一下。
+   * 此时 `stats.encoded === false`，界面据此把数字标成「预计」而不是「实际」。
+   */
+  const output = photos
+    ? (options.encodeDerivatives === false
+      ? { stats: outputDpi.planDerivatives({ design, photos, dpi: options.outputDpi }).stats, urlFor: (assetId) => `pp://media/${assetId}` }
+      : outputDpi.prepareDerivatives({ design, photos, dpi: options.outputDpi }))
+    : null
+  /**
+   * 记录 × 图层的照片 URL。`byRecord` 存的是 **assetId**（见 photo-library.prepareRows），
+   * URL 在这里按档位决定：命中派生件用派生件，否则回原件。
+   *
+   * 非字符串一律**原样返回**（null / undefined）：design-layout 靠 `url !== null` 区分
+   * 「该留白」与「该显示占位框」，改成统一字符串会把这个区分吃掉。
+   */
+  const photoUrlOf = (record, layer) => {
+    const assetId = photos?.byRecord.get(record)?.[layer.bindColumn]
+    if (typeof assetId !== 'string') return assetId
+    return output ? output.urlFor(assetId, layer) : `pp://media/${assetId}`
+  }
   // 每个实际印出的成品都需要自己的 SVG 效果 ID。图片资源和 CSS 仍只准备一次。
   const hasEffects = !!design.artboard.backgroundPaint || design.layers.some(layer => layer.visible && !layer.editorOnly && (layer.fillPaint || layer.shadow))
   const variable = design.layers.some(layer => layer.variable && layer.visible && !layer.editorOnly)
-  const renderInstance = hasEffects || variable ? record => renderDesign(design, { ...renderOptions, geometryOnly: true, requirePhotos: true, photoUrl: layer => photos?.byRecord.get(record)?.[layer.bindColumn] }).html : () => rendered.html
+  const renderInstance = hasEffects || variable ? record => renderDesign(design, { ...renderOptions, geometryOnly: true, requirePhotos: true,
+    photoUrl: layer => photoUrlOf(record, layer), photoStyle: layer => photos?.overrides?.get(record)?.[layer.id] || null }).html : () => rendered.html
   // 报告只描述会印出来的东西：参考框既不该计入图层数，也不该拿它的图片去拉低最低 dpi。
   const printed = design.layers.filter((layer) => !layer.editorOnly)
   const dpi = printed.filter((layer) => layer.visible && layer.opacity > 0 && layer.type === 'image' && !layer.variable)
     .map((layer) => imageDpi(layer, design.assets[layer.assetId]))
-  return { ...rendered, renderInstance, info: { name: design.name, revision: design.revision, layerCount: printed.length, minDpi: dpi.length ? Math.min(...dpi) : null } }
+  return {
+    ...rendered,
+    renderInstance,
+    info: { name: design.name, revision: design.revision, layerCount: printed.length, minDpi: dpi.length ? Math.min(...dpi) : null },
+    output: output?.stats || null,
+    // 固定图片烘焙统计（I-50）：`baked` 个带效果的固定图层已被替换成单张 PNG，
+    // `pixels` 是这些 PNG 的像素数——**只嵌一份**，所以计入体积预估时要乘 1 而不是乘页数。
+    bake: bake.stats,
+  }
 }
 
 // 未知纸张的回退默认显式命名，不依赖数组顺序（顺序只管下拉展示）

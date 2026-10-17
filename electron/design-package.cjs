@@ -17,6 +17,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { resolveInsideDataDir } = require('./store.cjs')
+const { resolveAssetPath } = require('./asset-storage.cjs')
 const { normalizeDesign } = require('./design-layout.cjs')
 const designs = require('./designs.cjs')
 const fonts = require('./fonts.cjs')
@@ -103,11 +104,11 @@ function exportPackage(o = {}) {
     const hash = assetId.slice('asset_'.length)
     resources.push({
       path: `images/${hash}${ext}`, role: 'image', sha256: hash,
-      bytes: fs.statSync(resolveInsideDataDir(info.path)).size,
+      bytes: fs.statSync(resolveAssetPath(info.path)).size,
       mime: info.mime, width: info.width, height: info.height, name: info.name,
     })
     // 图片本身就是压缩格式，再 deflate 只是白烧 CPU ⇒ store
-    imageEntries.push({ name: `images/${hash}${ext}`, filePath: resolveInsideDataDir(info.path), store: true })
+    imageEntries.push({ name: `images/${hash}${ext}`, filePath: resolveAssetPath(info.path), store: true })
   }
 
   // 字体：只携带**已上传**字体（doc.fontAssets 里有的）；系统字体不打包，

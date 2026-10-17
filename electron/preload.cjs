@@ -103,6 +103,10 @@ contextBridge.exposeInMainWorld('printpress', {
   cancelPhotoImport: (taskId) => invoke('photo:cancelImport', { taskId }),
   photoImportTasks: (datasetId) => invoke('photo:tasks', datasetId ? { datasetId } : {}),
   photoReport: (payload) => invoke('photo:report', payload),
+  exportPhotoIssues: (payload) => invoke('photo:exportIssues', payload),
+  getPhotoOverride: (payload) => invoke('photo:overrideGet', payload),
+  setPhotoOverride: (payload) => invoke('photo:overrideSet', payload),
+  clearPhotoOverride: (payload) => invoke('photo:overrideClear', payload),
   setPhotoMatchColumn: (datasetId, key) => invoke('dataset:setPhotoMatchColumn', { datasetId, key }),
   onPhotoProgress: (cb) => {
     const handler = (_e, progress) => cb(progress)
@@ -168,12 +172,14 @@ contextBridge.exposeInMainWorld('printpress', {
   adoptAsset: (id, meta) => invoke('asset:adopt', id, meta),
   discardEphemeralAsset: (assetId, exceptDesignId) => invoke('asset:discardEphemeral', { assetId, exceptDesignId }),
   rebuildAssetThumb: (id) => invoke('asset:rebuildThumb', id),
-  listAssetOrphans: () => invoke('asset:listOrphans'),
-  purgeAssetOrphans: (hashes) => invoke('asset:purgeOrphans', hashes),
+  listAssetOrphans: (protectedIds) => invoke('asset:listOrphans', { protectedIds }),
+  purgeAssetOrphans: (hashes, protectedIds) => invoke('asset:purgeOrphans', { hashes, protectedIds }),
+  assetUsage: () => invoke('asset:usage'),
   openAssetFolder: () => invoke('asset:openFolder'),
 
   // 打印
   printValidate: (payload) => invoke('print:validate', payload),
+    printPhotoPreflight: (payload) => invoke('print:photoPreflight', payload),
   printGenerate: (payload) => invoke('print:generate', payload),
   printExportPdf: (payload) => invoke('print:exportPdf', payload),
   printSend: (payload) => invoke('print:send', payload),

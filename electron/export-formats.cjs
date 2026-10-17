@@ -24,6 +24,35 @@ const FORMATS = Object.freeze({
 /** 所有被接受的扩展名（不含点），供报错文案使用。 */
 const KNOWN_EXTS = Object.freeze([...new Set(Object.values(FORMATS).flatMap(format => format.exts))])
 
+/**
+ * 出片分辨率档位——**唯一权威源**。
+ *
+ * 两条链路读它：画布导出（把工程栅格化成一张图）与批量出片（把照片降到图框需要的像素）。
+ * 它们问的是同一个问题——「这一英寸印多少个像素」——所以档位必须是同一组，
+ * 否则用户会在导出面板看到 150/300/600、在打印中心看到另一组（抄第二份必漂移）。
+ */
+const OUTPUT_DPI_VALUES = Object.freeze([150, 300, 600])
+const DEFAULT_OUTPUT_DPI = 300
+
+/**
+ * 归一化出片分辨率。**返回值里 `null` 恒等于「原图，不降采样」**——这是内部唯一表示，
+ * 全程只此一种含义，调用方不必再判断「null 是没传还是不要降」。
+ *
+ * - `undefined` / `''` → 未指定，取默认 300
+ * - `null` / `'original'` / `'none'` → 原图（不降采样）
+ * - `150` / `300` / `600` → 该档位
+ * - 其余 → 报错（不静默回退：用户选了 200 却被当成 300 是看不见的错）
+ */
+function normalizeOutputDpi(value) {
+  if (value === undefined || value === '') return DEFAULT_OUTPUT_DPI
+  if (value === null || value === 'original' || value === 'none') return null
+  const dpi = Number(value)
+  if (!OUTPUT_DPI_VALUES.includes(dpi)) {
+    throw new Error(`出片分辨率仅支持 ${OUTPUT_DPI_VALUES.join('、')} DPI 或原图`)
+  }
+  return dpi
+}
+
 function normalizeFormat(value) {
   if (value === undefined || value === null || value === '') return 'png'
   const key = String(value).toLowerCase()
@@ -86,4 +115,7 @@ function estimateOutputBytes({ width, height, format, quality } = {}) {
   return Math.round(width * height * perPixel)
 }
 
-module.exports = { FORMATS, KNOWN_EXTS, normalizeFormat, normalizeQuality, extensionOf, formatOfPath, estimateOutputBytes }
+module.exports = {
+  FORMATS, KNOWN_EXTS, normalizeFormat, normalizeQuality, extensionOf, formatOfPath, estimateOutputBytes,
+  OUTPUT_DPI_VALUES, DEFAULT_OUTPUT_DPI, normalizeOutputDpi,
+}

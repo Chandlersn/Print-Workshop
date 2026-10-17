@@ -210,6 +210,9 @@ async function onInstallUpdate() {
 // cacheOk 区分「真的是 0」与「查询失败」：两者都让cacheSize=0，
 // 但语义相反——失败时显示「已无可清理缓存」是把故障说成了成功。
 const cacheSize = ref(0)
+// 出片派生件（I-49）：不在 userDataDir 而在数据目录的 photo-out/，但同属可再生缓存。
+// 单独记一份，按钮上把两块一起报——用户关心的是「能收回多少地方」，不是它在哪个目录。
+const derivativeSize = ref(0)
 const cacheOk = ref(true)
 const clearingCache = ref(false)
 const cacheMsg = ref('')      // 点击后的结果文案（含「下次启动清」的如实交代）
@@ -221,6 +224,9 @@ function fmtCacheSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** 按钮上显示的是「这一次能收回多少」：系统缓存 + 出片派生件 */
+const reclaimableSize = computed(() => (cacheSize.value || 0) + (derivativeSize.value || 0))
+
 function openAbout() {
   showAbout.value = true
   cacheMsg.value = ''
@@ -231,9 +237,11 @@ async function refreshCacheInfo() {
   try {
     const r = await window.printpress.getCacheInfo()
     cacheSize.value = r && r.size ? r.size : 0
+    derivativeSize.value = r && r.derivatives && r.derivatives.bytes ? r.derivatives.bytes : 0
     cacheOk.value = true
   } catch {
     cacheSize.value = 0
+    derivativeSize.value = 0
     cacheOk.value = false
   }
 }
@@ -275,6 +283,15 @@ async function onClearCache() {
     } catch (err) {
       cacheMsgFail.value = true
       parts.push('工程残留清理失败：' + toUserMessage(err))
+    }
+    // 出片派生件（I-49）：内容寻址、可重建，删了下次出片会重新生成。
+    // 正在出片时主进程会拒绝删并给出原因，这里照原话报出来。
+    const d = r.derivatives || {}
+    if (d.skipped) parts.push(d.reason)
+    else if (d.count) parts.push(`清理了 ${d.count} 个出片派生件${d.bytes >= 1024 ? `（${fmtCacheSize(d.bytes)}）` : ''}`)
+    if (d.failed) {
+      cacheMsgFail.value = true
+      parts.push(`${d.failed} 项出片缓存未能清理，文件可能被占用或无访问权限，请稍后重试`)
     }
     if (!parts.length) parts.push('已无可清理的缓存与残留')
     cacheMsg.value = parts.join('；')
@@ -442,14 +459,14 @@ onMounted(async () => {
             </span>
           </div>
           <div class="about-row">
-            <span class="ar-label" title="系统缓存可安全清理（会自动重建）；「残留」是已删除工程留下的版本文件，删了不可恢复">缓存与残留</span>
+            <span class="ar-label" title="系统缓存与出片派生件都可安全清理（会自动重建）；「残留」是已删除工程留下的版本文件，删了不可恢复">缓存与残留</span>
             <span class="ar-value check-group">
               <button class="footer-btn" :disabled="clearingCache" @click="onClearCache">
-                {{ clearingCache ? '清理中…' : '清理缓存与残留（' + fmtCacheSize(cacheSize) + '）' }}
+                {{ clearingCache ? '清理中…' : '清理缓存与残留（' + fmtCacheSize(reclaimableSize) + '）' }}
               </button>
               <span v-if="!clearingCache && !cacheOk" class="cr cr-fail">缓存大小读取失败</span>
               <span v-else-if="!clearingCache && cacheMsg" class="cr" :class="cacheMsgFail ? 'cr-fail' : 'cr-warn'">{{ cacheMsg }}</span>
-              <span v-else-if="!clearingCache && cacheSize === 0" class="cr cr-ok">系统缓存已空</span>
+              <span v-else-if="!clearingCache && reclaimableSize === 0" class="cr cr-ok">缓存已空</span>
             </span>
           </div>
           <div class="about-row">
@@ -600,7 +617,9 @@ onMounted(async () => {
   gap: 12px;
 }
 
-.ar-label { font-size: 13px; color: var(--stone); }
+/* 标签列不许被压缩：结果文案可能很长（如「…被系统占用，将在下次启动时清理；清理了 3 个出片派生件（2.0 MB）」），
+   一旦允许收缩，中文标签会退化成逐字换行的竖排（「缓存 / 与残 / 留」）——实测截图可见。 */
+.ar-label { flex: 0 0 auto; white-space: nowrap; font-size: 13px; color: var(--stone); }
 
 .ar-value { font-size: 13px; color: var(--ink); }
 

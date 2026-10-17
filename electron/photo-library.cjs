@@ -2,6 +2,7 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const XLSX = require('xlsx')
 const { loadJson, saveJson } = require('./store.cjs')
 const { resolveInsideDataDir } = require('./store.cjs')
 const dataset = require('./dataset.cjs')
@@ -424,8 +425,9 @@ async function importFolder({ datasetId, column, folder, taskId: requestedTaskId
           const libraryBefore = library.snapshotImportEntry(assetId)
           let created = false
           try { designs.assetInfo(assetId) } catch {
-            const hash = assetId.slice(6)
-            created = !['png', 'jpg', 'jpeg'].some(ext => fs.existsSync(resolveInsideDataDir(`design-assets/${hash}.${ext}`)))
+            // 两个池子都算「已存在」（I-51）：临时池里的同内容照片不是本次导入创造的，
+            // 回滚时不能删它——删了会吃掉别的绑定正在用的照片。
+            created = !designs.originalExists(assetId.slice(6))
           }
           task.assets.push({ assetId, created, libraryBefore, attempted: true })
           task.state = 'staging'
@@ -435,7 +437,7 @@ async function importFolder({ datasetId, column, folder, taskId: requestedTaskId
           fs.writeFileSync(staged, bytes, { flag: 'wx' })
           checkCanceled()
           const asset = designs.importImageBuffer(fs.readFileSync(staged), path.basename(file.name), 'ephemeral')
-          library.upsert(asset, {}, { makeThumbnail })
+          library.upsert(asset, { role: 'photo' }, { makeThumbnail })
           merged.set(group.key, [{ name: file.name, assetId: asset.id }])
         }
       } catch (err) {
@@ -525,7 +527,7 @@ function recoverPendingImports() {
       if (published) {
         for (const file of task.binding.files.filter(item => item.assetId)) {
           designs.setAssetSource(file.assetId, 'managed')
-          library.upsert(designs.assetInfo(file.assetId), {}, {})
+          library.upsert(designs.assetInfo(file.assetId), { role: 'photo' }, {})
         }
         rollbackTask({ ...task, assets: task.assets.filter(asset => !task.binding.files.some(file => file.assetId === asset.assetId)) })
         task.state = 'recovered'
@@ -580,25 +582,130 @@ async function report({ datasetId, column, rows } = {}) {
   }
 }
 
+/** Verify only photos used by the selected print rows. Return original dataset row numbers. */
+async function preflightRows(ds, rowIndexes) {
+  const selected = rowIndexes || ds.rows.map((_, index) => index)
+  const column = ds.photoMatchColumn
+  if (!column) return {
+    column: null, enabled: false, total: selected.length,
+    counts: { matched: 0, empty: selected.length, missing: 0, ambiguous: 0, invalid: 0, broken: 0 },
+    results: [], bindingRevision: null,
+  }
+  if (!ds.columns.some(item => item.key === column)) throw new Error('配图列已不存在，请到数据页重新选择')
+  const binding = bindings().slice().reverse().find(item => item.datasetId === ds.id) || null
+  const result = matchPhotos(ds.rows, column, binding?.files || [], selected)
+  const verified = new Map()
+  for (const item of result.results) {
+    if (item.status !== 'matched') continue
+    if (!verified.has(item.assetId)) {
+      try { designs.assetInfo(item.assetId); verified.set(item.assetId, null) }
+      catch (err) { verified.set(item.assetId, err.message) }
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    const error = verified.get(item.assetId)
+    if (error) {
+      item.status = 'broken'
+      item.reason = error
+      delete item.assetId
+      result.counts.matched--
+      result.counts.broken++
+    }
+  }
+  return {
+    column, enabled: true, total: result.total, counts: result.counts, results: result.results,
+    bindingRevision: crypto.createHash('sha256').update(JSON.stringify(binding)).digest('hex'),
+  }
+}
+
+/** Export the selected problem rows as typed Excel strings, preserving IDs and leading zeros. */
+async function exportIssues({ datasetId, column, rows, identifierKey, savePath }, { saveFile } = {}) {
+  const ds = dataset.getDataset(String(datasetId))
+  if (!ds.photoMatchColumn || ds.photoMatchColumn !== column) throw new Error('配图列已变化，请重新检查后导出')
+  const identifier = ds.columns.find(item => item.key === identifierKey)
+  if (!identifier) throw new Error('识别字段已不存在，请重新选择')
+  const selected = rows == null ? ds.rows.map((_, index) => index) : rows
+  if (!Array.isArray(selected) || selected.some(index => !Number.isInteger(index) || index < 0 || index >= ds.rows.length)
+      || new Set(selected).size !== selected.length) throw new Error('导出行范围无效')
+  const check = await preflightRows(ds, selected)
+  const issues = check.results.filter(item => item.status !== 'matched')
+  if (!issues.length) return { canceled: false, count: 0 }
+  let target = savePath ? String(savePath) : ''
+  if (!target) {
+    if (typeof saveFile !== 'function') throw new Error('缺少保存路径')
+    const result = await saveFile({ title: '导出照片问题清单', defaultPath: '照片问题清单.xlsx', filters: [{ name: 'Excel 工作簿', extensions: ['xlsx'] }] })
+    if (result.canceled || !result.filePath) return { canceled: true, count: 0 }
+    target = result.filePath
+  }
+  if (!path.isAbsolute(target) || path.extname(target).toLowerCase() !== '.xlsx') throw new Error('请指定绝对路径的 .xlsx 文件')
+  const statusText = { empty: '空值', missing: '缺图', ambiguous: '同名冲突', invalid: '名称无效', broken: '坏图' }
+  const cells = [
+    ['原始行号', identifier.alias || identifier.key, '配图值', '问题类型', '说明'],
+    ...issues.map(item => [item.rowIndex + 1, String(ds.rows[item.rowIndex][identifier.key] ?? ''),
+      item.name, statusText[item.status] || item.status,
+      item.reason || (item.candidates ? `候选：${item.candidates.join('、')}` : item.status === 'missing' || item.status === 'empty' ? '出片留白' : '')]),
+  ]
+  const sheet = XLSX.utils.aoa_to_sheet(cells)
+  for (const address of Object.keys(sheet)) {
+    if (address.startsWith('!') || address[0] === 'A' && address !== 'A1') continue
+    sheet[address].t = 's'
+    sheet[address].v = String(sheet[address].v ?? '')
+    delete sheet[address].f
+  }
+  const book = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(book, sheet, '照片问题')
+  fs.writeFileSync(target, XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }))
+  return { canceled: false, count: issues.length, path: target }
+}
+
 /** Resolve only the selected records; unrelated missing photos must not block partial output. */
-function prepareRows(datasetId, columns, records, rowIndexes = null) {
+/**
+ * 为出片准备「记录 → 列 → 照片」的映射。
+ *
+ * **byRecord 里存的是 assetId，不是 URL**：同一张照片在不同出片分辨率下要走不同的 URL
+ * （原件 / 降采样派生件），URL 由渲染层按档位决定（见 output-dpi.cjs 与 render-engine）。
+ * 存 URL 会让「降采样」变成一个必须在数据层就定死的选择。
+ */
+function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateOnly = false, knownGeometry, templateId } = {}) {
   const ds = dataset.getDataset(datasetId)
   const all = bindings()
   const byRecord = new Map(records.map(row => [row, Object.fromEntries(columns.map(key => [key, null]))]))
   const assets = new Set()
+  /**
+   * assetId → { width, height, orientation, mime }（宽高是**显示坐标**，见 designs.validateImage）。
+   *
+   * 下面为了「照片缺失/损坏要立刻报错」本来就要读一遍原件，这里把读出来的几何顺手留下：
+   * 出片分辨率（I-49）规划降采样目标只靠它，**不必再读第二遍原件**。500 张照片读两遍就是
+   * 3.7 GB 的额外 I/O，且会让每次预览都卡住。
+   */
+  const geometry = new Map()
+  let unresolved = 0
   const column = ds.photoMatchColumn
-  if (!column || !columns.length) return { byRecord, assets: [] }
+  if (!column || !columns.length) return { byRecord, assets: [], geometry, overrides: new Map() }
   if (!ds.columns.some(c => c.key === column)) throw new Error('配图列已不存在，请到数据页重新选择')
   const binding = all.slice().reverse().find(b => b.datasetId === datasetId)
   const result = matchPhotos(records, column, binding?.files || [])
+  const overrides = templateId ? require('./photo-overrides.cjs').forRecords(ds, templateId, records, rowIndexes, result) : new Map()
     for (const item of result.results) {
       if (item.status === 'missing' || item.status === 'empty') continue
-      if (item.status !== 'matched') throw new Error(`照片出片检查：第 ${(rowIndexes?.[item.rowIndex] ?? item.rowIndex) + 1} 行「${item.name || '空值'}」未匹配，请到变量照片库处理`)
-      if (!assets.has(item.assetId)) designs.assetInfo(item.assetId)
+      if (item.status !== 'matched') {
+        if (estimateOnly) { unresolved++; continue }
+        throw new Error(`照片出片检查：第 ${(rowIndexes?.[item.rowIndex] ?? item.rowIndex) + 1} 行「${item.name || '空值'}」未匹配，请到变量照片库处理`)
+      }
+      if (!assets.has(item.assetId)) {
+        try {
+          const a = estimateOnly
+            ? knownGeometry?.get(item.assetId) || designs.assetGeometry(item.assetId)
+            : designs.assetInfo(item.assetId)
+          geometry.set(item.assetId, { width: a.width, height: a.height, orientation: a.orientation, mime: a.mime })
+        } catch (err) {
+          if (!estimateOnly) throw err
+          unresolved++
+        }
+      }
       assets.add(item.assetId)
-      for (const key of columns) byRecord.get(records[item.rowIndex])[key] = `pp://media/${item.assetId}`
+      for (const key of columns) byRecord.get(records[item.rowIndex])[key] = item.assetId
     }
-  return { byRecord, assets: [...assets] }
+  return { byRecord, assets: [...assets], geometry, overrides, unresolved }
 }
 
-module.exports = { importFolder, previewImport, cancelImport, report, scanFolder, prepareRows, recoverPendingImports, listTasks, LIMITS }
+module.exports = { importFolder, previewImport, cancelImport, report, preflightRows, exportIssues, scanFolder, prepareRows, recoverPendingImports, listTasks, LIMITS }

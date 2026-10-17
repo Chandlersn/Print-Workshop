@@ -212,6 +212,36 @@ try {
       Array.from({ length: LIMITS.groups + 1 }, () => ({})),
     ]) assert.throws(() => normalizeDesign({ ...doc, groups }), /图层|组|成员/)
   })
+  check('主进程写回的素材元数据（EXIF orientation）必须能过规范化，否则带图工程永远显示「未保存」', () => {
+    // I-49 起 `readAsset` 每次保存都按受信任原件把 orientation 写回素材记录。
+    //  normalizeDesign 若不放行，「保存 → 写回 → 再规范化」就不是不动点：渲染侧
+    //  `fingerprint(design)` 与 `fingerprint(已保存文档)` 永远差这一个字段，
+    // 界面一保存就仍旧是「未保存」（design-e2e「保存裁切图层」实测到的失败）。
+    const assetId = 'asset_photo'
+    const asset = { id: assetId, path: `design-assets/${'a'.repeat(64)}.jpg`, width: 800, height: 1200, name: '竖拍照片.jpg', mime: 'image/jpeg', orientation: 6, source: 'ephemeral' }
+    const doc = normalizeDesign({
+      ...document(),
+      layers: [...document().layers, { id: 'photo', type: 'image', name: '照片', assetId, x: 0, y: 0, w: 40, h: 60 }],
+      assets: { [assetId]: asset },
+    })
+    assert.equal(doc.assets[assetId].orientation, 6)
+    assert.deepEqual(normalizeDesign(doc), doc)
+    // 老工程没有这个字段时保持没有：不凭空给旧数据加字段（I-42 的兜底方向）
+    const legacyAsset = { ...asset }
+    delete legacyAsset.orientation
+    const legacy = normalizeDesign({ ...doc, assets: { [assetId]: legacyAsset } })
+    assert.ok(!('orientation' in legacy.assets[assetId]))
+    assert.throws(() => normalizeDesign({ ...doc, assets: { [assetId]: { ...asset, orientation: 9 } } }), /EXIF 方向/)
+    // 分池后（I-51）临时件原件的 path 是 ephemeral-assets/<hash>.<ext>：主进程按真身
+    // 写回的也必须是这个值，否则粘贴图的工程一保存就仍旧显示「未保存」。
+    const poolAsset = { ...asset, id: 'asset_poolphoto', path: `ephemeral-assets/${'b'.repeat(64)}.jpg` }
+    const poolDoc = normalizeDesign({
+      ...document(),
+      layers: [...document().layers, { id: 'photo2', type: 'image', name: '临时图', assetId: poolAsset.id, x: 0, y: 0, w: 40, h: 60 }],
+      assets: { [poolAsset.id]: poolAsset },
+    })
+    assert.deepEqual(normalizeDesign(poolDoc), poolDoc, '临时池路径必须同样是不动点')
+  })
   check('参考线验证单位、方向、有限数值和数量，且允许画布尺寸改变后保留线', () => {
     const doc = document()
     const guides = [{ id: 'x1', axis: 'x', position: 20.5 }, { id: 'y1', axis: 'y', position: 999 }]
@@ -238,6 +268,80 @@ try {
     assert.deepEqual(designs.getDesign(first.id, 1).guides, first.guides)
     const legacy = designs.saveDesign(flat)
     assert.equal(legacy.schemaVersion, 1)
+  })
+  check('复制图片样式到多张变量照片，保留内容、位置与素材引用，可整体撤销', () => {
+    const doc = normalizeDesign({ ...document(), layers: [
+      { id: 'source', type: 'image', variable: true, bindColumn: '姓名', x: 4, y: 8, w: 25, h: 35,
+        stroke: '#ffffff', strokeWidth: 1, shadow: { dxMm: 1, dyMm: 2, blurMm: 1, color: '#000000', opacity: 0.3 },
+        adjust: { brightness: 1.2, contrast: 1.1 }, blend: 'multiply' },
+      { id: 'target1', type: 'image', variable: true, bindColumn: '编号', x: 50, y: 20, w: 35, h: 45, stroke: '#ff0000', strokeWidth: 2 },
+      { id: 'target2', type: 'image', variable: true, bindColumn: '工号', x: 100, y: 40, w: 25, h: 35 },
+    ] })
+    const before = JSON.stringify(doc)
+    const style = edit.copyLayerStyle(doc, 'source')
+    const result = edit.applyLayerStyle(doc, ['target1', 'target2'], style)
+    assert.equal(result.applied, 2)
+    for (const layer of result.design.layers.slice(1)) {
+      assert.equal(layer.strokeWidth, 1)
+      assert.deepEqual(layer.shadow, doc.layers[0].shadow)
+      assert.deepEqual(layer.adjust, doc.layers[0].adjust)
+      assert.equal(layer.blend, 'multiply')
+    }
+    assert.equal(result.design.layers[1].bindColumn, '编号')
+    assert.deepEqual([result.design.layers[1].x, result.design.layers[1].y, result.design.layers[1].w, result.design.layers[1].h], [50, 20, 35, 45])
+    result.design.layers[1].shadow.dxMm = 9
+    assert.equal(result.design.layers[2].shadow.dxMm, 1)
+    assert.equal(JSON.stringify(doc), before)
+    assert.deepEqual(normalizeDesign(JSON.parse(before)), doc)
+    const reactiveStyle = require('vue').reactive(style)
+    assert.equal(edit.applyLayerStyle(doc, ['target1'], reactiveStyle).design.layers[1].shadow.dxMm, 1)
+  })
+  check('无描边的图片样式会清除目标旧效果，异类和锁定图层不会被涂刷', () => {
+    const doc = normalizeDesign({ ...document(), layers: [
+      { id: 'plain', type: 'image', variable: true, bindColumn: '姓名' },
+      { id: 'styled', type: 'image', variable: true, bindColumn: '编号', stroke: '#ffffff', strokeWidth: 2 },
+      { id: 'locked', type: 'image', variable: true, bindColumn: '工号', locked: true, stroke: '#ffffff', strokeWidth: 2 },
+      { id: 'text', type: 'text', text: '不改' },
+    ] })
+    const result = edit.applyLayerStyle(doc, ['styled', 'locked', 'text'], edit.copyLayerStyle(doc, 'plain'))
+    assert.equal(result.applied, 1)
+    assert.equal(result.design.layers[1].strokeWidth, undefined)
+    assert.equal(result.design.layers[2].strokeWidth, 2)
+    assert.equal(result.design.layers[3].text, '不改')
+    assert.throws(() => edit.applyLayerStyle(doc, ['text'], edit.copyLayerStyle(doc, 'plain')), /同类|样式/)
+  })
+  check('样式只作用于显式选中的组成员；文字格式复制保留各自内容与位置', () => {
+    const doc = normalizeDesign({ ...document(), layers: [
+      { id: 'source', type: 'text', text: '源', fontSize: 30, color: '#ff0000', x: 5 },
+      { id: 'first', type: 'text', text: '甲', x: 20 },
+      { id: 'second', type: 'text', text: '乙', x: 40 },
+    ], groups: [{ id: 'words', name: '两行', layerIds: ['first', 'second'] }] })
+    const result = edit.applyLayerStyle(doc, ['first'], edit.copyLayerStyle(doc, 'source'))
+    assert.equal(result.applied, 1)
+    assert.deepEqual(result.design.layers.map(layer => layer.text), ['源', '甲', '乙'])
+    assert.deepEqual(result.design.layers.map(layer => layer.x), [5, 20, 40])
+    assert.equal(result.design.layers[1].fontSize, 30)
+    assert.equal(result.design.layers[2].fontSize, 24)
+  })
+  check('整组缩放和旋转按共同中心计算，文字及边框同步缩放，出片几何与工程一致', () => {
+    const doc = normalizeDesign({ ...document(), layers: [
+      { id: 'a', type: 'rect', x: 0, y: 0, w: 10, h: 10, strokeWidth: 1 },
+      { id: 'b', type: 'text', text: '标题', x: 20, y: 0, w: 10, h: 10, fontSize: 20, letterSpacing: 2 },
+    ], groups: [{ id: 'ab', name: '组', layerIds: ['a', 'b'] }] })
+    const original = JSON.stringify(doc)
+    const scaled = edit.transformGroup(doc, 'ab', { scale: 2 })
+    assert.deepEqual(scaled.layers.map(layer => [layer.x, layer.y, layer.w, layer.h]), [[-15, -5, 20, 20], [25, -5, 20, 20]])
+    assert.equal(scaled.layers[0].strokeWidth, 2)
+    assert.equal(scaled.layers[1].fontSize, 40)
+    assert.equal(scaled.layers[1].letterSpacing, 4)
+    const rotated = edit.transformGroup(doc, 'ab', { rotation: 180 })
+    assert.deepEqual(rotated.layers.map(layer => [layer.x, layer.y, layer.rotation]), [[20, 0, 180], [0, 0, 180]])
+    assert.ok(renderDesign(scaled).html.includes('40pt'))
+    assert.equal(JSON.stringify(doc), original)
+    assert.deepEqual(normalizeDesign(scaled), scaled)
+    const locked = normalizeDesign({ ...doc, layers: [{ ...doc.layers[0], locked: true }, doc.layers[1]] })
+    assert.throws(() => edit.transformGroup(locked, 'ab', { scale: 2 }), /锁定/)
+    assert.throws(() => edit.transformGroup(doc, 'ab', { scale: 0 }), /范围/)
   })
   console.log(`\n${passed} design editor acceptance groups passed`)
 } finally {

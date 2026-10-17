@@ -91,6 +91,15 @@ jobs:
       - name: 照片匹配、原图 PDF 与归档回看（npm run test:photo-e2e）
         shell: bash
         run: mkdir -p e2e-logs && npm run test:photo-e2e 2>&1 | tee e2e-logs/04-photo-e2e.log
+      - name: 出片分辨率、EXIF 与归档原件
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:output-dpi-e2e 2>&1 | tee e2e-logs/05-output-dpi-e2e.log
+      - name: 固定图片效果缓存与多页复用
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:fixed-image-dedupe-e2e 2>&1 | tee e2e-logs/06-fixed-image-e2e.log
+      - name: 缓存统计与清理界面
+        shell: bash
+        run: mkdir -p e2e-logs && npm run test:about-cache-e2e 2>&1 | tee e2e-logs/07-about-cache-e2e.log
       # 测试自己会往 .workbuddy-ai/tmp/<…> 写失败截图与量测（design-e2e 失败时存 failure.png）。
       # 那是**隐藏目录**，而 upload-artifact 默认不收隐藏文件，所以先搬到非隐藏的 e2e-logs/ 再传。
       - name: 收拢失败现场
@@ -98,7 +107,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p e2e-logs
-          for d in design-acceptance design-png-acceptance photo-acceptance; do
+          for d in design-acceptance design-png-acceptance photo-acceptance output-dpi-e2e fixed-image-dedupe-e2e about-cache-e2e; do
             if [ -d ".workbuddy-ai/tmp/$d" ]; then cp -r ".workbuddy-ai/tmp/$d" "e2e-logs/"; fi
           done
           find e2e-logs -type f | head -60

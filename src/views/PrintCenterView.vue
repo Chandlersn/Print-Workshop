@@ -6,9 +6,11 @@
  */
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
+import PageHeader from '../components/PageHeader.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { resolveReprintScope, layoutFallbackText, filterRowIndexes } from '../lib/print-scope.cjs'
+import { formatBytes } from '../lib/format-bytes.cjs'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
@@ -21,6 +23,26 @@ const previewInfo = ref(null)
 const zoom = ref('75')
 const busy = ref(false)
 const previewPage = ref(0)
+const previewFrame = ref(null)
+const photoEdit = ref(null)
+const photoEditBusy = ref(false)
+const photoEditError = ref('')
+let photoEditSeq = 0
+let photoDrag = null
+/**
+ * 出片分辨率（契约 I-49）。值域与后端权威 `OUTPUT_DPI_VALUES` 一致，
+ * 「原图」用 `'original'`——后端把它归一化成 `null`。
+ *
+ * 为什么是**字符串**而不是数字：CustomSelect 的 value 要能表达「原图」这个非数字档位，
+ * 且字符串不会在 v-model 里被 Number 转换吃掉。
+ */
+const outputDpi = ref('300')
+const outputDpiOptions = [
+  { value: '150', label: '150 dpi（省体积）' },
+  { value: '300', label: '300 dpi（推荐）' },
+  { value: '600', label: '600 dpi（高精）' },
+  { value: 'original', label: '原图（不压缩）' },
+]
 const previewLoading = ref(false)
 const activeJobKey = ref('')
 const taskProgress = ref(null)
@@ -58,6 +80,15 @@ let previewSeq = 0
 const showValidate = ref(false)
 const validateResult = ref(null)
 const pendingAction = ref('')
+const pendingPhotoFingerprint = ref('')
+const photoPreflight = ref(null)
+const photoPreflightLoading = ref(false)
+const photoPreflightError = ref('')
+const photoIssueFilter = ref('')
+const photoIssuesOpen = ref(false)
+let photoPreflightSeq = 0
+const visiblePhotoIssues = computed(() => photoPreflight.value?.issues.filter(item => !photoIssueFilter.value || item.status === photoIssueFilter.value) || [])
+const photoStatusLabel = { missing: '缺图', ambiguous: '同名冲突', invalid: '名称无效', broken: '坏图' }
 /** 字段缺失是结构性错误，放行只会白版——弹窗中不可「仍要继续」 */
 const hasMissingIssue = computed(() =>
   Boolean(validateResult.value?.issues.some((i) => i.missing)))
@@ -306,8 +337,125 @@ function buildPayload() {
     // rows 必须是普通数组：Vue 响应式数组是 Proxy，经 IPC 结构化克隆会抛
     // 「An object could not be cloned.」，故显式拷贝一份再传
     rows: selRows.value ? [...selRows.value] : null,
+    // 出片分辨率（I-49）：后端 normalizeOutputDpi 认数字与 'original'，
+    // 非法值直接报错而不是静默回退到 300
+    outputDpi: outputDpi.value === 'original' ? 'original' : Number(outputDpi.value),
   }
 }
+
+async function loadPhotoPreflight() {
+  const seq = ++photoPreflightSeq
+  photoPreflight.value = null
+  photoPreflightError.value = ''
+  if (!ready.value) { photoPreflightLoading.value = false; return null }
+  photoPreflightLoading.value = true
+  try {
+    const result = await window.printpress.printPhotoPreflight(buildPayload())
+    if (seq !== photoPreflightSeq) return null
+    photoPreflight.value = result
+    return result
+  } catch (err) {
+    if (seq === photoPreflightSeq) photoPreflightError.value = toUserMessage(err)
+    return null
+  } finally {
+    if (seq === photoPreflightSeq) photoPreflightLoading.value = false
+  }
+}
+
+function showPhotoIssues(status) {
+  photoIssueFilter.value = status
+  photoIssuesOpen.value = true
+}
+
+function goPhotoIssue(item) {
+  if (photoPreflight.value?.photoColumn) gotoCell(selDs.value, item.rowIndex, photoPreflight.value.photoColumn)
+}
+
+function onPreviewFrameLoad(event) {
+  let doc
+  try { doc = event.target.contentDocument } catch { return }
+  if (!doc) return
+  doc.addEventListener('click', event => {
+    const img = event.target.closest?.('img[data-photo-layer-id]')
+    if (!img) return
+    const cell = img.closest('.cell')
+    const within = cell ? [...cell.parentElement.children].filter(item => item.classList.contains('cell')).indexOf(cell) : 0
+    const perPage = previewInfo.value?.layout?.perPage || 1
+    const position = (previewInfo.value?.previewPage ?? previewPage.value) * perPage + within
+    const rowIndex = selRows.value?.[position] ?? position
+    openPhotoEdit(rowIndex, img.dataset.photoLayerId)
+  })
+  doc.querySelectorAll('img[data-photo-layer-id]').forEach(img => { img.style.cursor = 'pointer'; img.title = '点击调整此人的照片取景' })
+}
+
+async function openPhotoEdit(rowIndex, layerId) {
+  const seq = ++photoEditSeq
+  photoEdit.value = null
+  photoEditError.value = ''
+  try {
+    const detail = await window.printpress.getDataset(selDs.value)
+    const rowId = detail.recordIds?.[rowIndex]
+    if (!rowId) throw new Error('人员记录已变化，请重新预览')
+    const key = { datasetId: selDs.value, templateId: selTpl.value, rowId, layerId }
+    const current = await window.printpress.getPhotoOverride(key)
+    if (seq !== photoEditSeq) return
+    if (!current.assetId) throw new Error('当前人员没有可调整的匹配照片')
+    photoEdit.value = { ...key, rowIndex, label: rowPreview(detail.rows[rowIndex]), assetId: current.assetId,
+      state: current.state, fit: current.fit, focal: { ...current.focal } }
+  } catch (err) { if (seq === photoEditSeq) photoEditError.value = toUserMessage(err) }
+}
+
+function startPhotoDrag(event) {
+  if (!photoEdit.value) return
+  photoDrag = { x: event.clientX, y: event.clientY, focal: { ...photoEdit.value.focal } }
+  event.currentTarget.setPointerCapture(event.pointerId)
+}
+function movePhotoDrag(event) {
+  if (!photoDrag || !photoEdit.value) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  const clamp = value => Math.max(0, Math.min(1, value))
+  photoEdit.value.focal.x = clamp(photoDrag.focal.x + (event.clientX - photoDrag.x) / rect.width)
+  photoEdit.value.focal.y = clamp(photoDrag.focal.y + (event.clientY - photoDrag.y) / rect.height)
+}
+function stopPhotoDrag() { photoDrag = null }
+
+async function savePhotoEdit(restore = false) {
+  if (!photoEdit.value || photoEditBusy.value) return
+  photoEditBusy.value = true
+  photoEditError.value = ''
+  const { datasetId, templateId, rowId, layerId, rowIndex } = photoEdit.value
+  try {
+    if (restore) await window.printpress.clearPhotoOverride({ datasetId, templateId, rowId, layerId })
+    else await window.printpress.setPhotoOverride({ datasetId, templateId, rowId, layerId,
+      fit: photoEdit.value.fit, focal: { x: photoEdit.value.focal.x, y: photoEdit.value.focal.y } })
+    await openPhotoEdit(rowIndex, layerId)
+    rebuildPreview()
+    loadPhotoPreflight()
+    say(restore ? '已恢复模板默认取景' : '已保存此人的照片取景')
+  } catch (err) { photoEditError.value = toUserMessage(err) }
+  finally { photoEditBusy.value = false }
+}
+
+/**
+ * 出片分辨率的界面读数。**必须带「约」字**——体积是模型不是预言（见 output-dpi 顶部），
+ * 导出完成后会用真实字节数覆盖。
+ */
+const outputHint = computed(() => {
+  const o = previewInfo.value?.output
+  if (!o) return null
+  const original = previewInfo.value.outputOriginalEstimateBytes
+  if (o.dpi == null) {
+    return { tone: '', text: `出片分辨率：原图 · 照片按原件嵌入${original ? ` · 所选范围照片预计约 ${formatBytes(original)}` : ''}${previewInfo.value.outputEstimateIncomplete ? ' · 部分照片信息不完整，暂不提供整批体积预估' : ''}` }
+  }
+  const parts = [`出片 ${o.dpi}dpi`]
+  if (o.optimized) parts.push(`${o.optimized} 张${o.encoded ? '已降到' : '预计降到'}目标像素`)
+  if (o.keptOriginal) parts.push(`${o.keptOriginal} 张保持原件`)
+  if (o.failed) parts.push(`${o.failed} 张${o.encoded ? '处理失败保持原件' : '暂无法估算'}`)
+  if (previewInfo.value.outputEstimateIncomplete) parts.push('部分照片信息不完整，暂不提供整批体积预估')
+  const est = previewInfo.value.outputEstimateBytes
+  if (est) parts.push(`所选范围照片预计约 ${formatBytes(est)}${original ? `（原图约 ${formatBytes(original)}）` : ''}`)
+  return { tone: 'dpi-good', text: parts.join(' · ') }
+})
 
 // 模板切换 → 自动带出绑定的数据集（模板保存时已绑定；旧模板未绑定时才需手选）
 watch(selTpl, () => {
@@ -377,7 +525,15 @@ watch(selDs, async () => {
 watch([selDs, selTpl, selRows], () => {
   if (previewPage.value !== 0) previewPage.value = 0
   else rebuildPreview()
+  photoIssuesOpen.value = false
+  photoEdit.value = null
+  photoEditError.value = ''
+  photoEditSeq++
+  loadPhotoPreflight()
 })
+// 换档位要重算预览里的体积读数。这里**只规划不编码**（后端 encodeDerivatives:false），
+// 所以切档位不会触发 500 张照片的首编码，可以放心即时刷新。
+watch(outputDpi, () => rebuildPreview())
 watch(previewPage, rebuildPreview)
 
 /** 校验 → 有空值先弹窗（可中断可放行），字段缺失不可放行；无问题直接执行 */
@@ -385,14 +541,22 @@ async function runAction(action) {
   if (!ready.value || busy.value || mismatched.value) return
   busy.value = true
   try {
+    const photo = await loadPhotoPreflight()
+    if (!photo) { say(photoPreflightError.value || '出片范围已变化，请重新检查'); return }
+    if (!photo.canOutput) {
+      showPhotoIssues('')
+      say('选中范围内有照片冲突或坏图，请先处理问题行')
+      return
+    }
     const v = await window.printpress.printValidate(buildPayload())
     if (v.issues.length > 0 || (v.duplicates && v.duplicates.length)) {
       validateResult.value = v
       pendingAction.value = action
+      pendingPhotoFingerprint.value = photo.fingerprint
       showValidate.value = true
       return
     }
-    await execute(action)
+    await execute(action, photo.fingerprint)
   } catch (err) {
     // 不允许静默失败：守卫之外的任何异常都要给用户可见反馈
     say(`操作失败：${toUserMessage(err)}`)
@@ -409,8 +573,15 @@ async function confirmProceed() {
   validateResult.value = null
   busy.value = true
   try {
-    await execute(action)
+    const photo = await loadPhotoPreflight()
+    if (!photo || !photo.canOutput || photo.fingerprint !== pendingPhotoFingerprint.value) {
+      if (photo && !photo.canOutput) showPhotoIssues('')
+      say('照片预检结果已变化，请重新检查后出片')
+      return
+    }
+    await execute(action, photo.fingerprint)
   } finally {
+    pendingPhotoFingerprint.value = ''
     busy.value = false
   }
 }
@@ -418,6 +589,7 @@ async function confirmProceed() {
 function cancelProceed() {
   showValidate.value = false
   pendingAction.value = ''
+  pendingPhotoFingerprint.value = ''
   validateResult.value = null
   say('已中断，可先回数据页补全空值')
 }
@@ -458,8 +630,22 @@ function goDupRow(rowIndex) {
   gotoCell(selDs.value, rowIndex, key)
 }
 
-async function execute(action) {
+/**
+ * 出片结果的如实描述（I-49 的「不静默」）。用的是**真实统计**，不是估算。
+ * 只描述照片这一项——底图分辨率是另一件事（预览栏的 bgDpi 读数），不混在一句话里。
+ */
+function outputResultText(stats) {
+  if (!stats) return ''
+  if (stats.dpi == null) return '；出片分辨率：原图'
+  const parts = [`${stats.dpi}dpi`]
+  if (stats.optimized) parts.push(`照片降采样 ${stats.optimized} 张`)
+  if (stats.failed) parts.push(`${stats.failed} 张读取失败已回原件`)
+  return `；${parts.join('，')}`
+}
+
+async function execute(action, preflightFingerprint) {
   const payload = buildPayload()
+  payload.preflightFingerprint = preflightFingerprint
   activeJobKey.value = `ui-${Date.now()}-${Math.random().toString(36).slice(2)}`
   payload.jobKey = activeJobKey.value
   taskProgress.value = null
@@ -468,10 +654,12 @@ async function execute(action) {
     if (action === 'pdf') {
       const r = await window.printpress.printExportPdf(payload)
       if (r.canceled) { say('已取消导出'); return }
-      say(`PDF 已导出（${previewInfo.value ? previewInfo.value.pageCount : '?'} 页）`)
+      // 体积用**真实字节数**报（估算只是模型，见 I-49）；页数分批时以实际合并结果为准
+      const pages = r.pages ?? previewInfo.value?.pageCount ?? '?'
+      say(`PDF 已导出（${pages} 页${r.bytes ? ` · ${formatBytes(r.bytes)}` : ''}）${outputResultText(r.output)}`)
     } else {
       const r = await window.printpress.printSend(payload)
-      if (r.ok) say('已发送打印机')
+      if (r.ok) say(`已发送打印机${outputResultText(r.output)}`)
       // Chromium 的 print 回调给的是英文（'Print job canceled' / 'Invalid printer settings'），
       // 不能直接贴给用户；给一个贴合场景的兜底（I-48）
       else say(toUserMessage(r.error, '打印没有完成，可能被取消或打印机不可用。'))
@@ -578,7 +766,7 @@ onMounted(refreshAll)
 
 <template>
   <section class="page">
-    <h2 class="page-title">打印中心</h2>
+    <PageHeader title="打印中心" description="选模板 → 预览确认 → 导出 PDF 或直接送打印机。" />
 
     <div class="toolbar">
       <span class="tb-label">模板</span>
@@ -595,6 +783,11 @@ onMounted(refreshAll)
         <span class="scope-note">旧模板未绑定数据集，建议回模板工坊保存一次完成绑定</span>
       </template>
       <span class="tb-spacer"></span>
+      <!-- 出片分辨率（I-49）：照片按「图框毫米 × 目标 DPI」降到需要的像素再出片。
+           实测同一图框 34×50mm：3000×3000 的原件出片 PDF 16.27 MB → 降到 402×591 后 0.40 MB。
+           默认 300，可关（选「原图」）——选原图时一行都不缩，与升级前逐字节一致。 -->
+      <span class="tb-label">出片分辨率</span>
+      <CustomSelect v-model="outputDpi" :disabled="busy" :options="outputDpiOptions" width="170px" />
       <button class="btn" :disabled="!ready || busy || mismatched" @click="runAction('print')">直接打印</button>
       <button class="btn btn-primary" :disabled="!ready || busy || mismatched" @click="runAction('pdf')">导出 PDF</button>
     </div>
@@ -633,6 +826,40 @@ onMounted(refreshAll)
       <button v-if="selRows" class="btn btn-mini" :disabled="busy" @click="setScope(null)">恢复全量</button>
     </div>
 
+    <div v-if="ready" class="photo-preflight" data-testid="print-photo-preflight">
+      <span v-if="photoPreflightLoading" class="scope-note">正在检查本次范围的照片…</span>
+      <span v-else-if="photoPreflightError" class="photo-preflight-error">照片预检失败：{{ photoPreflightError }}</span>
+      <template v-else-if="photoPreflight">
+        <span class="scope-note">本次 {{ photoPreflight.recordCount }} 人 · 预计 {{ photoPreflight.pageCount }} 页</span>
+        <template v-if="photoPreflight.photoLayerCount">
+          <span v-if="!photoPreflight.photoEnabled" class="scope-note">配图已关闭，{{ photoPreflight.recordCount }} 人的照片留白</span>
+          <template v-else>
+            <span class="scope-note">已配图 {{ photoPreflight.counts.matched }} 人 · 空值 {{ photoPreflight.counts.empty }} 人</span>
+            <span v-if="photoPreflight.photoLayerCount > 1" class="scope-note">{{ photoPreflight.photoLayerCount }} 个变量图框 · 共 {{ photoPreflight.photoFrameCount }} 个位置</span>
+            <button v-for="status in ['missing', 'ambiguous', 'invalid', 'broken']" :key="status"
+              v-show="photoPreflight.counts[status]" class="photo-count" :class="{ blocking: status !== 'missing' }"
+              @click="showPhotoIssues(status)">{{ photoStatusLabel[status] }} {{ photoPreflight.counts[status] }} 人</button>
+            <span v-if="photoPreflight.counts.missing || photoPreflight.counts.empty" class="scope-note">缺图和空值出片留白</span>
+            <span v-if="!photoPreflight.canOutput" class="photo-preflight-error">冲突、无效或坏图需先处理</span>
+          </template>
+        </template>
+      </template>
+      <div v-if="photoIssuesOpen && visiblePhotoIssues.length" class="photo-issues">
+        <div class="photo-issues-head">
+          <strong>{{ photoIssueFilter ? photoStatusLabel[photoIssueFilter] : '照片问题' }} · {{ visiblePhotoIssues.length }} 人</strong>
+          <button class="btn btn-mini" @click="photoIssuesOpen = false">收起</button>
+        </div>
+        <div class="photo-issues-list">
+          <div v-for="item in visiblePhotoIssues" :key="item.rowIndex" class="photo-issue-row">
+            <button class="btn btn-mini" @click="goPhotoIssue(item)">第 {{ item.rowIndex + 1 }} 行</button>
+            <span>{{ item.name || '（空值）' }}</span>
+            <span>{{ photoStatusLabel[item.status] }}</span>
+            <span v-if="item.reason" class="scope-note">{{ item.reason }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="!ready" class="empty-hint">
       <p class="hint-main">选择模板后自动带出关联数据集，开始批量出片</p>
       <p class="hint-sub">模板需已添加字段并关联数据集（在「模板工坊」制作）；底图可选，无底图的版式同样能打</p>
@@ -668,8 +895,30 @@ onMounted(refreshAll)
           底图 {{ previewInfo.bgDpi.width }}×{{ previewInfo.bgDpi.height }}px · 输出约 {{ Math.round(previewInfo.bgDpi.dpi) }} dpi
           <template v-if="previewInfo.bgDpi.stretched"> · 比例不符，会被拉伸</template>
         </span>
+        <!-- 出片分辨率读数（I-49）。预览只做规划不编码，所以这里的张数与体积是「预计」，
+             导出完成后用真实字节数覆盖（见 execute）。不静默：档位与结果都摆在明面上。 -->
+        <span v-if="outputHint" class="preview-dpi" :class="outputHint.tone" data-testid="print-output-dpi">
+          {{ outputHint.text }}
+        </span>
         <span class="tb-label">缩放</span>
         <CustomSelect v-model="zoom" :options="zoomOptions" width="90px" />
+      </div>
+
+      <p v-if="photoEditError" class="photo-preflight-error photo-edit-error">照片调整：{{ photoEditError }}</p>
+      <div v-if="photoEdit" class="photo-edit" data-testid="print-photo-edit">
+        <div class="photo-edit-head"><strong>调整第 {{ photoEdit.rowIndex + 1 }} 行 · {{ photoEdit.label }}</strong><button class="btn btn-mini" @click="photoEdit = null">收起</button></div>
+        <div class="photo-edit-body">
+          <div class="photo-edit-image" :style="{ cursor: 'grab' }" @pointerdown="startPhotoDrag" @pointermove="movePhotoDrag" @pointerup="stopPhotoDrag" @pointercancel="stopPhotoDrag">
+            <img :src="`pp://media/${photoEdit.assetId}`" alt="当前人员照片" draggable="false" :style="{ objectFit: photoEdit.fit, objectPosition: `${photoEdit.focal.x * 100}% ${photoEdit.focal.y * 100}%` }" />
+          </div>
+          <div class="photo-edit-controls">
+            <p v-if="photoEdit.state === 'stale'" class="photo-preflight-error">旧取景对应的照片已变化，保存后才会应用到当前照片。</p>
+            <label>显示方式 <select v-model="photoEdit.fit"><option value="contain">完整显示</option><option value="cover">铺满图框</option></select></label>
+            <label>水平焦点 <input v-model.number="photoEdit.focal.x" type="range" min="0" max="1" step="0.01" /></label>
+            <label>垂直焦点 <input v-model.number="photoEdit.focal.y" type="range" min="0" max="1" step="0.01" /></label>
+            <div><button class="btn btn-primary" :disabled="photoEditBusy" @click="savePhotoEdit()">保存此人取景</button> <button class="btn" :disabled="photoEditBusy" @click="savePhotoEdit(true)">恢复模板默认</button></div>
+          </div>
+        </div>
       </div>
 
       <!-- 多联回退提示：配了多联却放不下时已自动按单页出片。这不是错误，但结果与
@@ -686,11 +935,13 @@ onMounted(refreshAll)
           :style="{ width: frameW * zoomK + 'px', height: frameTotalH * zoomK + 'px' }"
         >
           <iframe
+            ref="previewFrame"
             class="preview-frame"
             :style="{ width: frameW + 4 + 'px', height: frameTotalH + 'px', transform: 'scale(' + zoomK + ')' }"
             :srcdoc="previewHtml"
             title="打印预览"
-            sandbox=""
+            sandbox="allow-same-origin"
+            @load="onPreviewFrameLoad"
           ></iframe>
         </div>
       </div>
@@ -910,13 +1161,6 @@ onMounted(refreshAll)
 <style scoped>
 .output-progress{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 16px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
 .preview-paging{display:flex;gap:8px;align-items:center;font-size:12px}
-.page-title {
-  margin: 0 0 16px;
-  font-size: 18px;
-  color: var(--ink);
-  border-left: 4px solid var(--cinnabar);
-  padding-left: 10px;
-}
 
 .toolbar {
   display: flex;
@@ -947,6 +1191,23 @@ onMounted(refreshAll)
 }
 
 .scope-note { font-size: 12px; color: var(--stone); }
+
+.photo-preflight{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:9px 12px;margin-bottom:14px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
+.photo-preflight-error{font-size:12px;color:var(--cinnabar)}
+.photo-count{padding:2px 8px;border:1px solid var(--line-strong);border-radius:6px;background:var(--paper);color:var(--ink);font-size:12px;cursor:pointer}
+.photo-count.blocking{border-color:var(--cinnabar);color:var(--cinnabar)}
+.photo-issues{flex-basis:100%;border-top:1px solid var(--line);padding-top:8px}
+.photo-issues-head{display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.photo-issues-list{max-height:230px;overflow:auto;margin-top:6px}
+.photo-issue-row{display:flex;align-items:center;gap:10px;padding:5px 0;border-top:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
+.photo-edit-error{padding:8px 12px;margin:0}
+.photo-edit{padding:12px;border-bottom:1px solid var(--line);background:var(--paper)}
+.photo-edit-head{display:flex;justify-content:space-between;align-items:center;font-size:13px}
+.photo-edit-body{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px}
+.photo-edit-image{width:120px;height:150px;border:1px solid var(--line-strong);border-radius:5px;overflow:hidden;touch-action:none;background:var(--paper-card)}
+.photo-edit-image img{width:100%;height:100%;user-select:none;pointer-events:none}
+.photo-edit-controls{display:flex;flex-direction:column;gap:9px;font-size:12px;min-width:220px}
+.photo-edit-controls label{display:flex;align-items:center;justify-content:space-between;gap:12px}
 
 .bound-ds {
   font-size: 13px;

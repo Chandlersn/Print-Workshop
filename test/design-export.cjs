@@ -75,6 +75,8 @@ check('输出路径须为受支持的图片绝对路径且不能覆盖工程原�
   assert.throws(() => exporter.outputPath(path.join(DATA, 'a.txt')), /扩展名/)
   assert.throws(() => exporter.outputPath(path.join(DATA, 'a.png'), 'jpeg'), /不符/)
   assert.throws(() => exporter.outputPath(path.join(DATA, 'design-assets', 'a.png')), /素材目录/)
+  // 临时底图池同样受保护（I-51：两个池都是应用管理的素材目录）
+  assert.throws(() => exporter.outputPath(path.join(DATA, 'ephemeral-assets', 'a.png')), /素材目录/)
   // `.jpg` 是 jpeg 的合法扩展名——多格式落地前这里是被拒的，别再改回去
   assert.ok(exporter.outputPath(path.join(DATA, 'a.jpg')).endsWith('a.jpg'))
 })

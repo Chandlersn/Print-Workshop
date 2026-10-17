@@ -45,21 +45,50 @@ function totalPagesOf(batches) {
 }
 
 /**
+ * 汇总各批的出片分辨率统计。
+ *
+ * 分批时每批各自调用一次 `buildBatchHtml`，各自得到一份 stats；界面要的是**整个作业**的
+ * 数字，所以必须在这里求和。只报最后一批会低估「省了多少」（最后一批往往是最小的一批）。
+ * `dpi` 取第一批的——同一作业里档位不可能中途变。
+ */
+function mergeOutputStats(acc, next) {
+  if (!next) return acc
+  if (!acc) return { ...next }
+  const sum = (k) => (acc[k] || 0) + (next[k] || 0)
+  return {
+    ...acc,
+    requested: sum('requested'),
+    optimized: sum('optimized'),
+    keptOriginal: sum('keptOriginal'),
+    failed: sum('failed'),
+    sourceBytes: sum('sourceBytes'),
+    derivedBytes: sum('derivedBytes'),
+    sourcePixels: sum('sourcePixels'),
+    derivedPixels: sum('derivedPixels'),
+    embeddedPixels: sum('embeddedPixels'),
+  }
+}
+
+/**
  * 分批导出 PDF。
  * @param o.batches   planBatches 的结果（行区间 + 每批计划页数）
  * @param o.printer   { printToPdfBuffer(html, {partition}) }——Electron 通道
+ * @param o.outputDpi 出片分辨率（契约 I-49）；缺省 = 领域层默认档
  * @param o.onProgress (p) => void  阶段事件，供上层转成 IPC 进度
  * @param o.shouldCancel () => boolean
  */
 async function exportPdfBatched(o) {
   const {
-    domain, printer, datasetId, templateId, rows, savePath,
+    domain, printer, datasetId, templateId, rows, savePath, outputDpi,
     batches, onProgress = () => {}, shouldCancel = () => false,
   } = o
   const dir = path.dirname(savePath)
   const stamp = tempStamp()
   const partPaths = []
   let mergedTmp = ''
+  let output = null
+  // 烘焙是**设计级**的事，各批完全相同，取第一批的即可（与 outputDpi 同理）
+  let bake = null
   try {
     if (shouldCancel()) throw canceledError('pdf')
     const totalRows = batches.reduce((s, b) => s + b.rows, 0)
@@ -67,7 +96,9 @@ async function exportPdfBatched(o) {
       if (shouldCancel()) throw canceledError('pdf')
       const b = batches[i]
       onProgress({ phase: 'batch-start', index: i + 1, batches: batches.length, start: b.start, end: b.end, rows: b.rows, pages: b.pages })
-      const built = domain.buildBatchHtml(datasetId, templateId, rows, { range: { from: b.start, to: b.end } })
+      const built = domain.buildBatchHtml(datasetId, templateId, rows, { range: { from: b.start, to: b.end }, outputDpi })
+      output = mergeOutputStats(output, built.output)
+      if (!bake) bake = built.bake
       // 每批一个内存 session：Chromium 复用同源渲染进程会让批间内存只累不释
       const buf = await printer.printToPdfBuffer(built.html, { partition: `temp:print-batch-${i + 1}-${stamp}` })
       const partPath = path.join(dir, `.printpress-tmp-${stamp}-part${i + 1}of${batches.length}.pdf`)
@@ -94,7 +125,7 @@ async function exportPdfBatched(o) {
     fs.renameSync(mergedTmp, savePath)
     mergedTmp = ''
     onProgress({ phase: 'publish', path: savePath, bytes: merged.bytes, pages: merged.pages, rows: totalRows })
-    return { ok: true, path: savePath, bytes: merged.bytes, pages: merged.pages, batches: batches.length }
+    return { ok: true, path: savePath, bytes: merged.bytes, pages: merged.pages, batches: batches.length, output, bake }
   } finally {
     // 成功发布后批临时件也没用了（合并件已改名走人）——一并清
     for (const p of partPaths) tryUnlink(p)
@@ -109,16 +140,20 @@ async function exportPdfBatched(o) {
  */
 async function sendToPrinterBatched(o) {
   const {
-    domain, printer, datasetId, templateId, rows, silent,
+    domain, printer, datasetId, templateId, rows, silent, outputDpi,
     batches, onProgress = () => {}, shouldCancel = () => false,
   } = o
   let submitted = 0
   let submittedRows = 0
+  let output = null
+  let bake = null
   for (let i = 0; i < batches.length; i++) {
     if (shouldCancel()) throw canceledError('print', { submitted })
     const b = batches[i]
     onProgress({ phase: 'submit-start', index: i + 1, batches: batches.length, start: b.start, end: b.end, rows: b.rows, pages: b.pages })
-    const built = domain.buildBatchHtml(datasetId, templateId, rows, { range: { from: b.start, to: b.end } })
+    const built = domain.buildBatchHtml(datasetId, templateId, rows, { range: { from: b.start, to: b.end }, outputDpi })
+    output = mergeOutputStats(output, built.output)
+    if (!bake) bake = built.bake
     const r = await printer.sendToPrinter(built.html, {
       silent: Boolean(silent),
       partition: `temp:print-batch-${i + 1}-${tempStamp()}`,
@@ -132,7 +167,7 @@ async function sendToPrinterBatched(o) {
     onProgress({ phase: 'submit-done', index: i + 1, batches: batches.length, submitted, rows: submittedRows })
     if (shouldCancel()) throw canceledError('print', { submitted })
   }
-  return { ok: true, submitted, rows: submittedRows, batches: batches.length }
+  return { ok: true, submitted, rows: submittedRows, batches: batches.length, output, bake }
 }
 
 module.exports = { exportPdfBatched, sendToPrinterBatched, canceledError }

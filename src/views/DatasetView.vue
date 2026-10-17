@@ -10,6 +10,7 @@ import {
   sanitizeHidden, hiddenKeysOf, withHidden, visibleColumnsOf, canHideMore, pruneHidden,
 } from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import PageHeader from '../components/PageHeader.vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
@@ -729,15 +730,14 @@ watch(() => cellNav.req, async (req) => {
     @dragleave="onDragLeave"
     @drop.prevent="onDrop"
   >
-    <div class="page-head">
-      <h2 class="page-title">数据</h2>
-      <div class="head-actions">
+    <PageHeader title="数据">
+      <template #actions>
         <span v-if="errorMsg" class="error-text">{{ errorMsg }}</span>
         <button class="btn-primary" :disabled="importing" @click="startImport">
           {{ importing ? '导入中…' : '导入数据文件' }}
         </button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <div v-if="datasets.length === 0" class="empty-hint">
       <button class="dropzone" :disabled="importing" @click="startImport">
@@ -1053,21 +1053,6 @@ watch(() => cellNav.req, async (req) => {
 </template>
 
 <style scoped>
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 20px;
-}
-
-.page-title {
-  margin: 0;
-  font-size: 18px;
-  color: var(--ink);
-  border-left: 4px solid var(--cinnabar);
-  padding-left: 10px;
-}
-
 .head-actions {
   display: flex;
   align-items: center;
@@ -1163,6 +1148,21 @@ watch(() => cellNav.req, async (req) => {
 
 .drag-main { font-size: 18px; font-weight: 700; color: var(--cinnabar); }
 .drag-sub { font-size: 12px; color: var(--ink-2); }
+
+/*
+ * 工作表选择弹窗的遮罩。App.vue 里也有 .onboard-mask，但那是 scoped 的——
+ * 只作用于 App 自己的模板；这里的同名类不继承它的样式，必须自己声明，
+ * 否则弹窗没有 fixed 居中遮罩，会掉进文档流被页面布局挤到角落。
+ */
+.onboard-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 26, 20, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
 
 .sheet-dialog {
   display: flex;
@@ -1402,12 +1402,8 @@ watch(() => cellNav.req, async (req) => {
   color: var(--stone);
 }
 
+/* 主题属性（底色/描线/圆角/内距）一律走 theme.css 的原生控件基座，这里只管布局 */
 .batch-select {
-  padding: 6px 8px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--input-bg);
-  color: var(--ink);
   font-size: 12px;
   width: 100%;
 }

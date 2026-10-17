@@ -120,4 +120,86 @@ function reorderSelection(input, ids, direction) {
   return normalizeDesign(doc)
 }
 
-module.exports = { groupForLayer, selectionIds, expandSelection, editableSelection, selectLayer, createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection }
+const STYLE_KEYS = Object.freeze({
+  image: ['opacity', 'blend', 'stroke', 'strokeWidth', 'shadow', 'adjust'],
+  text: ['opacity', 'blend', 'fontFamily', 'fontSize', 'bold', 'color', 'align', 'lineHeight', 'letterSpacing'],
+  shape: ['opacity', 'blend', 'fill', 'stroke', 'strokeWidth', 'radius', 'fillPaint', 'shadow'],
+  line: ['opacity', 'blend', 'stroke', 'strokeWidth'],
+})
+// Vue stores the copied style in a reactive ref. Its nested values become Proxies,
+// which structuredClone rejects; all style fields are JSON primitives/objects.
+const copyStyleValue = value => value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : value
+function styleKind(layer) {
+  return layer.type === 'rect' || layer.type === 'ellipse' ? 'shape' : layer.type
+}
+function copyLayerStyle(input, layerId) {
+  const doc = normalizeDesign(input)
+  const layer = doc.layers.find(item => item.id === layerId)
+  if (!layer) throw new Error('找不到要复制样式的图层')
+  const kind = styleKind(layer)
+  const values = {}
+  for (const key of STYLE_KEYS[kind]) if (Object.hasOwn(layer, key)) values[key] = copyStyleValue(layer[key])
+  return { kind, values }
+}
+function applyLayerStyle(input, ids, style) {
+  const doc = normalizeDesign(input)
+  if (!style || !Object.hasOwn(STYLE_KEYS, style.kind) || !style.values || typeof style.values !== 'object') throw new Error('复制的样式无效')
+  // The layer list permits selecting one member inside a group. Keep that
+  // explicit selection; editableSelection still enforces whole-group locks.
+  const explicit = new Set(selectionIds(doc, ids, { expandGroups: false }))
+  const chosen = new Set(editableSelection(doc, ids).filter(id => explicit.has(id)))
+  let applied = 0
+  for (const layer of doc.layers) {
+    if (!chosen.has(layer.id) || styleKind(layer) !== style.kind) continue
+    for (const key of STYLE_KEYS[style.kind]) {
+      if (Object.hasOwn(style.values, key)) layer[key] = copyStyleValue(style.values[key])
+      else delete layer[key]
+    }
+    applied++
+  }
+  if (!applied) throw new Error('没有可应用该样式的未锁定图层')
+  return { design: normalizeDesign(doc), applied }
+}
+
+const roundGeometry = value => Math.round(value * 1000) / 1000 || 0
+/** Apply one uniform scale and/or rotation about the visible group's shared box. */
+function transformGroup(input, groupId, { scale = 1, rotation = 0 } = {}) {
+  const doc = normalizeDesign(input)
+  const group = doc.groups.find(item => item.id === groupId)
+  if (!group) throw new Error('找不到图层组')
+  if (!Number.isFinite(scale) || scale < 0.1 || scale > 4 || !Number.isFinite(rotation) || Math.abs(rotation) > 360) throw new Error('整组缩放或旋转超出有效范围')
+  if (editableSelection(doc, group.layerIds).length !== group.layerIds.length) throw new Error('图层组包含锁定图层，请先解锁')
+  const members = doc.layers.filter(layer => group.layerIds.includes(layer.id))
+  const corners = members.flatMap(layer => {
+    const cx = layer.x + layer.w / 2, cy = layer.y + layer.h / 2
+    const radians = layer.rotation * Math.PI / 180, cos = Math.cos(radians), sin = Math.sin(radians)
+    return [-1, 1].flatMap(sx => [-1, 1].map(sy => ({
+      x: cx + sx * layer.w / 2 * cos - sy * layer.h / 2 * sin,
+      y: cy + sx * layer.w / 2 * sin + sy * layer.h / 2 * cos,
+    })))
+  })
+  const pivotX = (Math.min(...corners.map(point => point.x)) + Math.max(...corners.map(point => point.x))) / 2
+  const pivotY = (Math.min(...corners.map(point => point.y)) + Math.max(...corners.map(point => point.y))) / 2
+  const radians = rotation * Math.PI / 180, cos = Math.cos(radians), sin = Math.sin(radians)
+  for (const layer of members) {
+    const dx = (layer.x + layer.w / 2 - pivotX) * scale
+    const dy = (layer.y + layer.h / 2 - pivotY) * scale
+    const centerX = pivotX + dx * cos - dy * sin
+    const centerY = pivotY + dx * sin + dy * cos
+    layer.w = roundGeometry(layer.w * scale)
+    layer.h = roundGeometry(layer.h * scale)
+    layer.x = roundGeometry(centerX - layer.w / 2)
+    layer.y = roundGeometry(centerY - layer.h / 2)
+    layer.rotation = roundGeometry(layer.rotation + rotation)
+    if (layer.type === 'text') {
+      layer.fontSize = roundGeometry(layer.fontSize * scale)
+      layer.letterSpacing = roundGeometry(layer.letterSpacing * scale)
+    }
+    if (layer.strokeWidth !== undefined) layer.strokeWidth = roundGeometry(layer.strokeWidth * scale)
+    if (layer.radius !== undefined) layer.radius = roundGeometry(layer.radius * scale)
+    if (layer.shadow) for (const key of ['dxMm', 'dyMm', 'blurMm']) layer.shadow[key] = roundGeometry(layer.shadow[key] * scale)
+  }
+  return normalizeDesign(doc)
+}
+
+module.exports = { groupForLayer, selectionIds, expandSelection, editableSelection, selectLayer, createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection, copyLayerStyle, applyLayerStyle, transformGroup }

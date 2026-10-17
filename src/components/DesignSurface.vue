@@ -17,6 +17,7 @@ const props = defineProps({
    */
   showEditorOnly: { type: Boolean, default: false },
   photos: { type: Object, default: () => ({}) },
+  photoStyles: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['error'])
 const prefix = `design-surface-${getCurrentInstance().uid}`
@@ -42,6 +43,7 @@ const content = computed(() => {
       includeEditorOnly: props.showEditorOnly,
       showPhotoPlaceholder: true,
       photoUrl: layer => props.showEditorOnly ? undefined : (props.photos[layer.bindColumn] || null),
+      photoStyle: layer => props.showEditorOnly ? null : (props.photoStyles[layer.id] || null),
     })
   } catch (err) {
     return { html: '', css: '', error: toUserMessage(err, '这张底图无法显示，工程数据可能已损坏。') }

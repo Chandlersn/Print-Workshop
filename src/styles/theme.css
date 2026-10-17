@@ -79,7 +79,7 @@ select {
   background: var(--input-bg);
   border: 1px solid var(--line-strong);
   border-radius: 6px;
-  padding: 5px 8px;
+  padding: 6px 10px;
   cursor: pointer;
   transition: border-color 0.15s;
 }
@@ -88,3 +88,41 @@ select:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 1px; 
 select:disabled { color: var(--stone); cursor: not-allowed; }
 /* 暗色模式下拉弹层跟随主题，避免系统白底弹层刺眼 / 白底白字 */
 select option { background: var(--input-bg); color: var(--ink); }
+
+/* ── 按钮语义变体（全局兜底）──────────────────────────────────────
+   数据 / 模板工坊 / 打印中心各自 scoped 定义了同名类（优先级更高，不受影响）；
+   这里的全局版接住「组件里用了类名却没人定义」的悬空引用——scoped 样式不跨组件，
+   PhotoImportPanel / PhotoLibraryView 的主按钮原本掉回裸按钮底，没有朱砂实底。 */
+.btn-primary {
+  padding: 7px 16px;
+  border: 1px solid var(--cinnabar);
+  border-radius: 6px;
+  background: var(--cinnabar);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-primary:disabled { opacity: 0.6; cursor: default; }
+.btn-primary:hover:not(:disabled) { opacity: 0.9; }
+
+.btn-ghost {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-ghost:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--cinnabar); }
+
+.btn-danger {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-card);
+  color: var(--cinnabar);
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn-danger:hover:not(:disabled) { border-color: var(--cinnabar); background: var(--cinnabar-soft); }

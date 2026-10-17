@@ -1,11 +1,14 @@
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
+import PageHeader from '../components/PageHeader.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
 import { activeDataset } from '../lib/active-dataset.js'
 import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, BLEND_MODES, CROP_RATIOS, fitCropToRatio } from '../../electron/design-layout.cjs'
+// 体积显示只有一份实现（含 GB 档），出片体积提示与本页导出结果共用
+import { formatBytes } from '../lib/format-bytes.cjs'
 // 格式表与体积估算在纯模块里——出图实现读的是同一份，界面不抄第二遍（见 I-41）。
 import { FORMATS, normalizeQuality, estimateOutputBytes } from '../../electron/export-formats.cjs'
 // 报错文案的唯一整理入口（I-48）。IPC 侧 preload 已经洗过一遍，这里再兜一层是为了
@@ -14,6 +17,7 @@ import { toUserMessage } from '../../electron/user-error.cjs'
 import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
   createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection,
+  copyLayerStyle, applyLayerStyle, transformGroup,
 } from '../../electron/design-editor.cjs'
 // 标尺刻度 / 布局网格 / 吸附目标的纯算术都在这里——DOM 测量留在本组件，见 I-45。
 import {
@@ -198,7 +202,72 @@ watch([() => context.value?.datasetId, activeDataset], () => {
 })
 const pending = ref(null)
 const stage = ref(null)
+const canvasScroll = ref(null)
+const horizontalScroll = ref(null)
+const horizontalTrackWidth = ref(0)
 const zoom = ref(1)
+const focusCanvas = ref(false)
+const copiedStyle = ref(null)
+const groupScalePercent = ref(100)
+const groupRotateDegrees = ref(0)
+const navigator = ref({ needed: false, width: 170, height: 120, left: 0, top: 0, boxWidth: 170, boxHeight: 120 })
+let canvasObserver = null
+function syncHorizontalScroll() {
+  const canvas = canvasScroll.value, bar = horizontalScroll.value
+  if (!canvas || !bar) return
+  // Match the actual scroll range, including the space reserved for the
+  // floating inspector. The bar itself stops before that panel.
+  const width = bar.clientWidth + Math.max(0, canvas.scrollWidth - canvas.clientWidth)
+  if (horizontalTrackWidth.value !== width) {
+    horizontalTrackWidth.value = width
+    nextTick(() => { if (canvasScroll.value === canvas && horizontalScroll.value === bar) bar.scrollLeft = canvas.scrollLeft })
+  } else if (Math.abs(bar.scrollLeft - canvas.scrollLeft) > 1) bar.scrollLeft = canvas.scrollLeft
+}
+function scrollFromHorizontalBar() {
+  if (canvasScroll.value && horizontalScroll.value) canvasScroll.value.scrollLeft = horizontalScroll.value.scrollLeft
+}
+function updateNavigator() {
+  syncHorizontalScroll()
+  const scroll = canvasScroll.value, board = stage.value
+  if (!scroll || !board) return
+  const scrollRect = scroll.getBoundingClientRect(), boardRect = board.getBoundingClientRect()
+  const left = boardRect.left - scrollRect.left + scroll.scrollLeft - scroll.clientLeft
+  const top = boardRect.top - scrollRect.top + scroll.scrollTop - scroll.clientTop
+  const width = board.offsetWidth, height = board.offsetHeight
+  if (!width || !height) return
+  const factor = 170 / Math.max(width, height)
+  const previewWidth = Math.max(1, Math.round(width * factor)), previewHeight = Math.max(1, Math.round(height * factor))
+  const clipX = Math.max(0, Math.min(width, scroll.scrollLeft - left))
+  const clipY = Math.max(0, Math.min(height, scroll.scrollTop - top))
+  navigator.value = {
+    needed: width > scroll.clientWidth - 60 || height > scroll.clientHeight - 60,
+    width: previewWidth, height: previewHeight,
+    left: clipX * factor, top: clipY * factor,
+    boxWidth: Math.max(1, Math.min(width - clipX, scroll.clientWidth) * factor),
+    boxHeight: Math.max(1, Math.min(height - clipY, scroll.clientHeight) * factor),
+  }
+}
+function navigateCanvas(event) {
+  const scroll = canvasScroll.value, board = stage.value
+  if (!scroll || !board) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+  const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))
+  const scrollRect = scroll.getBoundingClientRect(), boardRect = board.getBoundingClientRect()
+  const left = boardRect.left - scrollRect.left + scroll.scrollLeft - scroll.clientLeft
+  const top = boardRect.top - scrollRect.top + scroll.scrollTop - scroll.clientTop
+  scroll.scrollLeft = left + x * board.offsetWidth - scroll.clientWidth / 2
+  scroll.scrollTop = top + y * board.offsetHeight - scroll.clientHeight / 2
+  updateNavigator()
+}
+function navigatorPointerDown(event) {
+  event.preventDefault()
+  event.currentTarget.setPointerCapture(event.pointerId)
+  navigateCanvas(event)
+}
+function navigatorPointerMove(event) {
+  if (event.currentTarget.hasPointerCapture(event.pointerId)) navigateCanvas(event)
+}
 const snap = ref(true)
 const keepRatio = ref(true)
 /**
@@ -282,16 +351,11 @@ const exportEstimate = computed(() => {
     format: exportFormat.value, quality: exportQuality.value,
   })
 })
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return ''
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
 const inputEpoch = ref(0)
 const canvasWidth = computed(() => 720 * zoom.value)
 const pxPerMm = computed(() => canvasWidth.value / design.value.artboard.w)
 const canvasHeight = computed(() => design.value.artboard.h * pxPerMm.value)
+watch([zoom, focusCanvas, canvasWidth, canvasHeight], () => nextTick(updateNavigator))
 /**
  * 标尺刻度与网格线的位置（毫米）。
  *
@@ -673,6 +737,39 @@ function selectGroup(group, event = {}) { selectLayer({ id: group.layerIds[0] },
 function groupMembers(group) { return design.value.layers.filter(layer => group.layerIds.includes(layer.id)) }
 function groupHas(group, key) { return groupMembers(group).some(layer => layer[key]) }
 function groupChosen(group) { return group.layerIds.every(id => selectedIds.value.includes(id)) }
+const styleTargets = computed(() => copiedStyle.value
+  ? editable.value.filter(layer => copiedStyle.value.kind === (['rect', 'ellipse'].includes(layer.type) ? 'shape' : layer.type)).length
+  : 0)
+function copyStyle() {
+  if (!single.value) return
+  try {
+    copiedStyle.value = copyLayerStyle(design.value, single.value.id)
+    message.value = `已复制“${single.value.name}”的样式，选择其他同类图层后点击“应用样式”。`
+  } catch (err) { fail(err) }
+}
+function pasteStyle() {
+  if (!copiedStyle.value || !styleTargets.value) return
+  let count = 0
+  const applied = commit(doc => {
+    const result = applyLayerStyle(doc, selectedIds.value, copiedStyle.value)
+    Object.assign(doc, result.design)
+    count = result.applied
+  })
+  if (applied) message.value = `已把样式应用到 ${count} 个图层。`
+}
+function changeGroupTransform() {
+  const group = selectedGroup.value
+  if (!group || !Number.isFinite(Number(groupScalePercent.value)) || !Number.isFinite(Number(groupRotateDegrees.value))) return
+  const scale = Number(groupScalePercent.value) / 100
+  const rotation = Number(groupRotateDegrees.value)
+  if (scale === 1 && rotation === 0) return
+  const applied = commit(doc => Object.assign(doc, transformGroup(doc, group.id, { scale, rotation })))
+  if (applied) {
+    groupScalePercent.value = 100
+    groupRotateDegrees.value = 0
+    message.value = '已调整整组位置与大小，可用 Ctrl+Z 撤销。'
+  }
+}
 function makeGroup() {
   if (selected.value.length < 2) return
   const groupId = uid('group')
@@ -1768,7 +1865,8 @@ function onKeyDown(event) {
   // 就地编辑要先落定再存盘，否则「改完字按 Ctrl+S」会把旧文字存下去
   if (modifier && event.key.toLowerCase() === 's') { event.preventDefault(); finishTextEdit(); event.target?.blur?.(); save(); return }
   if (input) return
-  if (event.key === 'Escape') { cancelGesture(); selectedIds.value = []; return }
+  if (event.key === 'Escape') { if (focusCanvas.value) { focusCanvas.value = false; return }; cancelGesture(); selectedIds.value = []; return }
+  if (!modifier && event.key.toLowerCase() === 'f') { event.preventDefault(); focusCanvas.value = !focusCanvas.value; return }
   if (modifier && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
   if (modifier && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); return }
   if (modifier && event.key.toLowerCase() === 'a') { event.preventDefault(); selectedIds.value = expandSelection(design.value, design.value.layers.filter((layer) => layer.visible).map((layer) => layer.id)); return }
@@ -1839,6 +1937,13 @@ function onDocPointerDown(event) {
   showAssets.value = false
 }
 onMounted(async () => {
+  await nextTick()
+  if (canvasScroll.value) {
+    canvasObserver = new ResizeObserver(updateNavigator)
+    canvasObserver.observe(canvasScroll.value)
+    if (stage.value) canvasObserver.observe(stage.value)
+    updateNavigator()
+  }
   try {
     const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')
     if (draft?.design) {
@@ -1865,9 +1970,9 @@ onMounted(async () => {
   refreshAdopted()
   if (designerNav.request) consumeRequest(designerNav.request)
 })
-onActivated(activate)
+onActivated(() => { activate(); nextTick(updateNavigator) })
 onDeactivated(deactivate)
-onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer); clearTimeout(messageTimer); for (const face of fontFaces) document.fonts.delete(face) })
+onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerDrag(); clearTimeout(draftTimer); clearTimeout(messageTimer); for (const face of fontFaces) document.fonts.delete(face) })
 </script>
 
 <template>
@@ -1883,9 +1988,8 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
         <button class="primary" :disabled="busy || portraitInserting || !portraitColumn" @click="addPortrait">插入变量图</button> <button @click="portraitPicker = false">取消</button>
       </section>
     </div>
-    <div class="designer-heading">
-      <div><h2>底图制作</h2><p>图片、固定文字与形状分别编辑，保存后用于打印模板。</p></div>
-      <div class="heading-actions">
+    <PageHeader title="底图制作" description="图片、固定文字与形状分别编辑，保存后用于打印模板。">
+      <template #actions>
         <button data-testid="design-new" class="primary" :disabled="busy" @click="newDesign">新建底图</button>
         <label class="preset-picker" title="内置版面与常用工程：选「内置模板」是「已有就打开、没有才新建」——不会每点一次就多一个同名工程；「常用」里只列你自己保存过的工程，选中直接打开那份（也不会复制）">
           <span>常用模板</span>
@@ -1906,8 +2010,8 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
         <button data-testid="design-import-package" :disabled="busy" title="从 .ppdesign 导入一份可编辑副本；同名工程不会被覆盖" @click="importPackage">导入工程包</button>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
         <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
     <div v-if="error" class="notice error" role="alert">{{ error }}<button @click="error = ''">关闭</button></div>
     <div v-else-if="message" class="notice success" role="status">{{ message }}</div>
     <!--
@@ -1927,7 +2031,7 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
       <button @click="context = null">转为独立制作</button>
     </div>
     <div v-if="dimensionMismatch" class="notice error">当前画布尺寸与模板不同，应用前请调整。<button @click="adoptTemplateSize">采用模板尺寸（图层不缩放）</button></div>
-    <div class="designer-workspace" :class="{ 'tools-resizing': resizingTools }" :style="{ '--tools-w': `${toolsWidth}px` }">
+    <div class="designer-workspace" :class="{ 'tools-resizing': resizingTools, 'focus-canvas': focusCanvas }" :style="{ '--tools-w': `${toolsWidth}px` }">
       <aside class="designer-panel tools-panel">
         <h3>添加内容</h3>
         <div class="tool-grid">
@@ -1979,14 +2083,18 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
         <div class="tool-grid">
           <button data-testid="design-group-copy" :disabled="!selected.length" @click="duplicate">{{ selectedGroup ? '复制整组' : '复制所选' }}</button><button data-testid="design-group-delete" :disabled="!editable.length" @click="removeSelected">{{ selectedGroup ? '删除整组' : '删除所选' }}</button>
         </div>
+        <div class="tool-grid">
+          <button data-testid="design-copy-style" :disabled="!single" @click="copyStyle">复制样式</button>
+          <button data-testid="design-paste-style" :disabled="!styleTargets" :title="copiedStyle ? `可应用到 ${styleTargets} 个同类图层` : '先选中一个图层并复制样式'" @click="pasteStyle">应用样式{{ styleTargets ? ` (${styleTargets})` : '' }}</button>
+        </div>
         <p v-if="design.groups?.length" class="muted">点组名或画布选择整组；点列表中的成员可单独编辑属性。</p>
       </aside>
       <div class="workspace-resizer" title="拖动调节左栏宽度" aria-label="调节左侧面板宽度" @pointerdown="startToolsResize"></div>
-      <AssetLibrarySidebar v-if="showAssets" @insert="insertLibraryAsset" />
-      <div class="canvas-column inspector-open">
+      <AssetLibrarySidebar v-if="showAssets && !focusCanvas" :draft-asset-ids="Object.keys(design.assets || {})" @insert="insertLibraryAsset" />
+      <div class="canvas-column" :class="{ 'inspector-open': !focusCanvas }">
         <div class="canvas-toolbar">
-          <button data-testid="design-undo" :disabled="!history.length" title="Ctrl+Z" @click="undo">撤销</button>
-          <button data-testid="design-redo" :disabled="!future.length" title="Ctrl+Shift+Z" @click="redo">重做</button>
+          <!-- 撤销/重做只有快捷键（Ctrl+Z / Ctrl+Shift+Z 或 Ctrl+Y），工具栏不放按钮：
+               画布工具栏已经很长，而这两个操作的发现路径本来就是键盘而不是工具栏。 -->
           <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层上移一层'" @click="reorder('up')">上移 ↑</button>
           <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" @click="reorder('down')">下移 ↓</button>
           <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" @click="reorder('top')">置顶 ⤒</button>
@@ -1995,11 +2103,12 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
           <label class="inline"><input v-model="rulers" data-testid="design-rulers" type="checkbox"> 标尺</label>
           <label class="inline"><input v-model="gridVisible" data-testid="design-grid" type="checkbox"> 网格</label>
           <span class="toolbar-spacer"></span>
+          <button data-testid="design-focus-canvas" :title="focusCanvas ? '退出专注画布（F 或 Esc）' : '专注画布（F）'" @click="focusCanvas = !focusCanvas">{{ focusCanvas ? '退出专注' : '专注画布' }}</button>
           <button title="缩小" @click="zoom = Math.max(0.25, round(zoom - 0.25))">−</button>
           <button title="恢复预览大小" @click="zoom = 1">{{ Math.round(zoom * 100) }}%</button>
           <button title="放大" @click="zoom = Math.min(3, round(zoom + 0.25))">＋</button>
         </div>
-        <div class="canvas-scroll" :class="{ 'drop-active': dropActive }" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
+        <div ref="canvasScroll" class="canvas-scroll" :class="{ 'drop-active': dropActive }" @scroll.passive="updateNavigator" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
           <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
             <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :show-editor-only="true" @error="fail" />
             <!-- 布局网格：只是画布上的辅助层，不进工程、不进 renderDesign（见 I-45） -->
@@ -2049,10 +2158,17 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
             <div v-if="dropActive" class="drop-hint" aria-hidden="true">松开鼠标，把图片加为图层</div>
           </div>
         </div>
+        <div ref="horizontalScroll" class="canvas-horizontal-scroll" data-testid="design-horizontal-scroll" role="region" aria-label="画布横向滚动" tabindex="0" @scroll.passive="scrollFromHorizontalBar">
+          <div class="canvas-horizontal-track" :style="{ width: `${horizontalTrackWidth}px` }"></div>
+        </div>
+        <div v-if="navigator.needed" class="canvas-navigator" data-testid="design-navigator" :style="{ width: `${navigator.width}px`, height: `${navigator.height}px` }" title="拖动定位画布" @pointerdown="navigatorPointerDown" @pointermove="navigatorPointerMove">
+          <DesignSurface :design="surfaceDesign" :width="navigator.width" :height="navigator.height" :show-editor-only="true" @error="fail" />
+          <div class="navigator-viewport" :style="{ left: `${navigator.left}px`, top: `${navigator.top}px`, width: `${navigator.boxWidth}px`, height: `${navigator.boxHeight}px` }"></div>
+        </div>
         <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
         <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
       </div>
-      <aside class="designer-panel inspector">
+      <aside v-if="!focusCanvas" class="designer-panel inspector">
         <h3>工程与画布</h3>
         <label>工程名称<input data-testid="design-name" :value="design.name" maxlength="120" @change="setDoc('name', $event.target.value)"></label>
         <div class="property-grid">
@@ -2110,7 +2226,9 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
           <label>组透明度 %<input data-testid="design-group-opacity" type="number" min="0" max="100" step="1" :value="Math.round((selectedGroup.opacity ?? 1) * 100)" @input="groupOpacityInput($event.target.value)" @change="groupOpacityChange()"></label>
           <p class="muted">组透明度会乘算到组内每一个图层（与该图层自身的不透明度叠加）。拖动即时预览，松手才记一步撤销；打印与 PDF 同效。</p>
-          <p class="muted">{{ selectedGroup.layerIds.length }} 个图层整体移动与对齐。分组不支持整体缩放或旋转；请在列表选择成员分别调整。</p>
+          <div class="property-grid"><label>整组缩放 %<input v-model.number="groupScalePercent" data-testid="design-group-scale" type="number" min="10" max="400" step="1"></label><label>整组旋转 °<input v-model.number="groupRotateDegrees" data-testid="design-group-rotation" type="number" min="-360" max="360" step="1"></label></div>
+          <button data-testid="design-group-transform" :disabled="!editable.length || groupHas(selectedGroup, 'locked') || (groupScalePercent === 100 && groupRotateDegrees === 0)" @click="changeGroupTransform">应用整组变换</button>
+          <p class="muted">以整组中心为基准，按比例缩放并旋转；成员间距、文字字号和边框效果一同调整。一次应用可整体撤销。</p>
           <p v-if="groupHas(selectedGroup, 'locked')" class="locked-note">组内存在锁定图层，整组无法移动、排序或删除。</p>
         </template>
         <div class="align-grid">
@@ -2324,19 +2442,19 @@ onBeforeUnmount(() => { deactivate(); detachRulerDrag(); clearTimeout(draftTimer
 </template>
 
 <style scoped>
-.portrait-mask{position:fixed;inset:0;z-index:2000;background:#17252a66;display:grid;place-items:center}.portrait-picker{width:440px;padding:24px;background:var(--paper-card);color:var(--ink);border-radius:14px;box-shadow:0 20px 60px #0003}.portrait-picker label{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:16px 0}.portrait-picker select{padding:8px;max-width:280px}.portrait-picker p{color:var(--stone);line-height:1.7}
+.portrait-mask{position:fixed;inset:0;z-index:2000;background:rgba(30,26,20,.45);display:grid;place-items:center}.portrait-picker{width:440px;padding:24px;background:var(--paper-card);color:var(--ink);border-radius:14px;box-shadow:0 20px 60px #0003}.portrait-picker label{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:16px 0}.portrait-picker select{max-width:280px}.portrait-picker p{color:var(--stone);line-height:1.7}
 .designer-view { min-width: 960px; }
-.designer-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; }
-h2 { font-size: 20px; margin: 0 0 5px; } .designer-heading p { color: var(--ink-2); margin: 0; font-size: 12px; }
 button { border: 1px solid var(--line-strong); background: var(--paper-card); color: var(--ink); border-radius: 5px; padding: 6px 9px; font-size: 12px; }
 button:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--cinnabar); }
 button:disabled { opacity: .42; cursor: default; }
 button.primary { color: #fff; background: var(--cinnabar); border-color: var(--cinnabar); }
 button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
-.heading-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 「素材库」开关的选中态（`on` 只此一处用）。布局与间距由 PageHeader 的
+   `.page-header__actions` 统一负责，这里只管这一个按钮自己的态。 */
+button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
 /* 下拉里塞了「名称 — 说明」，收起来时按固定宽度截断；展开的列表仍是完整文案 */
 .preset-picker { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); }
-.preset-picker select { max-width: 230px; border: 1px solid var(--line-strong); background: var(--paper-card); color: var(--ink); border-radius: 5px; padding: 6px 6px; font-size: 12px; }
+.preset-picker select { max-width: 230px; font-size: 12px; }
 .notice { padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 6px; display: flex; align-items: center; gap: 12px; font-size: 12px; }
 .notice button { margin-left: auto; flex-shrink: 0; }
 .notice.error { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
@@ -2348,8 +2466,13 @@ button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
 .export-done-path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; color: var(--ink-2); background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; margin-left: 6px; overflow-wrap: anywhere; }
 .export-done button { margin-left: 0; }
 .export-done button:first-of-type { margin-left: auto; }
-.heading-actions button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
 .designer-workspace { display: grid; grid-template-columns: var(--tools-w, 176px) minmax(450px, 1fr); gap: 12px; align-items: start; position: relative; }
+.designer-workspace.focus-canvas { grid-template-columns: minmax(0, 1fr); }
+.designer-workspace.focus-canvas .tools-panel,
+.designer-workspace.focus-canvas .workspace-resizer { display: none; }
+.designer-workspace.focus-canvas .canvas-scroll { height: calc(100vh - 250px); max-height: none; }
+.designer-workspace.focus-canvas .canvas-toolbar,
+.designer-workspace.focus-canvas .canvas-status { padding-right: 8px; }
 /* 左栏宽度拖拽柄：骑在两列之间的 gap 上（11px 热区），拖动时全局禁选中防拖出选区 */
 .workspace-resizer { position: absolute; top: 0; bottom: 0; left: calc(var(--tools-w, 176px) + 1px); width: 10px; z-index: 30; cursor: col-resize; touch-action: none; }
 .workspace-resizer::after { content: ''; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px; border-radius: 1px; background: transparent; transition: background .15s; }
@@ -2397,10 +2520,19 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 /* 徽标一律 nowrap + inline-block：表格/弹性布局按 min-content 分列宽，中文徽标可断字，
    窄窗口下「仅编辑」会被拆成两行（同 I-14 的 .det-flag）。 */
 .layer-flag { flex: none; display: inline-block; white-space: nowrap; font-size: 11px; line-height: 1.4; padding: 0 5px; border-radius: 999px; color: var(--cinnabar); background: var(--cinnabar-soft); border: 1px solid currentColor; }
-.canvas-column { min-width: 0; }
+.canvas-column { min-width: 0; position: relative; --inspector-reserve: 276px; }
+.canvas-column:not(.inspector-open) { --inspector-reserve: 0px; }
 .canvas-toolbar { display: flex; align-items: center; gap: 7px; background: var(--paper-card); border: 1px solid var(--line); padding: 8px; border-radius: 8px 8px 0 0; }
 .toolbar-spacer { flex: 1; }
-.canvas-scroll { overflow: auto; min-height: 430px; height: calc(100vh - 295px); max-height: 880px; padding: 30px; background-color: var(--line); background-image: radial-gradient(var(--stone) .6px, transparent .6px); background-size: 12px 12px; }
+.canvas-scroll { overflow-x: hidden; overflow-y: auto; min-height: 410px; height: calc(100vh - 315px); max-height: 860px; padding: 30px; padding-right: calc(30px + var(--inspector-reserve)); background-color: var(--line); background-image: radial-gradient(var(--stone) .6px, transparent .6px); background-size: 12px 12px; }
+.canvas-horizontal-scroll { height: 20px; margin-right: var(--inspector-reserve); overflow-x: scroll; overflow-y: hidden; background: var(--paper-card); border: 1px solid var(--line); box-sizing: border-box; scrollbar-color: var(--stone) var(--paper-card); }
+.canvas-horizontal-track { height: 1px; pointer-events: none; }
+.canvas-horizontal-scroll::-webkit-scrollbar { height: 14px; }
+.canvas-horizontal-scroll::-webkit-scrollbar-thumb { background: var(--stone); border: 3px solid var(--paper-card); border-radius: 8px; }
+.canvas-horizontal-scroll::-webkit-scrollbar-track { background: var(--paper-card); }
+.canvas-navigator { position: absolute; left: 18px; bottom: 56px; z-index: 25; overflow: hidden; box-sizing: content-box; border: 2px solid var(--paper-card); background: white; box-shadow: 0 3px 16px #0005; cursor: crosshair; touch-action: none; }
+.canvas-navigator > :first-child { pointer-events: none; }
+.navigator-viewport { position: absolute; box-sizing: border-box; border: 2px solid var(--cinnabar); background: rgba(176,58,46,.12); pointer-events: none; }
 /* 拖入高亮：用 outline 而不是 border —— 不参与布局，画布尺寸不会被拖动过程改变 */
 .canvas-scroll.drop-active { outline: 2px dashed var(--cinnabar); outline-offset: -4px; }
 .drop-hint { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: var(--paper-card); opacity: .88; color: var(--cinnabar); font-size: 13px; font-weight: 600; pointer-events: none; }
@@ -2474,7 +2606,6 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .export-dialog h3 { font-size: 16px; margin: 0 0 12px; }
 .export-dialog p { font-size: 12px; line-height: 1.8; color: var(--ink-2); }
 .export-dialog label:not(.inline) { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; margin: 14px 0; }
-.export-dialog select { border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--ink); border-radius: 5px; padding: 6px 25px 6px 8px; }
 .export-dialog .export-dimensions { font-size: 14px; font-weight: 600; color: var(--ink); padding: 10px 12px; background: var(--paper); border-radius: 6px; margin: 18px 0 12px; }
 .export-dialog .export-error { color: var(--warn); background: var(--warn-soft); padding: 8px 10px; border-radius: 5px; }
 .export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
@@ -2485,5 +2616,5 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .package-font-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; padding: 6px 0; border-top: 1px solid var(--line); }
 .package-font-name { font-weight: 600; }
 .package-font-missing { color: var(--warn); }
-@media (max-width: 1180px) { .designer-workspace { grid-template-columns: min(160px, var(--tools-w, 176px)) minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .designer-heading { align-items: flex-start; } }
+@media (max-width: 1180px) { .designer-workspace { grid-template-columns: min(160px, var(--tools-w, 176px)) minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column { --inspector-reserve: 248px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .page-header { align-items: flex-start; } }
 </style>

@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
+import PageHeader from '../components/PageHeader.vue'
 import PhotoImportPanel from '../components/PhotoImportPanel.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { activeDataset, rememberDataset } from '../lib/active-dataset.js'
@@ -36,7 +37,11 @@ onMounted(async () => {
 
 <template>
   <section class="photo-library-view">
-    <div class="library-heading"><div><span class="eyebrow">批量人像 · 0.6 预览</span><h1>变量照片库</h1><p>自动跟随数据页的配图选择，在这里选择照片文件夹即可。</p></div><button class="btn-ghost" @click="emit('navigate', 'designer')">前往底图制作 → 添加变量图</button></div>
+    <PageHeader title="变量照片库" description="自动跟随数据页的配图选择，在这里选择照片文件夹即可。">
+      <template #actions>
+        <button class="btn-ghost" @click="emit('navigate', 'designer')">前往底图制作 → 添加变量图</button>
+      </template>
+    </PageHeader>
     <p v-if="loading" role="status">正在读取当前配图名单…</p>
     <p v-if="error" role="alert">{{ error }}</p>
     <div v-if="!loading && !detail && !error" class="empty-library"><h2>先在数据页确定配图名单</h2><p>{{ guidance }}</p><button class="btn-primary" @click="emit('navigate', 'dataset')">前往数据页</button></div>
@@ -46,5 +51,5 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.photo-library-view{max-width:1440px;margin:auto;padding:16px}.library-heading{display:flex;justify-content:space-between;align-items:center;gap:24px}.eyebrow{color:var(--cinnabar);font-size:12px;letter-spacing:2px}h1{font-size:24px;margin:6px 0}.library-heading p,.empty-library p{color:var(--stone);line-height:1.6;margin:6px 0}.matching-context{display:flex;gap:16px;justify-content:space-between;align-items:center;margin:16px 0;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}.empty-library{text-align:center;padding:80px 20px;border:1px dashed var(--line);border-radius:16px}
+.photo-library-view{max-width:1440px;margin:auto;padding:16px}.library-heading p,.empty-library p{color:var(--stone);line-height:1.6;margin:6px 0}.matching-context{display:flex;gap:16px;justify-content:space-between;align-items:center;margin:16px 0;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}.empty-library{text-align:center;padding:80px 20px;border:1px dashed var(--line);border-radius:16px}
 </style>

@@ -5,6 +5,7 @@ const crypto = require('crypto')
 const zlib = require('zlib')
 const os = require('os')
 const { loadJson, saveJson, resolveInsideDataDir } = require('./store.cjs')
+const assetStorage = require('./asset-storage.cjs')
 const { imageSizeFromBuffer, sniffImageExt } = require('./images.cjs')
 const { normalizeDesign, collectFontFamilies, normalizeSource } = require('./design-layout.cjs')
 const { toUserMessage } = require('./user-error.cjs')
@@ -14,6 +15,58 @@ const MAX_PROJECT_BYTES = 512 * 1024 * 1024
 const MAX_PIXELS = 80000000
 const ASSET_ID = /^asset_([a-f0-9]{64})$/
 const DESIGN_ID = /^design_[a-f0-9]{24}$/
+/**
+ * 原件池（内容寻址：同名同字节，`<sha256>.<ext>` + 同名 `.json` 边车）。
+ *
+ * **两个池子按 source 物理分开存放（I-51）**：
+ * - `design-assets`：素材库受管理原件（managed）。素材库导入 / adopt「加入素材库」/
+ *   工程包导入都落这里；侧栏「打开素材库文件夹」开的就是这个池。
+ * - `ephemeral-assets`：临时底图原件（ephemeral）。模板页上传、底图制作页粘贴 / 拖入 /
+ *   「＋ 图片」对话框、配图照片先落这里——受引用扫描保护（不误删），但不进素材库列表，
+ *   被 adopt 时连字节一起迁进素材库池。
+ *
+ * 分池只决定「新导入落哪」与「升级时搬去哪」；读取按 hash 双池定位，
+ * 所以旧工程文档里指向另一池的同 hash 路径照常能定位到真身。
+ */
+const POOL_MANAGED = 'design-assets'
+const POOL_EPHEMERAL = 'ephemeral-assets'
+const ASSET_POOLS = [POOL_MANAGED, POOL_EPHEMERAL]
+function poolOfSource(source) {
+  return normalizeSource(source) === 'ephemeral' ? POOL_EPHEMERAL : POOL_MANAGED
+}
+/**
+ * 按 hash 在两个池子里定位原件的 `.json` 边车，返回池名；都不在返回 null。
+ *
+ * `design-assets` 优先：managed 是权威池——迁移 / 升级中途崩溃留下两份时，
+ * 读到的必须是受管理那份（同 I-31 的 fail-safe 方向：漏判的后果只能是「多占一块盘」）。
+ */
+function locateAsset(hash) {
+  for (const pool of ASSET_POOLS) {
+    try { if (fs.existsSync(assetStorage.resolveAssetPath(`${pool}/${hash}.json`))) return pool } catch { /* 不可读：换下一个 */ }
+  }
+  return null
+}
+/** 原件图片（任一池）是否已在盘上——照片导入的 created 判定用，两池都算「已存在」。 */
+function originalExists(hash) {
+  for (const pool of ASSET_POOLS) {
+    for (const ext of ['png', 'jpg', 'jpeg']) {
+      try { if (fs.existsSync(assetStorage.resolveAssetPath(`${pool}/${hash}.${ext}`))) return true } catch { /* 不可读：当不存在 */ }
+    }
+  }
+  return false
+}
+/**
+ * 工程文档声明的原件路径是否可接受。
+ *
+ * 分池迁移后，旧文档里会残留「同 hash、另一池、同扩展名」的路径——那是合法历史值
+ * （打开 / 保存时由 `canonicalAssets` 改写成真身）。指向别的 hash / 池外路径一律仍是损坏：
+ * readAsset 靠 id 的哈希核对内容，路径声明只是提示，不是安全边界。
+ */
+function claimedPathOk(claim, hash, expected) {
+  if (claim === expected) return true
+  const ext = expected.slice(expected.lastIndexOf('.'))
+  return ASSET_POOLS.some((pool) => claim === `${pool}/${hash}${ext}`)
+}
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
 /**
  * 保存锁的最终兜底超时（与 PID 无关）。
@@ -95,16 +148,17 @@ function recoverAbandonedLock(lock) {
     throw err
   }
 }
-function atomicFile(file, bytes) {
+function atomicFile(file, bytes, root = DATA_DIR) {
   // assertRealDataPath 会 realpathSync(DATA_DIR)，所以数据目录必须先存在。
   // 导入素材这条路径不持锁（importBuffer 不做 withLock），不能依赖 withLock 建目录：
   // 否则全新数据目录下第一次导入会抛原生 ENOENT。
-  fs.mkdirSync(DATA_DIR, { recursive: true })
+  fs.mkdirSync(root, { recursive: true })
+  if (path.resolve(root) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(root)
   let existing = path.dirname(file)
   while (!fs.existsSync(existing)) existing = path.dirname(existing)
-  assertRealDataPath(existing)
+  assertRealStoragePath(existing, root)
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  assertRealDataPath(path.dirname(file))
+  assertRealStoragePath(path.dirname(file), root)
   const temp = `${file}.${crypto.randomBytes(6).toString('hex')}.tmp`
   try {
     fs.writeFileSync(temp, bytes, { flag: 'wx' })
@@ -133,8 +187,27 @@ function guardedFile(relative, directory) {
   if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw pathGuardError('素材路径越界')
   return real
 }
+/**
+ * 原件（图片或 `.json` 边车）的路径守卫：第一段必须是两个已知池名之一，
+ * 再按 `guardedFile` 的 realpath 口径复核文件真在池内（符号链接绕不过去）。
+ */
+function guardedAssetFile(relative) {
+  const pool = String(relative).split('/')[0]
+  if (!ASSET_POOLS.includes(pool)) throw pathGuardError('素材路径不在素材目录内')
+  const absolute = assetStorage.resolveAssetPath(relative)
+  const root = assetStorage.poolDir(pool)
+  if (pool === POOL_EPHEMERAL || path.resolve(root) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(root)
+  const real = fs.realpathSync(absolute)
+  const realRoot = fs.realpathSync(root)
+  const inside = path.relative(realRoot, real)
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw pathGuardError('素材路径越界')
+  return real
+}
 function assertRealDataPath(file) {
-  const root = fs.realpathSync(DATA_DIR)
+  assertRealStoragePath(file, DATA_DIR)
+}
+function assertRealStoragePath(file, storageRoot) {
+  const root = fs.realpathSync(storageRoot)
   const real = fs.realpathSync(file)
   const relative = path.relative(root, real)
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw pathGuardError('存储路径越界（符号链接）')
@@ -155,8 +228,9 @@ function pathGuardError(message) {
 function readAsset(id, claimedPath) {
   const match = typeof id === 'string' && ASSET_ID.exec(id)
   if (!match) throw new Error('素材标识无效')
+  const pool = locateAsset(match[1])
   let asset
-  try { asset = JSON.parse(fs.readFileSync(guardedFile(`design-assets/${match[1]}.json`, 'design-assets'), 'utf8')) } catch (err) {
+  try { asset = JSON.parse(fs.readFileSync(guardedAssetFile(`${pool || POOL_MANAGED}/${match[1]}.json`), 'utf8')) } catch (err) {
     // 这里**故意不拼 id、也不拼 err.message**：id 是内部标识（64 位十六进制），
     // err.message 里带绝对路径与 errno。两者都会原样出现在用户的报错横幅上，
     // 而用户既读不懂、也无法据此做任何事（2026-10-13 实际被投诉过，见 I-48）。
@@ -166,9 +240,12 @@ function readAsset(id, claimedPath) {
     throw new Error('找不到底图素材，可能已被删除或尚未同步。')
   }
   if (!asset || asset.id !== id || !['image/png', 'image/jpeg'].includes(asset.mime)) throw new Error('底图素材记录损坏')
-  const expected = `design-assets/${match[1]}.${asset.mime === 'image/png' ? 'png' : 'jpg'}`
-  if (asset.path !== expected || (claimedPath !== undefined && claimedPath !== expected)) throw new Error('底图素材路径不一致')
-  const abs = guardedFile(expected, 'design-assets')
+  const expected = `${pool}/${match[1]}.${asset.mime === 'image/png' ? 'png' : 'jpg'}`
+  if (asset.path !== expected) throw new Error('底图素材路径不一致')
+  // claimedPath 是工程文档里的声明：只当提示。分池迁移后旧文档会残留指向另一池的
+  // 同 hash 路径，那是合法历史值（I-51）；真身由上面的 expected 说话，内容由哈希核对。
+  if (claimedPath !== undefined && !claimedPathOk(claimedPath, match[1], expected)) throw new Error('底图素材路径不一致')
+  const abs = guardedAssetFile(expected)
   const size = fs.statSync(abs).size
   if (size <= 0 || size > MAX_BYTES) throw new Error('底图素材文件大小无效')
   const bytes = fs.readFileSync(abs)
@@ -176,7 +253,7 @@ function readAsset(id, claimedPath) {
   const measured = VERIFIED_IMAGES.get(match[1]) || validateImage(bytes)
   VERIFIED_IMAGES.set(match[1], measured)
   if (asset.width !== measured.width || asset.height !== measured.height || asset.mime !== measured.mime) throw new Error('底图素材尺寸记录不一致')
-  return { asset: { id, path: expected, name: String(asset.name || '图片').slice(0, 200), width: measured.width, height: measured.height, mime: measured.mime, source: normalizeSource(asset.source) }, bytes: size }
+  return { asset: { id, path: expected, name: String(asset.name || '图片').slice(0, 200), width: measured.width, height: measured.height, mime: measured.mime, orientation: measured.orientation || 1, source: normalizeSource(asset.source) }, bytes: size }
 }
 /**
  * 对外只读出口：给素材库（asset-library.cjs）用，避免那边再造一份原件解析。
@@ -187,6 +264,22 @@ function readAsset(id, claimedPath) {
 function assetInfo(id) {
   return readAsset(assetIdOfExport(id)).asset
 }
+/** 仅供体积预估读取导入时记录的显示尺寸；出片仍须经 assetInfo 校验原件。 */
+function assetGeometry(id) {
+  const hash = ASSET_ID.exec(assetIdOfExport(id))[1]
+  const pool = locateAsset(hash)
+  const meta = JSON.parse(fs.readFileSync(guardedAssetFile(`${pool || POOL_MANAGED}/${hash}.json`), 'utf8'))
+  if (meta.id !== id || !['image/png', 'image/jpeg'].includes(meta.mime)
+      || !Number.isInteger(meta.width) || !Number.isInteger(meta.height)
+      || meta.width < 1 || meta.height < 1 || meta.width > 24000 || meta.height > 24000) {
+    throw new Error('素材尺寸记录无效，无法估算')
+  }
+  const expected = `${pool}/${hash}.${meta.mime === 'image/png' ? 'png' : 'jpg'}`
+  if (meta.path !== expected) throw new Error('素材路径不一致，无法估算')
+  guardedAssetFile(expected)
+  // 估算只使用显示坐标的像素面积，不做编码，旧元数据无需补读整张 JPEG 的方向标记。
+  return { width: meta.width, height: meta.height, orientation: 1, mime: meta.mime }
+}
 /**
  * Read only an asset's lifecycle marker without loading or hashing the image bytes.
  * `null` means the metadata is missing, malformed, or predates the source field;
@@ -196,7 +289,9 @@ function assetSource(id) {
   const assetId = assetIdOfExport(id)
   const hash = ASSET_ID.exec(assetId)[1]
   try {
-    const metadata = JSON.parse(fs.readFileSync(guardedFile(`design-assets/${hash}.json`, 'design-assets'), 'utf8'))
+    const pool = locateAsset(hash)
+    if (!pool) return null
+    const metadata = JSON.parse(fs.readFileSync(guardedAssetFile(`${pool}/${hash}.json`), 'utf8'))
     if (!metadata || metadata.id !== assetId || !Object.prototype.hasOwnProperty.call(metadata, 'source')) return null
     return normalizeSource(metadata.source)
   } catch (err) {
@@ -207,7 +302,7 @@ function assetSource(id) {
 function assetBytes(id) {
   const assetId = assetIdOfExport(id)
   const { asset } = readAsset(assetId)
-  return { asset, buffer: fs.readFileSync(guardedFile(asset.path, 'design-assets')) }
+  return { asset, buffer: fs.readFileSync(guardedAssetFile(asset.path)) }
 }
 function assetIdOfExport(id) {
   if (typeof id !== 'string' || !/^asset_[a-f0-9]{64}$/.test(id)) throw new Error('素材标识无效')
@@ -505,7 +600,9 @@ function validateImage(buf) {
   if (ext === '.png') validatePng(buf, size)
   else if (buf.lastIndexOf(Buffer.from([255, 217])) < 4 || buf.indexOf(Buffer.from([255, 218])) < 4) throw new Error('JPEG 图片内容不完整')
   const orientation = ext === '.jpg' ? jpegOrientation(buf) : 1
-  return { ...(orientation >= 5 ? { width: size.height, height: size.width } : size), ext, mime: ext === '.png' ? 'image/png' : 'image/jpeg' }
+  // width/height 归正为**显示坐标**（EXIF O≥5 时换轴）；orientation 一并带出去，
+  // 因为「出片按目标 DPI 降采样」需要在存储坐标里算尺寸（见 output-dpi.storageSize）。
+  return { ...(orientation >= 5 ? { width: size.height, height: size.width } : size), ext, mime: ext === '.png' ? 'image/png' : 'image/jpeg', orientation }
 }
 function jpegOrientation(buf) {
   let offset = 2
@@ -544,13 +641,17 @@ function importBuffer(buf, name, source) {
   const hash = crypto.createHash('sha256').update(buf).digest('hex')
   VERIFIED_IMAGES.set(hash, size)
   const id = `asset_${hash}`
-  const relative = `design-assets/${hash}${size.ext}`
+  // 同内容已在任一池子 → 直接返回既有记录：内容寻址去重（I-31 原则①）。
+  // 绝不因为这次传了别的 source 就再存一份字节——升级 / 降级只改边车标记（见 setAssetSource）。
+  if (locateAsset(hash)) return readAsset(id).asset
+  const pool = poolOfSource(source)
+  const relative = `${pool}/${hash}${size.ext}`
   const asset = { id, path: relative, width: size.width, height: size.height, mime: size.mime, name: path.basename(String(name || '图片')).replace(/[\x00-\x1f]/g, '').slice(0, 200) || '图片', source: normalizeSource(source) }
-  const target = resolveInsideDataDir(relative)
-  const metadata = resolveInsideDataDir(`design-assets/${hash}.json`)
-  if (fs.existsSync(metadata)) return readAsset(id).asset
-  atomicFile(target, buf)
-  atomicFile(metadata, JSON.stringify(asset, null, 2))
+  const target = assetStorage.resolveAssetPath(relative)
+  const metadata = assetStorage.resolveAssetPath(`${pool}/${hash}.json`)
+  const root = assetStorage.poolDir(pool)
+  atomicFile(target, buf, root)
+  atomicFile(metadata, JSON.stringify(asset, null, 2), root)
   return asset
 }
 function importImageBytes({ name, base64, source } = {}) {
@@ -565,17 +666,126 @@ function importImageFile(filePath, source) {
 /**
  * 翻转原件元数据里的 `source`（供「加入素材库」时把临时件升为受管理）。
  * 单向升级：只允许 ephemeral → managed，绝不允许回退成 ephemeral。
+ *
+ * 升级**连字节一起搬**（I-51）：临时底图原件从 `ephemeral-assets/` 迁进素材库池
+ * `design-assets/`（图片 + `.json` 边车，边车 `path` 同步改写）——两个池子物理分开，
+ * 只改标记会让「打开素材库文件夹」看得见临时件、备份 / 清理也没法只针对素材库。
+ *
+ * 搬迁顺序：复制图片 → 写新边车 → 删旧边车 → 删旧图片。中途被杀最多留一份重复
+ * （`locateAsset` 取 managed 那份，另一份沦为孤儿由清理入口收），绝不会把图搬丢；
+ * 且任何中间态两个池子至少有一份完整可读。
  */
 function setAssetSource(id, source) {
   const aid = assetIdOfExport(id)
   const match = ASSET_ID.exec(aid)
-  const metaPath = resolveInsideDataDir(`design-assets/${match[1]}.json`)
+  const hash = match[1]
+  const pool = locateAsset(hash)
+  if (!pool) throw new Error('找不到底图素材，可能已被删除或尚未同步。')
+  const metaPath = assetStorage.resolveAssetPath(`${pool}/${hash}.json`)
   const asset = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
   const next = normalizeSource(source)
   if (normalizeSource(asset.source) === 'managed' && next !== 'managed') throw new Error('受管理原件不能降级为临时件')
+  const targetPool = poolOfSource(next)
+  if (targetPool !== pool) {
+    const ext = path.extname(String(asset.path || ''))
+    const oldImage = guardedAssetFile(asset.path)
+    const nextRelative = `${targetPool}/${hash}${ext}`
+    const targetRoot = assetStorage.poolDir(targetPool)
+    fs.mkdirSync(targetRoot, { recursive: true })
+    if (targetPool === POOL_EPHEMERAL || path.resolve(targetRoot) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(targetRoot)
+    fs.copyFileSync(oldImage, assetStorage.resolveAssetPath(nextRelative))
+    asset.path = nextRelative
+    asset.source = next
+    atomicFile(assetStorage.resolveAssetPath(`${targetPool}/${hash}.json`), JSON.stringify(asset, null, 2), assetStorage.poolDir(targetPool))
+    try { fs.unlinkSync(metaPath) } catch { /* 旧边车删不掉只是残留：locateAsset 仍读到新池那份 */ }
+    try { fs.unlinkSync(oldImage) } catch { /* 旧图沦为孤儿，由 asset:listOrphans / purge 收 */ }
+    return asset
+  }
   asset.source = next
-  atomicFile(metaPath, JSON.stringify(asset, null, 2))
+  atomicFile(metaPath, JSON.stringify(asset, null, 2), assetStorage.poolDir(pool))
   return asset
+}
+
+/**
+ * 存量迁移：把 `design-assets/` 里 `source: 'ephemeral'` 的临时底图原件
+ * （图片 + `.json` 边车）迁到 `ephemeral-assets/`，边车 `path` 同步改写。
+ * 幂等（目标已存在即覆盖同内容）；单件失败跳过，不阻断其余与启动。
+ *
+ * 为什么必须做：分池只影响「新导入落哪」。不迁移的话旧临时件仍混在素材库池里，
+ * 「打开素材库文件夹」依旧看得见临时底图——分池就白做了。
+ *
+ * 工程文档里的旧路径**不用动**：`readAsset` 的 claimedPath 容忍「同 hash、另一池」的
+ * 历史声明，打开 / 保存时 `canonicalAssets` 会改写成真身（I-51）。
+ *
+ * @returns {{ migrated: number }}
+ */
+function migrateEphemeralOriginals() {
+  const targetDir = assetStorage.poolDir(POOL_EPHEMERAL)
+  let migrated = 0
+  const roots = [...new Set([assetStorage.poolDir(POOL_MANAGED), assetStorage.legacyManagedDir()])]
+  for (const legacy of roots) {
+    let names
+    try {
+      if (path.resolve(legacy) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(legacy)
+      names = fs.readdirSync(legacy)
+    } catch { continue }
+    for (const name of names) {
+      const m = /^([a-f0-9]{64})\.json$/.exec(name)
+      if (!m) continue
+      const hash = m[1]
+      let meta
+      try { meta = JSON.parse(fs.readFileSync(path.join(legacy, name), 'utf8')) } catch { continue }
+      if (!meta || normalizeSource(meta.source) !== 'ephemeral') continue
+      // 扩展名只信边车自己的记录：内容寻址下 ext 由 mime 决定，跟文件名无关
+      const ext = meta.mime === 'image/png' ? '.png' : (meta.mime === 'image/jpeg' ? '.jpg' : path.extname(String(meta.path || '')))
+      if (!ext) continue
+      try {
+        fs.mkdirSync(targetDir, { recursive: true })
+        assertRealDataPath(targetDir)
+        const oldImage = path.join(legacy, `${hash}${ext}`)
+        if (!fs.existsSync(oldImage)) continue
+        fs.copyFileSync(oldImage, path.join(targetDir, `${hash}${ext}`))
+        meta.path = `${POOL_EPHEMERAL}/${hash}${ext}`
+        atomicFile(path.join(targetDir, `${hash}.json`), JSON.stringify(meta, null, 2))
+        try { fs.unlinkSync(path.join(legacy, `${hash}.json`)) } catch { /* 同上：残留由清理入口收 */ }
+        try { fs.unlinkSync(oldImage) } catch { /* 同上 */ }
+        migrated++
+      } catch { /* 单件搬不动就留在旧池：读得到、只是没分开，下次启动重试 */ }
+    }
+  }
+  return { migrated }
+}
+
+/** Move older managed originals into a configured repository before any readers start. */
+function migrateManagedOriginals() {
+  const legacy = assetStorage.legacyManagedDir()
+  const target = assetStorage.poolDir(POOL_MANAGED)
+  if (path.resolve(legacy) === path.resolve(target)) return { migrated: 0 }
+  let names
+  try { assertRealDataPath(legacy); names = fs.readdirSync(legacy) } catch { return { migrated: 0 } }
+  let migrated = 0
+  for (const name of names) {
+    const match = /^([a-f0-9]{64})\.json$/.exec(name)
+    if (!match) continue
+    const hash = match[1]
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(legacy, name), 'utf8'))
+      if (meta.id !== `asset_${hash}` || normalizeSource(meta.source) !== 'managed') continue
+      const ext = meta.mime === 'image/png' ? 'png' : meta.mime === 'image/jpeg' ? 'jpg' : null
+      if (!ext || meta.path !== `${POOL_MANAGED}/${hash}.${ext}`) continue
+      const oldImage = path.join(legacy, `${hash}.${ext}`)
+      const oldBytes = fs.readFileSync(oldImage)
+      if (crypto.createHash('sha256').update(oldBytes).digest('hex') !== hash) continue
+      const newMeta = assetStorage.resolveAssetPath(`${POOL_MANAGED}/${hash}.json`)
+      const newImage = assetStorage.resolveAssetPath(`${POOL_MANAGED}/${hash}.${ext}`)
+      atomicFile(newImage, oldBytes, target)
+      atomicFile(newMeta, JSON.stringify(meta, null, 2), target)
+      fs.unlinkSync(path.join(legacy, name))
+      fs.unlinkSync(oldImage)
+      migrated++
+    } catch { /* Keep the old pair intact for a later retry. */ }
+  }
+  return { migrated }
 }
 function importLegacyBackground({ background, w, h, name } = {}) {
   if (typeof background !== 'string' || !/^print-bg\/[^/\\]+\.(png|jpe?g)$/i.test(background)) throw new Error('旧底图路径无效')
@@ -594,4 +804,5 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetSource, assetBytes, setAssetSource, withDesignLock: withLock, publishRevisionLocked }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetGeometry, assetSource, assetBytes, setAssetSource, jpegOrientation, withDesignLock: withLock, publishRevisionLocked, migrateEphemeralOriginals, migrateManagedOriginals,
+  POOL_MANAGED, POOL_EPHEMERAL, ASSET_POOLS, originalExists }

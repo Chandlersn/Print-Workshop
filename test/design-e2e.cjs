@@ -1,13 +1,22 @@
 /** Real Electron acceptance: shared artwork, PDF fidelity, and editor persistence. */
 const { app, BrowserWindow, protocol, net, ipcMain, nativeImage, dialog } = require('electron')
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 const zlib = require('zlib')
 const assert = require('assert/strict')
 const { pathToFileURL } = require('url')
 
 const ROOT = path.resolve(__dirname, '..')
-const DATA = fs.mkdtempSync(path.join(__dirname, '.tmp-design-e2e-'))
+/*
+ * 夹具数据目录放系统临时区，不放仓库里。
+ *
+ * 沙箱会间歇拦掉 **Electron 进程**在仓库内的目录 rename/rmdir（实测 200 次里 7 次
+ * EPERM；同样操作在纯 Node 下与 os.tmpdir 下都是 0 次）。而 `withLock` 加锁的文件锁
+ * 正是「rename 一个非空目录」——把夹具放在仓库里，整套 e2e 就会随机红在保存动作上，
+ * 与它验的东西毫无关系。output-dpi-e2e / fixed-image-dedupe-e2e 同例（都在 os.tmpdir）。
+ */
+const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-design-e2e-'))
 const OUTPUT = path.join(ROOT, '.workbuddy-ai', 'tmp', 'design-acceptance')
 fs.mkdirSync(OUTPUT, { recursive: true })
 process.env.PRINTPRESS_DATA_DIR = DATA
@@ -53,6 +62,13 @@ async function waitNode(predicate, label, timeout = 5000) {
 const click = (selector) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('找不到控件 '+${JSON.stringify(selector)});el.click()})()`)
 const fill = (selector, value) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw new Error('找不到输入 '+${JSON.stringify(selector)});el.focus();el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.blur()})()`)
 const clickText = (selector, text) => evaluate(`(() => {const el=[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>el.textContent.trim()===${JSON.stringify(text)});if(!el)throw new Error('找不到按钮 '+${JSON.stringify(text)});el.click()})()`)
+// 撤销/重做按钮已从工具栏移除（v0.6.2），只剩快捷键。handler 挂在 window 上，
+// 这里照生产路径派发 keydown（不再去点一个界面上已经没有了按钮）。
+const pressUndo = () => evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'z',ctrlKey:true,bubbles:true,cancelable:true}))`)
+const pressRedo = () => evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'z',ctrlKey:true,shiftKey:true,bubbles:true,cancelable:true}))`)
+// 撤销栈上限（src/views/BackgroundDesignerView.vue: UNDO_LIMIT）。测试里「撤到栈底」
+// 需要知道最多有几条，超出这个次数的按压都是空操作。
+const UNDO_LIMIT = 50
 function hasPdfTextOperators(pdf) {
   const raw = pdf.toString('latin1')
   let index = 0
@@ -271,13 +287,19 @@ async function main() {
   await waitFor(`!document.querySelector('[data-testid="design-inline-text"]')`, '失焦后退出就地编辑')
   await waitFor(`(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text==='失焦提交的字'`, '失焦提交的内容写入工程')
   // ③ Esc 收工（照 PPT 的习惯：Esc 保留改动，想撤销按 Ctrl+Z）。没改就不该多出一条历史。
-  const undoDisabledBefore = await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`)
+  //    撤销按钮已下线，改派发键盘验证：撤一步必须越过 Esc 这一下、落在 blur 之前的内容上；
+  //    若「空退出」也多记一条历史，这一步就只会原地打转。撤完再重做回去，后续流程状态不变。
   await doubleClick(`[data-canvas-layer-id="${firstTextId}"]`)
   await waitFor(`Boolean(document.querySelector('[data-testid="design-inline-text"]'))`, '第三次进入就地编辑')
   await evaluate(`document.querySelector('[data-testid="design-inline-text"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
   await waitFor(`!document.querySelector('[data-testid="design-inline-text"]')`, 'Esc 退出就地编辑')
-  ok(await evaluate(`(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text==='失焦提交的字'`), 'Esc 退出时没改过内容就不产生新版本')
-  ok(undoDisabledBefore === await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`), 'Esc 空退出不改动撤销栈')
+  const draftTextOf = (text) => `(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.id===${JSON.stringify(firstTextId)})?.text===${JSON.stringify(text)}`
+  ok(await evaluate(draftTextOf('失焦提交的字')), 'Esc 退出时没改过内容就不产生新版本')
+  await pressUndo()
+  await waitFor(draftTextOf('画布上直接改的字'), 'Esc 空退出不多记历史（撤销一步落在 blur 之前）')
+  ok(true, 'Esc 空退出不改动撤销栈')
+  await pressRedo()
+  await waitFor(draftTextOf('失焦提交的字'), '重做恢复 Esc 前的内容')
   await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
   /*
    * ---- 颜色控件 ----
@@ -298,10 +320,10 @@ async function main() {
   await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('change',{bubbles:true})) })()`)
   await waitFor(`${draftTextColor}==='#0f7a3d'`, 'change 收尾后颜色保持最终值')
   ok(true, 'change 收尾后颜色保持最终值')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   await waitFor(`${draftTextColor}==='#2b2622'`, '撤销回到取色前的颜色')
   ok(true, '撤销一步即回到取色前的颜色（一次取色只记一条历史）')
-  await click('[data-testid="design-redo"]')
+  await pressRedo()
   await waitFor(`${draftTextColor}==='#0f7a3d'`, '重做恢复取色结果')
   ok(true, '重做恢复取色结果')
   /*
@@ -314,15 +336,15 @@ async function main() {
   await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('change',{bubbles:true})) })()`)
   await waitFor(`${draftTextColor}==='#0f7a3d'`, '打断后取色仍生效')
   ok(true, '打断后取色仍生效')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   await waitFor(`${draftTextColor}==='#123456'`, '撤销只回退取色')
   ok(await evaluate(`${draftTextValue}==='取色打断测试'`), '撤销取色不连带回滚中间那次普通编辑')
-  await click('[data-testid="design-redo"]')
+  await pressRedo()
   await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
   await waitFor(`${draftTextColor}==='#0f7a3d'`, '颜色收尾')
   await click('[data-testid="design-add-rect"]')
-  await click('[data-testid="design-undo"]')
-  await click('[data-testid="design-redo"]')
+  await pressUndo()
+  await pressRedo()
   await click('[data-testid="design-save"]')
   await waitFor(`window.printpress.listDesigns().then(items=>items.some(item=>item.name==='真实界面保存验收'))`, '工程真实落盘')
   const saved = designs.listDesigns().find((item) => item.name === '真实界面保存验收')
@@ -342,7 +364,7 @@ async function main() {
   await drag(`[data-canvas-layer-id="${rectLayer.id}"]`, 36, 20)
   const afterMove = await evaluate(`Number(document.querySelector('[data-testid="design-layer-x"]').value)`)
   ok(afterMove > beforeMove + 10, '真实鼠标拖动改变物理坐标')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   ok(await evaluate(`Math.abs(Number(document.querySelector('[data-testid="design-layer-x"]').value)-${beforeMove})<0.001`), '一次撤销还原完整拖动')
   ok(await evaluate(`!document.querySelector('.canvas-status .unsaved')`), '撤销回已保存内容后恢复已保存状态')
 
@@ -421,7 +443,7 @@ async function main() {
 
   // Later assertions count this same project's layers, so undo every addition first.
   for (let i = 0; i < 3; i += 1) {
-    await click('[data-testid="design-undo"]')
+    await pressUndo()
     await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste + 2 - i}`, `撤销第 ${i + 1} 次导入`)
   }
   ok(true, '撤销可完整回退粘贴与拖入产生的图层')
@@ -439,8 +461,10 @@ async function main() {
   await waitFor(`(${draftDesign})?.layers.length===${layersBeforePaste + 1}`, 'cleanup image persisted in draft')
   const cleanupDoc = await evaluate(draftDesign)
   const cleanupLayer = cleanupDoc.layers[cleanupDoc.layers.length - 1]
-  const cleanupPath = path.join(DATA, cleanupDoc.assets[cleanupLayer.assetId].path)
-  const cleanupMetaPath = path.join(DATA, 'design-assets', `${cleanupLayer.assetId.slice('asset_'.length)}.json`)
+  const cleanupRecord = cleanupDoc.assets[cleanupLayer.assetId]
+  const cleanupPath = path.join(DATA, cleanupRecord.path)
+  // 边车与图片同池同目录（I-51）：粘贴的临时件在 ephemeral-assets/，按文档记录推导，不写死池名
+  const cleanupMetaPath = path.join(DATA, path.dirname(cleanupRecord.path), `${cleanupLayer.assetId.slice('asset_'.length)}.json`)
   const libraryIndexPath = path.join(DATA, 'asset-library.json')
   const libraryRows = fs.existsSync(libraryIndexPath) ? JSON.parse(fs.readFileSync(libraryIndexPath, 'utf8')) : []
   libraryRows.push({ assetId: cleanupLayer.assetId, displayName: '旧版临时素材', tags: [], favorite: false })
@@ -452,7 +476,7 @@ async function main() {
   ui.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Delete' })
   await waitFor(`document.querySelectorAll('[data-layer-id]').length===${layersBeforePaste}`, 'delete pasted image layer')
   await waitNode(() => !fs.existsSync(cleanupPath) && !fs.existsSync(cleanupMetaPath), 'delete layer removes original and metadata from data directory')
-  ok(!fs.existsSync(cleanupPath) && !fs.existsSync(cleanupMetaPath), 'deleting the only pasted layer removes its original and metadata from design-assets')
+  ok(!fs.existsSync(cleanupPath) && !fs.existsSync(cleanupMetaPath), 'deleting the only pasted layer removes its original and metadata from the asset pool')
   ok(!JSON.parse(fs.readFileSync(libraryIndexPath, 'utf8')).some(item => item.assetId === cleanupLayer.assetId), '删除后同步清除旧版素材库索引记录')
 
   // Exercise the real dialog IPC/importer; only the OS file picker result is substituted.
@@ -506,8 +530,8 @@ async function main() {
   await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.h === 25`, '套用 1:1 比例预设只改高度')
   const squareLayer = (await evaluate(draftDesign)).layers.find((layer) => layer.id === croppedLayer.id)
   ok(squareLayer.w === 25 && squareLayer.h === 25, `比例预设保持宽度 25mm、只把高度改成 25mm（实得 ${squareLayer.w}×${squareLayer.h}）`)
-  await click('[data-testid="design-undo"]')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
+  await pressUndo()
   // 撤销回退到保存态后草稿会被清掉（不再是「未保存」），所以这一条必须看 DOM 而不是草稿。
   await waitFor(`Number(document.querySelector('[data-testid="design-layer-w"]').value) === ${croppedLayer.w}`, '撤销可完整回退尺寸')
   ok(await evaluate(`document.querySelector('[data-testid="design-crop-x"]').value==='25' && document.querySelector('[data-testid="design-crop-w"]').value==='50'`),
@@ -525,12 +549,22 @@ async function main() {
   const grouped = designs.getDesign(saved.id)
   const group = grouped.groups[0]
   ok(grouped.schemaVersion === 2 && group.name === '标题与边框' && group.layerIds.length === 2, '图层分组与名称保存为格式版本2')
+  await fill('[data-testid="design-group-scale"]', '150')
+  await fill('[data-testid="design-group-rotation"]', '25')
+  await click('[data-testid="design-group-transform"]')
+  await waitFor(`Boolean((${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(titleLayer.id)})?.rotation===25)`, '整组变换写入工程草稿')
+  const transformedGroup = await evaluate(draftDesign)
+  ok(group.layerIds.every(id => transformedGroup.layers.find(layer => layer.id === id).rotation === grouped.layers.find(layer => layer.id === id).rotation + 25), '界面整组旋转同步作用于全部成员')
+  ok(transformedGroup.layers.find(layer => layer.id === titleLayer.id).fontSize > grouped.layers.find(layer => layer.id === titleLayer.id).fontSize, '整组缩放同步调整文字字号')
+  await pressUndo()
+  await waitFor(`!document.querySelector('.canvas-status .unsaved')`, '整组变换一次撤销恢复保存版本')
+  await waitFor(`!localStorage.getItem('printpress-background-designer-draft-v1')`, '整组撤销后旧草稿已清除')
   await click(`[data-layer-id="${titleLayer.id}"]`)
   ui.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Delete' })
   ui.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Delete' })
   await new Promise(resolve => setTimeout(resolve, 100))
   ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===2 && !document.querySelector('[data-layer-id="${titleLayer.id}"]') && Boolean(document.querySelector('[data-layer-id="${rectLayer.id}"]'))`), '列表单选成员后Delete仅删除选中成员')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   ok(await evaluate(`document.querySelectorAll('[data-group-id]').length===1 && !document.querySelector('.canvas-status .unsaved')`), '撤销成员删除完整恢复分组')
   await click(`[data-layer-id="${titleLayer.id}"]`)
   const memberX = await evaluate(`Number(document.querySelector('[data-testid="design-layer-x"]').value)`)
@@ -539,8 +573,9 @@ async function main() {
   ui.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Right' })
   await new Promise(resolve => setTimeout(resolve, 100))
   ok(await evaluate(`Number(document.querySelector('[data-testid="design-layer-x"]').value)>${memberX} && document.querySelector('[data-canvas-layer-id="${rectLayer.id}"]').style.left===${JSON.stringify(otherX)}`), '列表单选成员方向键不会移动其他组员')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   const draftDoc = `JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design`
+  await waitFor(`!localStorage.getItem('printpress-background-designer-draft-v1')`, '单层移动撤销后旧草稿已清除')
   await click(`[data-group-id="${group.id}"]`)
   await drag(`[data-canvas-layer-id="${rectLayer.id}"]`, 24, 14)
   await waitFor(`(${draftDoc})?.layers.find(l=>l.id===${JSON.stringify(rectLayer.id)})?.x!==${grouped.layers.find(l=>l.id===rectLayer.id).x} && Boolean(${draftDoc})`, '整组拖动写入草稿')
@@ -550,7 +585,7 @@ async function main() {
     return { x: after.x - before.x, y: after.y - before.y }
   })
   ok(deltas[0].x > 0 && Math.abs(deltas[0].x - deltas[1].x) < 0.001 && Math.abs(deltas[0].y - deltas[1].y) < 0.001, '整组真实拖动保持成员相对位置')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   ok(await evaluate(`!document.querySelector('.canvas-status .unsaved')`), '一次撤销恢复整组位置与已保存状态')
   await click(`[data-group-id="${group.id}"] [data-testid="design-group-lock"]`)
   ui.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Delete' })
@@ -566,7 +601,7 @@ async function main() {
   ok(await evaluate(`document.querySelectorAll('[data-group-id]').length===2 && document.querySelectorAll('[data-layer-id]').length===5`), '复制组生成新的组和全部成员')
   await click('[data-testid="design-ungroup"]')
   ok(await evaluate(`document.querySelectorAll('[data-group-id]').length===1 && document.querySelectorAll('[data-layer-id]').length===5`), '解组保留复制出的全部图层')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   await evaluate(`[...document.querySelectorAll('[data-group-id]')].find(el=>el.dataset.groupId!==${JSON.stringify(group.id)}).click()`)
   await click('[data-testid="design-group-delete"]')
   ok(await evaluate(`document.querySelectorAll('[data-group-id]').length===1 && document.querySelectorAll('[data-layer-id]').length===3`), '删除副本组不影响原组及图片')
@@ -598,8 +633,8 @@ async function main() {
   })()`)
   await waitFor(`Math.abs(Math.min(...(${draftDoc}).layers.filter(l=>${JSON.stringify(group.layerIds)}.includes(l.id)).map(l=>l.x))-80)<0.01`, '拖动吸附垂直参考线')
   ok(true, '组合拖动吸附到参考线的毫米坐标')
-  await click('[data-testid="design-undo"]')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
+  await pressUndo()
   await click('[data-testid="design-save"]')
   await waitFor(`!document.querySelector('[data-testid="design-save"]').disabled && !document.querySelector('.canvas-status .unsaved')`, '保存分组与参考线')
   const phaseTwo = designs.getDesign(saved.id)
@@ -682,7 +717,7 @@ async function main() {
   })()`)
   ok(draggedPosition !== null && Math.abs(draggedPosition - 30) < 0.2,
     `拖出的参考线落在指针所在的毫米位置（期望 30mm，实得 ${draggedPosition}）`)
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   await waitFor(`document.querySelectorAll('[data-guide-line]').length===${guidesBefore + 1}`, '一次撤销整条回退拖出的参考线')
   ok(true, '一次撤销就整条回退——拖动过程没有把几十条中间态灌进撤销栈')
 
@@ -812,7 +847,7 @@ async function main() {
   await drag(`[data-canvas-layer-id="${refBoxId}"]`, 40, 0)
   await waitFor(`Math.abs(Number(document.querySelector('[data-testid="design-layer-x"]').value)-${refBoxX})>1`, '参考框可真实拖动')
   ok(true, '参考框在画布上能选中并拖动，用户照着它对齐图片')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
 
   // Export the current draft through the real context bridge. The OS picker alone is stubbed.
   // 基准取「导出前那一刻」的版本号：上面参考框的保存已经推进过版本，早先抓的快照会过期。
@@ -916,7 +951,7 @@ async function main() {
     shell.showItemInFolder = originalReveal
     shell.openPath = originalOpen
   }
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
 
   // Recovery uses the local draft, including a value changed after the last successful save.
   await click(`[data-layer-id="${croppedLayer.id}"]`)
@@ -1011,7 +1046,7 @@ async function main() {
   // 「预览→确认」：一次手势里的连续拖动只留一条撤销，否则连续拖会把撤销栈塞满。
   await evaluate(`(() => {const el=document.querySelector('[data-testid="design-adjust-grayscale"]');for(const v of [10,20,30,40,60]){el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))}el.dispatchEvent(new Event('change',{bubbles:true}))})()`)
   await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.grayscale === 0.6`, '一次手势内的多次拖动只落到最终值 0.6')
-  await click('[data-testid="design-undo"]')
+  await pressUndo()
   await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.grayscale === 0.5`, '一次撤销就回到拖动前')
   ok(true, '滑杆类控件一次手势只留一条撤销（拖动过程不进撤销栈）')
 
@@ -1079,7 +1114,9 @@ async function main() {
   await waitFor(`document.querySelector('.canvas-zoom-value')?.textContent==='125%'`, '拖拽前将模板画布放大')
   await drag('.field-box', 30, 12)
   ok(await evaluate(`document.querySelector('.field-box').style.left!==${JSON.stringify(fieldBefore)}`), '有图层底图时变量字段仍可真实拖动')
-  await clickText('.editor .toolbar button', '撤销')
+  // 模板工坊的撤销/重做按钮也已下线（v0.6.2），只剩 Ctrl+Z / Ctrl+Shift+Z。
+  // TemplateView 的 keydown 挂在 window 上，与底图制作同一套派发方式。
+  await pressUndo()
   ok(await evaluate(`document.querySelector('.field-box').style.left===${JSON.stringify(fieldBefore)}`), '模板字段撤销独立于底图图层')
   await click('[aria-label="恢复画布到 100%"]')
   await waitFor(`document.querySelector('.canvas-zoom-value')?.textContent==='100%'`, '画布恢复 100% 后继续编辑')
@@ -1218,20 +1255,20 @@ async function main() {
   await waitFor(`(document.querySelector('.notice.success:not(.export-done)')?.textContent||'').includes('原图已同步清理')`, '顶部提示条告知原图已清理')
   ok(true, '顶部提示条告知「未加入素材库的原图已同步清理」（非阻塞，替代原确认框）')
 
-  // ③ 外科清栈：删临时件后，与它无关的编辑历史必须还在（旧的「整栈清空」会让 undo 立刻变灰）
-  ok(!(await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`)), '删临时件后撤销栈未被清空（无关编辑仍可撤）')
-  let backSteps = 0
-  while (backSteps < 60 && !(await evaluate(`document.querySelector('[data-testid="design-undo"]').disabled`))) {
-    await click('[data-testid="design-undo"]')
-    backSteps += 1
-  }
-  ok(backSteps > 0 && await evaluate(`document.querySelectorAll('[data-layer-id]').length===${layersBeforeRect}`), '无关编辑（先加的那个矩形）仍能撤销回去')
+  // ③ 外科清栈：删临时件后，与它无关的编辑历史必须还在（旧的「整栈清空」会让 undo 一步都走不动）
+  //    撤销按钮已下线，改派发 Ctrl+Z。「撤到栈底」的判据不能是「按钮变灰」，也不能是
+  //    「持久化状态不再变化」——undo 只改内存里的 design，草稿要等切换/保存/卸载才落盘
+  //    （见 persistDraft 的调用点），所以任何草稿信号都测不到它。栈上限就是 UNDO_LIMIT，
+  //    压到这个次数必然见底，见底之后再多按也只是空操作，不会推出别的东西。
+  for (let i = 0; i < UNDO_LIMIT + 5; i += 1) await pressUndo()
+  await new Promise((resolve) => setTimeout(resolve, 400)) // 等 Vue 把最后一屏画完
+  ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===${layersBeforeRect}`), '无关编辑（先加的那个矩形）仍能撤销回去')
 
   // ④ 撤销栈上限已从 5 放宽到 50：连加 12 个矩形能一路全撤（若仍是 5 则只能撤回 7 个）
   const rectsBase = await evaluate(`document.querySelectorAll('[data-layer-id]').length`)
   for (let i = 0; i < 12; i += 1) await click('[data-testid="design-add-rect"]')
   await waitFor(`document.querySelectorAll('[data-layer-id]').length===${rectsBase + 12}`, '连加 12 个矩形')
-  for (let i = 0; i < 12; i += 1) await click('[data-testid="design-undo"]')
+  for (let i = 0; i < 12; i += 1) await pressUndo()
   ok(await evaluate(`document.querySelectorAll('[data-layer-id]').length===${rectsBase}`), '连加 12 个矩形可全部撤销（上限已从 5 放宽到 50）')
 
   // 渐变是右侧属性栏里的真实操作，不只验证模型字段存在。
@@ -1260,6 +1297,39 @@ async function main() {
   await fill('[data-testid="design-shadow-dx"]', '-2')
   await waitFor(`[...document.querySelectorAll('[data-testid="design-stage"] feOffset')].some(node=>node.getAttribute('dx')==='-2')`, '阴影负偏移实时渲染')
   ok(await evaluate(`document.querySelector('[data-testid="design-shadow-dx"]')?.value==='-2'`), '阴影水平偏移可在界面编辑')
+  await click('[data-testid="design-copy-style"]')
+  await click('[data-testid="design-add-rect"]')
+  const styleTargetId = await evaluate(`document.querySelector('.layer-row.selected[data-layer-id]')?.dataset.layerId`)
+  ok(Boolean(styleTargetId), '新矩形作为样式复制目标被选中')
+  await waitFor(`!document.querySelector('[data-testid="design-paste-style"]').disabled`, '选中同类图层可应用复制的样式')
+  await click('[data-testid="design-paste-style"]')
+  await waitFor(`Boolean((${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(styleTargetId)})?.shadow)`, '样式复制写入目标图层')
+  ok((await evaluate(draftDesign)).layers.find(layer => layer.id === styleTargetId).shadow.dxMm === -2, '形状样式按参数复制，保留目标图层')
+  await pressUndo()
+  await waitFor(`!(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(styleTargetId)})?.shadow`, '应用样式一次撤销')
+
+  // 导航缩略图只在画布超出可视区域时出现；移动视口后应真正改变滚动位置。
+  await click('[data-testid="design-focus-canvas"]')
+  ok(await evaluate(`!document.querySelector('.designer-panel.inspector') && !document.querySelector('.tools-panel').getBoundingClientRect().width`), '专注画布收起两侧面板')
+  await click('[data-testid="design-focus-canvas"]')
+  for (let i = 0; i < 5; i++) await click('.canvas-toolbar button[title="放大"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="design-navigator"]'))`, '放大后显示画布导航图')
+  const beforeNav = await evaluate(`document.querySelector('.canvas-scroll').scrollLeft`)
+  await evaluate(`(() => { const nav=document.querySelector('[data-testid="design-navigator"]'); const r=nav.getBoundingClientRect(); nav.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:1,clientX:r.right-5,clientY:r.bottom-5})); return true })()`)
+  await waitFor(`document.querySelector('.canvas-scroll').scrollLeft>${beforeNav}`, '导航图点击改变画布滚动位置')
+  ok(true, '放大画布可通过导航图定位')
+
+  // 底部滚动条留在浮动属性面板左边，拖至最右后画布边缘仍可见、可点。
+  const bar = '[data-testid="design-horizontal-scroll"]'
+  await waitFor(`document.querySelector(${JSON.stringify(bar)}).scrollWidth>document.querySelector(${JSON.stringify(bar)}).clientWidth`, '放大后底部横向滚动条可拖动')
+  ok(await evaluate(`(() => {const c=document.querySelector('.canvas-scroll');return c.scrollWidth>c.clientWidth && getComputedStyle(c).overflowX==='hidden' && c.clientHeight===c.offsetHeight})()`), '画布保留横向滚动范围，但不再显示第二条原生横向滚动条')
+  ok(await evaluate(`(() => {const b=document.querySelector(${JSON.stringify(bar)}).getBoundingClientRect(),p=document.querySelector('.designer-panel.inspector').getBoundingClientRect(),c=document.querySelector('.canvas-scroll').getBoundingClientRect();return b.bottom<=c.bottom+22 && b.right<=p.left+1})()`), '横向滚动条显示在画布底部、属性面板左侧')
+  await evaluate(`(() => {const b=document.querySelector(${JSON.stringify(bar)});b.scrollLeft=0;b.dispatchEvent(new Event('scroll'))})()`)
+  await waitFor(`document.querySelector('.canvas-scroll').scrollLeft<2`, '横向滚动条能移回画布左侧')
+  await evaluate(`(() => {const b=document.querySelector(${JSON.stringify(bar)});b.scrollLeft=b.scrollWidth;b.dispatchEvent(new Event('scroll'))})()`)
+  await waitFor(`Math.abs(document.querySelector('.canvas-scroll').scrollLeft-(document.querySelector('.canvas-scroll').scrollWidth-document.querySelector('.canvas-scroll').clientWidth))<3`, '横向滚动条能移到画布最右侧')
+  ok(await evaluate(`(() => {const s=document.querySelector('[data-testid="design-stage"]').getBoundingClientRect(),p=document.querySelector('.designer-panel.inspector').getBoundingClientRect(),c=document.querySelector('.canvas-scroll').getBoundingClientRect(),x=s.right-8,y=Math.max(c.top+20,Math.min(c.bottom-20,s.top+40));return s.right<p.left && x>c.left && document.elementFromPoint(x,y)?.closest('[data-testid="design-stage"]')!==null})()`), '移至最右侧后画布未被属性面板遮挡且可以操作')
+  await click('.canvas-toolbar button[title="恢复预览大小"]')
 
   ok(errors.length === 0, `界面无控制台错误：${errors.join('; ')}`)
   console.log(`DESIGN_E2E_OK checks=${checks} artifacts=${OUTPUT}`)

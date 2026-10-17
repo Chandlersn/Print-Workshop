@@ -223,7 +223,7 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
 {
   const ICON = path.join(__dirname, '..', 'build', 'icon.png')
   const JPG = path.join(__dirname, 'fixtures', 'design-portrait.jpg')
-  // 模板底图现在以 assetId 引用素材库原件（design-assets/<hash>.<ext>），按原件真实路径定位
+  // 模板底图现在以 assetId 引用内容寻址原件（临时池 ephemeral-assets/<hash>.<ext>，I-51），按原件真实路径定位
   const abs = (id) => path.join(TMP, designs.assetInfo(id).path)
 
   const fp = path.join(TMP, '底图名单.csv')
@@ -236,7 +236,7 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   // abs() 要读原件 json，丢弃后会读不到；先把路径字符串快照下来，删完只用于 existsSync
   const absA = abs(a.background)
   const absB = abs(b.background)
-  ok(fs.existsSync(absA), '上传后原件落盘 design-assets')
+  ok(fs.existsSync(absA), '上传后原件落盘临时底图池')
   ok(fs.existsSync(absB), '第二张原件落盘')
   ok(a.background !== b.background, '不同内容去重后仍是不同原件（内容寻址）')
 
@@ -286,11 +286,16 @@ console.log('== 4e. 模板列表封顶 + 「列对齐」下线（前端静态核
   // 「列对齐」按钮删了：它的纯函数也不该留成死代码
   ok(!/applyColumnSnap/.test(view), '工具栏不再有「列对齐」按钮（handler 也没了）')
   ok(!/>\s*列对齐\s*<\/button>/.test(view), '没有残留的「列对齐」按钮文案')
-  ok(/均分横排/.test(view), '「均分横排」保留（删的是列对齐，不是整条工具栏）')
+  // 「均分横排」v0.6.2 也下线了（连按钮带纯函数）。这条从「保留」翻成「删干净」：
+  // 只删按钮、留着 field-layout.cjs 里的 evenRow 当死代码，是上一个功能下线时
+  // 特意纠正过的做法，不能再犯。
+  ok(!/均分横排/.test(view), '工具栏不再有「均分横排」按钮')
+  ok(!/applyEvenRow|layoutTargets/.test(view), '「均分横排」的 handler 也没了')
   const layout = src('src/lib/field-layout.cjs')
   ok(!/columnSnap/.test(layout), 'field-layout.cjs 里的 columnSnap 已删（零引用的死代码）')
-  ok(/module\.exports\s*=\s*\{\s*evenRow,\s*anchorRatio\s*\}/.test(layout),
-    '导出只剩 evenRow / anchorRatio')
+  ok(!/evenRow/.test(layout), 'field-layout.cjs 里的 evenRow 也已删（随按钮一起下线）')
+  ok(/module\.exports\s*=\s*\{\s*anchorRatio\s*\}/.test(layout),
+    '导出只剩 anchorRatio')
 
   // 模板列表：8 条封顶 + 自动滚动条
   const listRule = view.match(/\.tpl-list\s*\{([\s\S]*?)\}/)

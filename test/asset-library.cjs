@@ -63,6 +63,7 @@ function makeThumbnail({ buffer, maxSide }) {
 const OPTS = { makeThumbnail }
 
 const assetsDir = path.join(tmp, 'design-assets')
+const ephemeralDir = path.join(tmp, 'ephemeral-assets')
 const originals = (ext) => fs.readdirSync(assetsDir).filter((f) => f.endsWith(ext))
 const shaOf = (assetId) => assetId.slice('asset_'.length)
 
@@ -236,6 +237,16 @@ try {
     const orphanHashes = library.findOrphanOriginals().map((o) => o.hash)
     assert.ok(orphanHashes.includes(hashC) && orphanHashes.includes(hashD), 'C、D 都是孤儿')
     assert.ok(!orphanHashes.includes(hashA) && !orphanHashes.includes(hashB), 'A(模板固定引用旧工程版本)、B(在库/归档) 都不算孤儿')
+    assert.ok(!library.findOrphanOriginals({ protectedIds: [assetC.id] }).some(item => item.hash === hashC), '未保存草稿持有的原件不列为候选')
+    assert.equal(library.purgeOrphanOriginals([hashC], { protectedIds: [assetC.id] }).kept, 1, '删除前重新保护草稿原件')
+    store.saveJson('photo-overrides', [{ assetId: assetC.id }])
+    assert.ok(!library.findOrphanOriginals().some(item => item.hash === hashC), '单人取景引用保护原件')
+    store.saveJson('photo-overrides', [])
+    const taskDir = path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-import-staging', '11111111-1111-1111-1111-111111111111')
+    fs.mkdirSync(taskDir, { recursive: true })
+    fs.writeFileSync(path.join(taskDir, 'journal.json'), JSON.stringify({ assets: [{ assetId: assetC.id }], binding: { files: [] } }))
+    assert.ok(!library.findOrphanOriginals().some(item => item.hash === hashC), '未完成照片导入任务保护暂存原件')
+    fs.rmSync(taskDir, { recursive: true })
 
     const templateRows = store.loadJson('templates')
     store.saveJson('templates', [{ id: 'template-invalid-design', backgroundDesign: { id: designA2.id, revision: 99 } }])
@@ -259,6 +270,7 @@ try {
     // 真删 C（真孤儿）
     res = library.purgeOrphanOriginals([hashC])
     assert.equal(res.removed, 1); assert.equal(res.kept, 0)
+    assert.ok(res.bytes >= pngForC.length && !res.failed.length, '报告实际释放字节而非只数候选')
     assert.ok(!fs.existsSync(path.join(assetsDir, `${hashC}.png`)), 'C 原件已删')
     assert.ok(!fs.existsSync(path.join(assetsDir, `${hashC}.json`)), 'C 元数据已删')
     assert.ok(fs.existsSync(path.join(assetsDir, `${hashA}.png`)), 'A 仍被工程引用，原件保留')
@@ -293,6 +305,96 @@ try {
     assert.ok(restored.items.some((i) => i.assetId === gone.id), '原件回来了 → 条目自动恢复')
     assert.deepEqual(restored.missing, [])
   })
+
+  // I-51 素材保存仓库与临时底图分池存放：design-assets/（素材库）↔ ephemeral-assets/（临时底图）
+  console.log('== I-51 素材保存仓库与临时底图分池存放 ==')
+  {
+  const inPool = (dir, assetId, ext = 'png') => fs.existsSync(path.join(dir, `${shaOf(assetId)}.${ext}`))
+  const truthPath = (assetId) => designs.assetInfo(assetId).path
+
+  check('受管理件落 design-assets/、临时件落 ephemeral-assets/，两个池子互不串门', () => {
+    const pngManaged = makePng(5, 5, [1, 2, 3])
+    const pngEphemeral = makePng(6, 6, [4, 5, 6])
+    const managed = designs.importImageBytes({ name: '库里的图.png', base64: pngManaged.toString('base64') })
+    const ephemeral = designs.importImageBytes({ name: '临时底图.png', base64: pngEphemeral.toString('base64'), source: 'ephemeral' })
+    assert.ok(managed.path.startsWith('design-assets/'), '受管理件落素材库池')
+    assert.ok(inPool(assetsDir, managed.id), '素材库池里有受管理件')
+    assert.ok(ephemeral.path.startsWith('ephemeral-assets/'), '临时底图落临时池')
+    assert.ok(inPool(ephemeralDir, ephemeral.id), '临时池里有临时底图')
+    assert.ok(!inPool(assetsDir, ephemeral.id), '临时件不进素材库池')
+    assert.ok(!inPool(ephemeralDir, managed.id), '受管理件也不落进临时池')
+
+    // 同内容换个 source 再导：内容寻址去重，绝不因 source 不同就多存一份字节（I-31 ①）
+    const again = designs.importImageBytes({ name: '同一个临时图-改名.png', base64: pngEphemeral.toString('base64') })
+    assert.equal(again.id, ephemeral.id, '同一字节内容仍是同一个素材')
+    assert.equal(truthPath(ephemeral.id), ephemeral.path, '已在临时池的同内容导入不把它搬进素材库池')
+    assert.ok(!inPool(assetsDir, ephemeral.id), '依然只有临时池那一份')
+  })
+
+  check('加入素材库（adopt）把临时件原件连字节搬进 design-assets/，旧工程路径随之改写', () => {
+    const pngPasted = makePng(7, 7, [7, 8, 9])
+    const pasted = designs.importImageBytes({ name: '粘贴的图.png', base64: pngPasted.toString('base64'), source: 'ephemeral' })
+    const saved = designs.saveDesign(designWith(pasted, '先粘贴后收库的工程'))
+    assert.equal(designs.getDesign(saved.id).assets[pasted.id].path, `ephemeral-assets/${shaOf(pasted.id)}.png`,
+      '收库前工程文档记的是临时池路径')
+
+    library.adopt(pasted.id, { displayName: '收进库里' })
+    const moved = designs.assetInfo(pasted.id)
+    assert.equal(moved.source, 'managed', 'adopt 后升为受管理')
+    assert.equal(moved.path, `design-assets/${shaOf(pasted.id)}.png`, 'adopt 后原件记录在素材库池')
+    assert.ok(inPool(assetsDir, pasted.id), '图片搬进了素材库池')
+    assert.ok(!inPool(ephemeralDir, pasted.id), '临时池里不再留原件')
+    assert.equal(designs.getDesign(saved.id).assets[pasted.id].path, moved.path,
+      '旧工程打开时按真身把路径改写成素材库池')
+    assert.ok(designs.assetBytes(pasted.id).buffer.length > 0, '搬完照样读得到字节')
+  })
+
+  check('存量迁移：design-assets/ 里的临时件搬到 ephemeral-assets/（幂等，旧路径工程照常打开）', () => {
+    const pngLegacy = makePng(9, 9, [10, 11, 12])
+    const legacyEphemeral = designs.importImageBytes({ name: '分池前的临时图.png', base64: pngLegacy.toString('base64'), source: 'ephemeral' })
+    const hash = shaOf(legacyEphemeral.id)
+    // 手工搬回 design-assets/ 并留一份旧版 path 字段，模拟「分池之前」的磁盘
+    fs.copyFileSync(path.join(ephemeralDir, `${hash}.png`), path.join(assetsDir, `${hash}.png`))
+    const meta = JSON.parse(fs.readFileSync(path.join(ephemeralDir, `${hash}.json`), 'utf8'))
+    meta.path = `design-assets/${hash}.png`
+    fs.writeFileSync(path.join(assetsDir, `${hash}.json`), JSON.stringify(meta, null, 2))
+    fs.rmSync(path.join(ephemeralDir, `${hash}.png`))
+    fs.rmSync(path.join(ephemeralDir, `${hash}.json`))
+
+    const migrated = designs.migrateEphemeralOriginals()
+    assert.ok(migrated.migrated >= 1, '至少迁走一件')
+    assert.ok(inPool(ephemeralDir, legacyEphemeral.id), '迁移后原件回到临时池')
+    assert.ok(!inPool(assetsDir, legacyEphemeral.id), '素材库池里不再混临时件')
+    assert.equal(JSON.parse(fs.readFileSync(path.join(ephemeralDir, `${hash}.json`), 'utf8')).path,
+      `ephemeral-assets/${hash}.png`, '边车 path 同步改写')
+    assert.deepEqual(designs.migrateEphemeralOriginals(), { migrated: 0 }, '幂等：第二次没有可迁的')
+
+    // 旧工程文档里残留的 design-assets/<hash> 路径是合法历史值：照常打开并改写成真身
+    const legacyDoc = designWith(legacyEphemeral, '分池前保存的工程')
+    legacyDoc.assets[legacyEphemeral.id] = { ...legacyEphemeral, path: `design-assets/${hash}.png` }
+    const saved = designs.saveDesign(legacyDoc)
+    assert.equal(designs.getDesign(saved.id).assets[legacyEphemeral.id].path, `ephemeral-assets/${hash}.png`,
+      '旧路径声明按真身改写，工程照常打开')
+
+    // 但指向别的 hash / 池外路径仍是损坏，不能跟着一起放行
+    const broken = designWith(legacyEphemeral, '路径对不上')
+    broken.assets[legacyEphemeral.id] = { ...legacyEphemeral, path: `ephemeral-assets/${'0'.repeat(64)}.png` }
+    assert.throws(() => designs.saveDesign(broken), /路径不一致/)
+    assert.throws(() => designs.saveDesign({ ...broken, assets: { [legacyEphemeral.id]: { ...legacyEphemeral, path: '../secret.png' } } }), /路径/)
+  })
+
+  check('清理未引用跨两个池子：临时池里的孤儿也列得出来、删得掉', () => {
+    const pngOrphan = makePng(11, 11, [13, 14, 15])
+    const orphan = designs.importImageBytes({ name: '临时孤儿.png', base64: pngOrphan.toString('base64'), source: 'ephemeral' })
+    const hash = shaOf(orphan.id)
+    const orphans = library.findOrphanOriginals()
+    assert.ok(orphans.some((o) => o.hash === hash), '临时池里的孤儿同样列出')
+    const res = library.purgeOrphanOriginals([hash])
+    assert.equal(res.removed, 1)
+    assert.ok(!inPool(ephemeralDir, orphan.id), '孤儿原件从临时池删掉')
+    assert.ok(!inPool(assetsDir, orphan.id), '元数据边车一起删')
+  })
+  }
 } finally {
   rmDeep(tmp)
 }

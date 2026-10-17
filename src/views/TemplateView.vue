@@ -9,10 +9,11 @@
  */
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
+import PageHeader from '../components/PageHeader.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import { designerNav, openDesigner } from '../lib/designer-nav.js'
-import { evenRow, anchorRatio } from '../lib/field-layout.cjs'
+import { anchorRatio } from '../lib/field-layout.cjs'
 import {
   MIN_CANVAS_ZOOM, MAX_CANVAS_ZOOM, clampCanvasZoom, stepCanvasZoom, fitCanvasZoom,
 } from '../lib/canvas-zoom.cjs'
@@ -191,7 +192,9 @@ const activeDatasetId = ref('')
 const catalog = ref([])
 const sampleRow = ref(null)
 const sampleRowIndex = ref(0)
+const sampleRowId = ref('')
 const samplePhotos = ref({})
+const samplePhotoStyles = ref({})
 let photoReadToken = 0
 const selectedIdx = ref(-1)
 const msg = ref('')
@@ -200,9 +203,10 @@ const dragState = ref(null)
 const canvasEl = ref(null)
 const designs = ref([])
 const activeDesign = ref(null)
-watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value], async () => {
+watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value, activeTpl.value?.id], async () => {
   const token = ++photoReadToken
   samplePhotos.value = {}
+  samplePhotoStyles.value = {}
   if (!activeDatasetId.value || !sampleRow.value || !activeDesign.value) return
   const columns = [...new Set(activeDesign.value.layers.filter(l => l.variable && l.visible && !l.editorOnly).map(l => l.bindColumn))]
   const entries = await Promise.all(columns.map(async column => {
@@ -213,6 +217,15 @@ watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value], async 
     } catch { return [column, ''] }
   }))
   if (token === photoReadToken) samplePhotos.value = Object.fromEntries(entries)
+  if (activeTpl.value?.id && sampleRowId.value) {
+    const styles = await Promise.all(activeDesign.value.layers.filter(layer => layer.variable && layer.visible && !layer.editorOnly).map(async layer => {
+      try {
+        const value = await window.printpress.getPhotoOverride({ datasetId: activeDatasetId.value, templateId: activeTpl.value.id, rowId: sampleRowId.value, layerId: layer.id })
+        return [layer.id, value.state === 'active' ? { fit: value.fit, focal: value.focal } : null]
+      } catch { return [layer.id, null] }
+    }))
+    if (token === photoReadToken) samplePhotoStyles.value = Object.fromEntries(styles)
+  }
 })
 const selectedDesignId = ref('')
 const templateKey = ref('')
@@ -384,10 +397,6 @@ const undoStack = ref([])            // 字段快照栈（撤销）
 const redoStack = ref([])            // 重做栈
 const guideV = ref(null)             // 垂直辅助线（画布内 px 坐标）
 const guideH = ref(null)             // 水平辅助线
-const canUndo = computed(() => undoStack.value.length > 0)
-const canRedo = computed(() => redoStack.value.length > 0)
-/** 一键布局可用：多选 ≥2 或画布全部字段 ≥2 */
-const canLayout = computed(() => layoutTargets().length >= 2)
 
 const pageSizeOptions = computed(() => {
   const sizes = window.__PAGE_SIZES__ || []
@@ -623,6 +632,7 @@ async function loadCatalog(dsId) {
     if (token !== catalogReadToken || dsId !== activeDatasetId.value) return
     catalog.value = fields
     sampleRowIndex.value = Math.max(0, ds.rows.findIndex((r) => Object.values(r).some((v) => String(v).trim())))
+    sampleRowId.value = ds.recordIds?.[sampleRowIndex.value] || ''
     sampleRow.value = ds.rows[sampleRowIndex.value] || null
   } catch (err) {
     if (token === catalogReadToken && dsId === activeDatasetId.value) errorMsg.value = extractError(err)
@@ -1116,25 +1126,6 @@ function alignSelected(kind) {
   }
 }
 
-// ---- 一键布局：均分横排（锚点百分比语义，与渲染引擎一致）----
-// 目标：多选 ≥2 时作用于选中字段，否则作用于画布全部字段（新模板起步一键铺开）
-function layoutTargets() {
-  const t = activeTpl.value
-  if (!t) return []
-  return multiSel.value.size > 1
-    ? [...multiSel.value].map((i) => t.fields[i]).filter(Boolean)
-    : t.fields
-}
-
-function applyEvenRow() {
-  const targets = layoutTargets()
-  if (targets.length < 2) return
-  pushUndo()
-  const plan = evenRow(targets)
-  targets.forEach((f, j) => { f.x = plan[j].x; f.y = plan[j].y })
-  flash(`已均分横排 ${targets.length} 个字段`)
-}
-
 // ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除选中项（字段 / 底图）、Ctrl+Z/Y 撤销重做 ----
 
 /**
@@ -1349,12 +1340,11 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="page">
-    <div class="page-head">
-      <h2 class="page-title">模板工坊</h2>
-      <div class="head-actions">
+    <PageHeader title="模板工坊">
+      <template #actions>
         <button class="btn-primary" @click="newTemplate">新建模板</button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <!--
       提示条：原先挤在 page-head 右侧当 12px 小字，而操作点在下方工具栏/画布上，
@@ -1436,7 +1426,7 @@ onBeforeUnmount(() => {
           把「保存 / 删除」甩到第二行左边、「撤销 / 重做」留在第一行末尾——同一个操作组被劈成两半。
           按语义分行后折行位置不再随机。**DOM 顺序必须保持**：`.toolbar .custom-select` 的
           首个元素是「纸张」下拉，多处 e2e 直接点它，换序会静默选错下拉。
-          第 1 行 = 模板与版式属性；第 2 行 = 数据集与操作。
+          第 1 行 = 模板、版式与数据集（都是「选什么」）；第 2 行 = 保存 / 删除（都是「做什么」）。
         -->
         <div class="toolbar">
           <div class="tb-row">
@@ -1514,17 +1504,20 @@ onBeforeUnmount(() => {
               裁切线
             </label>
           </template>
-          </div>
-          <div class="tb-row tb-row-actions">
+          <!--
+            数据集下拉放在第 1 行末尾：它和纸张/版式一样是「选什么」，而保存/删除是「做什么」。
+            此前它独占第二行行首，把「保存 / 删除」孤零零甩到右边，两头都不成组。
+          -->
           <CustomSelect
             v-model="activeDatasetId"
             :options="datasetOptions"
             placeholder="选择数据集"
             width="150px"
           />
-          <button class="btn-ghost btn-icon" :disabled="!canUndo" title="撤销（Ctrl+Z）" @click="undo">撤销</button>
-          <button class="btn-ghost btn-icon" :disabled="!canRedo" title="重做（Ctrl+Y）" @click="redo">重做</button>
-          <button class="btn-ghost" :disabled="!canLayout" title="所选字段（未多选时为全部字段）按 x 顺序等距排成一行，y 取中位数" @click="applyEvenRow">均分横排</button>
+          </div>
+          <div class="tb-row tb-row-actions">
+          <!-- 撤销/重做只走快捷键（Ctrl+Z / Ctrl+Shift+Z 或 Ctrl+Y），工具栏不放按钮：
+               这一排已经十几个控件，而这两个操作的发现路径本来就是键盘。 -->
           <button class="btn-primary" @click="saveTemplate">{{ activeIsBuiltin ? '另存为常用' : '保存' }}</button>
           <button
             class="btn-danger"
@@ -1769,7 +1762,7 @@ onBeforeUnmount(() => {
               <!-- 单页：整页底图 + 字段 -->
               <template v-if="!isGrid && !isFold">
                 <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
-                  <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
+                  <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" :photo-styles="samplePhotoStyles" />
                 </div>
                 <img
                   v-if="bgUrl"
@@ -1803,7 +1796,7 @@ onBeforeUnmount(() => {
               <template v-if="isFold">
                 <div class="canvas-fold-half flip">
                   <div v-if="activeDesign" class="canvas-design">
-                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" :photo-styles="samplePhotoStyles" />
                   </div>
                   <img
                     v-if="bgUrl"
@@ -1826,7 +1819,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="canvas-fold-half fold-ref">
                   <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
-                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" :photo-styles="samplePhotoStyles" />
                   </div>
                   <img
                     v-if="bgUrl"
@@ -1870,7 +1863,7 @@ onBeforeUnmount(() => {
                   :style="{ left: c.left + '%', top: c.top + '%', width: c.w + '%', height: c.h + '%' }"
                 >
                   <div v-if="activeDesign" class="canvas-design" :class="{ selected: bgSelected }" @click="selectBackground">
-                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" />
+                    <DesignSurface :design="activeDesign" :width="designSurfaceWidth" :photos="samplePhotos" :photo-styles="samplePhotoStyles" />
                   </div>
                   <img
                     v-if="bgUrl"
@@ -1938,21 +1931,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 20px;
-}
-
-.page-title {
-  margin: 0;
-  font-size: 18px;
-  color: var(--ink);
-  border-left: 4px solid var(--cinnabar);
-  padding-left: 10px;
-}
-
 .head-actions { display: flex; align-items: center; gap: 12px; }
 
 /* 提示条：与底图制作页 `.notice` 同一套（整条带底色、按钮靠右） */
@@ -2169,7 +2147,8 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-/* 第二行（数据集 + 操作）：操作组靠右，与左侧的数据集选择分开 */
+/* 第二行只剩「保存 / 删除」这类动作：整组靠右。数据集下拉已并入第 1 行末尾
+   （它和纸张/版式一样是「选什么」，不该和「做什么」的动作挤在同一组里） */
 .tb-row-actions .btn-icon:first-of-type { margin-left: 12px; }
 .tb-row-actions .btn-primary { margin-left: auto; }
 

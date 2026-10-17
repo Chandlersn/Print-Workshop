@@ -9,14 +9,34 @@ const result = ref(null)
 const busy = ref(false)
 const loading = ref(false)
 const error = ref('')
+const notice = ref('')
 const progress = ref(null)
 const taskHistory = ref([])
 const pendingSelection = ref(null)
 const importTaskId = ref('')
 const cancelling = ref(false)
 const cancelRequested = ref(false)
-const filter = ref('all')
-const page = ref(0)
+const stateKey = `printpress.photo-table.${props.datasetId}`
+let savedState = {}
+try { savedState = JSON.parse(sessionStorage.getItem(stateKey) || '{}') || {} } catch { /* optional view state */ }
+const filter = ref(typeof savedState.filter === 'string' ? savedState.filter : 'all')
+const search = ref(typeof savedState.search === 'string' ? savedState.search : '')
+const searchDebounced = ref(search.value)
+const page = ref(Number.isInteger(savedState.page) && savedState.page >= 0 ? savedState.page : 0)
+const lastIssueRow = ref(Number.isInteger(savedState.lastIssueRow) ? savedState.lastIssueRow : -1)
+const identifierKey = ref(props.columns.some(item => item.key === savedState.identifierKey)
+  ? savedState.identifierKey : (props.columns.find(item => item.key !== column.value)?.key || column.value))
+const dsDetail = ref(null)
+let searchTimer = null
+function saveTableState() {
+  try { sessionStorage.setItem(stateKey, JSON.stringify({ filter: filter.value, search: search.value, page: page.value, lastIssueRow: lastIssueRow.value, identifierKey: identifierKey.value })) }
+  catch { /* table still works without persisted view state */ }
+}
+watch(search, value => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { searchDebounced.value = value; page.value = 0 }, 150)
+})
+watch([filter, search, page, lastIssueRow, identifierKey], saveTableState)
 // Thumbnails are optional caches; fall back to the managed original once on load failure.
 const photoStates = ref({})
 const photoUrl = row => `pp://media/${row.assetId}`
@@ -34,17 +54,29 @@ function onPhotoError(event, row) {
 let generation = 0
 let alive = true
 const labels = { matched: '已匹配', empty: '未填写', missing: '找不到照片', ambiguous: '同名冲突', invalid: '名称无效', broken: '照片不可用' }
+const issueStatuses = ['empty', 'missing', 'ambiguous', 'invalid', 'broken']
 const taskLabels = { completed: '已完成', recovered: '重启后已完成收尾', 'rolled-back-after-restart': '重启后已回滚', 'rolled-back': '已回滚', canceled: '已取消', 'published-recovery-pending': '已提交，等待恢复', 'recovery-pending': '等待清理恢复', 'recovery-failed': '恢复失败' }
 const latestTask = computed(() => taskHistory.value[0] || null)
-const filtered = computed(() => (result.value?.results || []).filter(row => filter.value === 'all' || row.status !== 'matched'))
+const searchIndex = computed(() => (dsDetail.value?.rows || []).map(row => props.columns
+  .map(item => String(row[item.key] ?? '')).join('\u0000').normalize('NFC').toLocaleLowerCase()))
+const filtered = computed(() => {
+  const query = searchDebounced.value.trim().normalize('NFC').toLocaleLowerCase()
+  return (result.value?.results || []).filter(row =>
+    (filter.value === 'all' || filter.value === 'problems' && row.status !== 'matched' || row.status === filter.value)
+    && (!query || searchIndex.value[row.rowIndex]?.includes(query)))
+})
+const filteredIssueCount = computed(() => filtered.value.filter(row => row.status !== 'matched').length)
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 30)))
 const displayed = computed(() => filtered.value.slice(page.value * 30, (page.value + 1) * 30))
+watch(pageCount, count => { if (page.value >= count) page.value = count - 1 })
 const off = window.printpress.onPhotoProgress(p => {
   if (alive && p.taskId === importTaskId.value && p.datasetId === props.datasetId && p.column === column.value) progress.value = p
 })
 onBeforeUnmount(() => {
   alive = false
   generation++
+  clearTimeout(searchTimer)
+  saveTableState()
   off()
   if (pendingSelection.value?.token) window.printpress.cancelPhotoSelection(pendingSelection.value.token).catch(() => {})
 })
@@ -58,7 +90,6 @@ async function refresh() {
   pendingSelection.value = null
   result.value = null
   error.value = ''
-  page.value = 0
   photoStates.value = {}
   taskHistory.value = []
   if (!column.value) {
@@ -71,11 +102,12 @@ async function refresh() {
   }
   loading.value = true
   try {
-    const [report, tasks] = await Promise.all([
+    const [report, tasks, detail] = await Promise.all([
       window.printpress.photoReport({ datasetId: props.datasetId, column: column.value }),
       window.printpress.photoImportTasks(props.datasetId),
+      window.printpress.getDataset(props.datasetId),
     ])
-    if (alive && token === generation) { result.value = report; taskHistory.value = tasks }
+    if (alive && token === generation) { result.value = report; taskHistory.value = tasks; dsDetail.value = detail }
   } catch (err) {
     if (alive && token === generation) error.value = toUserMessage(err)
   } finally {
@@ -121,7 +153,6 @@ async function commitImport() {
     taskHistory.value = await window.printpress.photoImportTasks(props.datasetId)
     if (alive && token === generation && !response.canceled) {
       result.value = response.report
-      page.value = 0
       photoStates.value = {}
     }
   } catch (err) {
@@ -130,6 +161,36 @@ async function commitImport() {
   } finally {
     if (alive) { busy.value = false; loading.value = false; importTaskId.value = ''; cancelling.value = false; cancelRequested.value = false }
   }
+}
+
+function goEditRow(row) {
+  lastIssueRow.value = row.rowIndex
+  saveTableState()
+  emit('edit-cell', { rowIndex: row.rowIndex, key: column.value })
+}
+
+function goNextIssue() {
+  const issues = filtered.value.filter(row => issueStatuses.includes(row.status))
+  if (!issues.length) return
+  const next = issues.find(row => row.rowIndex > lastIssueRow.value) || issues[0]
+  const index = filtered.value.findIndex(row => row.rowIndex === next.rowIndex)
+  if (index >= 0) page.value = Math.floor(index / 30)
+  goEditRow(next)
+}
+
+async function exportFilteredIssues() {
+  if (!filteredIssueCount.value || busy.value || loading.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    const response = await window.printpress.exportPhotoIssues({
+      datasetId: props.datasetId, column: column.value,
+      rows: filtered.value.filter(row => row.status !== 'matched').map(row => row.rowIndex),
+      identifierKey: identifierKey.value,
+    })
+    if (!response.canceled) notice.value = `已导出 ${response.count} 行照片问题清单。`
+  } catch (err) { error.value = toUserMessage(err) }
+  finally { busy.value = false }
 }
 
 async function cancelSelection() {
@@ -173,6 +234,7 @@ async function cancelImport() {
       <p v-if="loading" role="status">正在检查所选文件夹并计算关联变化，尚未写入照片…</p>
       <p v-if="latestTask" class="photo-note">最近任务：{{ taskLabels[latestTask.state] || latestTask.state }} · {{ latestTask.updatedAt?.replace('T', ' ').slice(0, 19) }}<span v-if="latestTask.error"> · {{ toUserMessage(latestTask.error) }}</span></p>
       <p v-if="error" class="photo-error" role="alert">{{ error }}</p>
+      <p v-if="notice" class="photo-note" role="status">{{ notice }}</p>
       <section v-if="pendingSelection" class="photo-plan" aria-label="导入预检结果">
         <h3>{{ pendingSelection.preview.mode === 'append' ? '补充结果预览' : '替换结果预览' }}</h3>
         <p>文件夹：{{ pendingSelection.preview.folderName }} · {{ pendingSelection.preview.candidateCount }} 个匹配候选。以下按文件名和内容哈希预估；图片解码异常仍会在导入时跳过。</p>
@@ -195,20 +257,32 @@ async function cancelImport() {
       </section>
       <template v-if="result && !loading">
         <p v-if="!result.imported" class="photo-note">尚未导入照片。名单可填写 1001、1001.jpg 或 子目录/1001.jpg；同名多图会报告冲突。</p>
-        <template v-else>
-          <p class="photo-note">来源：{{ result.folderName }} · 匹配 {{ result.counts.matched }} / {{ result.total }} 行 · 待处理 {{ result.blocking }} 行 · 未填写 {{ result.counts.empty }} 行</p>
+        <div class="photo-report">
+          <p class="photo-note photo-match-summary">{{ result.imported ? `来源：${result.folderName}` : '尚未导入照片' }} · 匹配 {{ result.counts.matched }} / {{ result.total }} 行 · 待处理 {{ result.blocking }} 行 · 未填写 {{ result.counts.empty }} 行</p>
           <p class="photo-note">已入库 {{ result.files.filter(f => f.assetId && !f.error).length }} 张 · 已跳过 {{ result.ignored.length + result.files.filter(f => f.error).length }} 个文件。切换配图列后，新匹配的照片需重新选择文件夹导入。</p>
           <p v-if="result.duplicates.length" class="photo-warning">{{ result.duplicates.length }} 张照片被多行共用，请确认是否符合预期。<span v-for="(group, i) in result.duplicates.slice(0, 10)" :key="i"> 第 {{ group.rowIndexes.slice(0, 10).map(n => n + 1).join('、') }} 行{{ group.rowIndexes.length > 10 ? '等' : '' }}；</span></p>
           <details v-if="result.ignored.length || result.files.some(f => f.error)"><summary>查看跳过或无法导入的文件</summary><ul><li v-for="(file, i) in [...result.files.filter(f => f.error), ...result.ignored].slice(0, 100)" :key="i">{{ file.name }}：{{ toUserMessage(file.error || file.reason) }}</li></ul><p>最多显示前 100 项；补充模式保留已有照片，替换操作会用本次匹配结果重建清单。</p></details>
-          <div class="photo-actions"><label>显示 <select v-model="filter"><option value="problems">待处理与空值</option><option value="all">全部记录</option></select></label><span>{{ filtered.length }} 行</span></div>
+          <div class="photo-actions photo-table-tools">
+            <input v-model="search" class="photo-search" type="search" placeholder="搜索姓名、编号或配图值" aria-label="搜索照片记录" />
+            <label>显示 <select v-model="filter" aria-label="照片状态筛选">
+              <option value="all">全部记录</option><option value="problems">所有问题</option>
+              <option value="matched">已匹配</option><option value="missing">缺图</option>
+              <option value="empty">空值</option><option value="ambiguous">同名冲突</option>
+              <option value="broken">坏图</option><option value="invalid">无效值</option>
+            </select></label>
+            <span>当前筛选 {{ filtered.length }} / 名单 {{ result.total }} 行</span>
+            <button class="btn-ghost" :disabled="!filteredIssueCount || busy" @click="goNextIssue">定位下一条问题</button>
+            <label>识别字段 <select v-model="identifierKey" aria-label="问题清单识别字段"><option v-for="item in columns" :key="item.key" :value="item.key">{{ item.alias || item.key }}</option></select></label>
+            <button class="btn-ghost" :disabled="!filteredIssueCount || busy" @click="exportFilteredIssues">导出当前问题 {{ filteredIssueCount }} 行</button>
+          </div>
           <div class="photo-results">
             <table><thead><tr><th>行号</th><th>配图列的值</th><th>照片</th><th>匹配结果</th></tr></thead><tbody>
-              <tr v-for="row in displayed" :key="row.rowIndex"><td><button :disabled="busy" class="photo-row" @click="emit('edit-cell', { rowIndex: row.rowIndex, key: column })">{{ row.rowIndex + 1 }}</button></td><td>{{ row.name || '（空）' }}</td><td><div class="matched-photo" :data-photo-row="row.rowIndex"><img v-if="row.status === 'matched' && photoStates[row.assetId] !== 'failed'" :key="rowPhotoUrl(row)" :src="rowPhotoUrl(row)" :alt="row.name" loading="lazy" @error="onPhotoError($event, row)"><span v-else-if="row.status === 'matched'" class="photo-unavailable">预览不可用</span></div></td><td><span>{{ labels[row.status] }}{{ ['empty','missing'].includes(row.status) ? ' · 出片留白' : '' }}</span><small v-if="row.reason || row.candidates">{{ row.reason || row.candidates.join('、') }}</small></td></tr>
+              <tr v-for="row in displayed" :key="dsDetail?.recordIds?.[row.rowIndex] || row.rowIndex" :data-photo-record-id="dsDetail?.recordIds?.[row.rowIndex]"><td><button :disabled="busy" class="photo-row" @click="goEditRow(row)">{{ row.rowIndex + 1 }}</button></td><td>{{ row.name || '（空）' }}</td><td><div class="matched-photo" :data-photo-row="row.rowIndex"><img v-if="row.status === 'matched' && photoStates[row.assetId] !== 'failed'" :key="rowPhotoUrl(row)" :src="rowPhotoUrl(row)" :alt="row.name" loading="lazy" @error="onPhotoError($event, row)"><span v-else-if="row.status === 'matched'" class="photo-unavailable">预览不可用</span></div></td><td><span>{{ labels[row.status] }}{{ ['empty','missing'].includes(row.status) ? ' · 出片留白' : '' }}</span><small v-if="row.reason || row.candidates">{{ row.reason || row.candidates.join('、') }}</small></td></tr>
             </tbody></table>
             <p v-if="!filtered.length">当前没有待处理的照片记录。</p>
           </div>
           <footer><button :disabled="page === 0" @click="page--">上一页</button><span>{{ page + 1 }} / {{ pageCount }}</span><button :disabled="page + 1 >= pageCount" @click="page++">下一页</button></footer>
-        </template>
+        </div>
       </template>
     </section>
   </div>
@@ -217,13 +291,14 @@ async function cancelImport() {
 <style scoped>
 .matched-photo{display:flex;align-items:center;justify-content:center;width:42px;height:52px;background:var(--paper);border:1px solid var(--line);border-radius:4px}.matched-photo img{width:100%;height:100%;object-fit:contain}
 .photo-unavailable{font-size:11px;color:var(--stone);text-align:center;padding:2px}
-.photo-mask{position:fixed;inset:0;z-index:2000;background:#17252a66;display:flex;align-items:center;justify-content:center;padding:24px}
+.photo-mask{position:fixed;inset:0;z-index:2000;background:rgba(30,26,20,.45);display:flex;align-items:center;justify-content:center;padding:24px}
 .photo-embedded .photo-panel{width:100%;max-height:none;box-shadow:none;border:1px solid var(--line);box-sizing:border-box;background:var(--paper-card)}
 .photo-embedded .photo-panel{padding:18px}.photo-embedded h2{font-size:18px;margin:0}.photo-embedded header p{margin:6px 0}.photo-embedded .photo-actions{margin:12px 0}
 
 .photo-panel{width:min(880px,95vw);max-height:90vh;overflow:auto;background:var(--paper,#f6f2e9);border-radius:16px;padding:24px;box-shadow:0 24px 70px #0003;color:var(--ink)}
 header{display:flex;justify-content:space-between;gap:20px}h2{margin:0 0 8px;font-size:22px}header p,.photo-note{color:var(--stone);font-size:13px;line-height:1.7}header>button{align-self:flex-start;font-size:24px}
-.photo-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:16px 0}select{padding:7px 10px;max-width:250px;background:transparent;border:1px solid #c7beb0;border-radius:6px;color:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.5}.photo-error{color:#a92f25}.photo-warning{color:#855616;line-height:1.7;font-size:13px}
-.photo-results{max-height:40vh;overflow:auto;border:1px solid #d8d0c1;border-radius:8px}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}th,td{padding:9px 12px;border-bottom:1px solid #ddd5c7;overflow-wrap:anywhere}th{position:sticky;top:0;background:#eee7d9}td:first-child{width:65px}small{display:block;color:var(--stone);margin-top:4px}.photo-row{border:0;background:transparent;color:var(--cinnabar,#ae3c30);text-decoration:underline}.photo-results>p{padding:16px}footer{display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:14px}details{font-size:13px;line-height:1.8}details ul{max-height:160px;overflow:auto}
-.photo-plan{border:1px solid #d4c4a5;border-radius:10px;padding:16px;background:#f5efdf;margin:16px 0}.photo-plan h3{margin:0 0 8px;font-size:16px}.photo-plan p{font-size:13px;line-height:1.6;color:var(--stone)}.photo-plan-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.photo-plan-grid span{padding:6px 10px;background:#fffaf0;border:1px solid #e0d5c3;border-radius:6px;font-size:13px}
+.photo-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:16px 0}select{max-width:250px}button{cursor:pointer}button:disabled{cursor:default;opacity:.5}.photo-error{color:var(--cinnabar)}.photo-warning{color:var(--warn);line-height:1.7;font-size:13px}
+.photo-table-tools{gap:9px}.photo-search{padding:7px 10px;min-width:210px;max-width:100%;background:var(--paper-card);border:1px solid var(--line-strong);border-radius:6px;color:var(--ink)}
+.photo-results{max-height:40vh;overflow:auto;border:1px solid var(--line-strong);border-radius:8px}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}th,td{padding:9px 12px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{position:sticky;top:0;background:var(--paper)}td:first-child{width:65px}small{display:block;color:var(--stone);margin-top:4px}.photo-row{border:0;background:transparent;color:var(--cinnabar);text-decoration:underline}.photo-results>p{padding:16px}footer{display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:14px}details{font-size:13px;line-height:1.8}details ul{max-height:160px;overflow:auto}
+.photo-plan{border:1px solid var(--warn-line);border-radius:10px;padding:16px;background:var(--warn-soft);margin:16px 0}.photo-plan h3{margin:0 0 8px;font-size:16px}.photo-plan p{font-size:13px;line-height:1.6;color:var(--stone)}.photo-plan-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.photo-plan-grid span{padding:6px 10px;background:var(--paper-card);border:1px solid var(--line);border-radius:6px;font-size:13px}
 </style>

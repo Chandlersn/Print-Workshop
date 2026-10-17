@@ -123,6 +123,17 @@ function main() {
     console.error('种子异常:', err)
   }
 
+  // 原件迁移先于模板迁移和媒体读取：独立素材目录只存受管理原件。
+  try {
+    const designs = require('./designs.cjs')
+    const temporary = designs.migrateEphemeralOriginals()
+    const managed = designs.migrateManagedOriginals()
+    if (temporary.migrated) console.log(`临时底图原件迁移 ${temporary.migrated} 件`)
+    if (managed.migrated) console.log(`素材库原件迁移 ${managed.migrated} 件`)
+  } catch (err) {
+    console.error('素材原件迁移异常:', err)
+  }
+
   // 存量迁移：旧 print-bg 背景转素材库 assetId（幂等；失败不阻塞启动）
   try {
     const templates = require('./templates.cjs')

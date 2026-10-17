@@ -81,6 +81,9 @@ const CONTRACT = [
   { id: 'I-46', file: 'test/pack-root.cjs', anchor: '== 5. I-46 静态守卫：自查必须排在 electron-builder 之前，清理只 rmdir 空树 ==' },
   { id: 'I-47', file: 'test/design-blend-adjust.cjs', anchor: '== 7. I-47 静态守卫：滑杆的百分比换算必须与 schema 的取值口径成对 ==' },
   { id: 'I-48', file: 'test/user-error.cjs', anchor: '== 3. I-48 静态守卫：唯一实现 + 单一收口 ==' },
+  { id: 'I-49', file: 'test/output-dpi.cjs', anchor: '== I-49 出片分辨率：照片按图框需要的像素预降采样，原件字节一律不动 ==' },
+  { id: 'I-50', file: 'test/output-dpi.cjs', anchor: '== 10. I-50 固定图片：不带效果靠 Chromium 去重，带颜色调整/投影要烘成单份（静态核查）==' },
+  { id: 'I-51', file: 'test/asset-library.cjs', anchor: '== I-51 素材保存仓库与临时底图分池存放 ==' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

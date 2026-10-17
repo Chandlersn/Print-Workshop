@@ -23,6 +23,8 @@ docs/第一性原理.md
 docs/存储性能基准.md
 # 宣传素材（几十 MB 的视频/截图），只在本地
 docs/推文/
+# 推广视频的**工作目录**：录屏帧、bgm.wav、渲染脚本与分镜稿，成品才进 docs/推文/
+promo/
 docs/assets/结构总览.svg
 docs/assets/路线图.svg
 data/print-bg/
