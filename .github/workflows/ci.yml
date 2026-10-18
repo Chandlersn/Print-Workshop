@@ -28,8 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        # 22 不是随手升的：about-cache-e2e 等套件用全局 WebSocket 连 CDP，
+        # 那是 Node 22 起才免 flag 提供的全局对象（本机 v22 绿、CI 钉 20 必挂
+        # 「WebSocket is not defined」，2026-10-19 靠 ci-logs 定位）。与开发机对齐。
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: 安装依赖
         run: npm ci
@@ -76,8 +79,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        # 与 test job 同为 22（e2e 套件的 CDP 连接需要 Node 22 的全局 WebSocket）
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: 安装依赖
         run: npm ci
