@@ -6,7 +6,7 @@
  * 引擎逻辑不写在这里，见 electron/ipc.cjs（通道装配）与各引擎模块。
  */
 
-const { app, BrowserWindow, protocol, net, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, dialog, protocol, net, shell, ipcMain } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { pathToFileURL } = require('url')
@@ -102,6 +102,28 @@ function createWindow() {
 }
 
 function main() {
+  // GUI 与 GUI 之间交给 Electron 内置能力（第二个实例直接退出并聚焦首窗）；
+  // 文件锁只负责「GUI vs 命令行」这一半，见 data-lock.cjs
+  //
+  // 冒烟 / e2e 必须跳过这道锁：它按 Electron 的 userData（默认 %APPDATA%\批印坊）判同，
+  // **不看**我们的 PRINTPRESS_DATA_DIR。测试一个接一个起多个实例、甚至与开发者已开着的
+  // 窗口并存，第二个实例会静默 app.quit()，症状是「窗口没出现 / CDP 连不上」，
+  // 排查起来完全不指向锁。生产环境不设这个变量，照常生效。
+  const isolatedInstance = Boolean(process.env.PRINTPRESS_DATA_DIR)
+  if (!isolatedInstance && !app.requestSingleInstanceLock()) {
+    app.quit()
+    return
+  }
+  if (!isolatedInstance) {
+    app.on('second-instance', () => {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (win) {
+        if (win.isMinimized()) win.restore()
+        win.focus()
+      }
+    })
+  }
+
   // 打印工具无重度图形需求，禁用硬件加速换取最大兼容性
   // （远程桌面 / 沙箱 / 老显卡上 GPU 进程崩溃会导致整个应用无法启动）
   app.disableHardwareAcceleration()
@@ -109,6 +131,25 @@ function main() {
   app.commandLine.appendSwitch('in-process-gpu')
 
   ensureDataDir()
+
+  // 数据目录互斥（I-54）：GUI 生命周期持锁，于是「窗口开着时命令行写入」会被明确拒绝，
+  // 而不是两个进程各自读到旧值、各自写回、后写的安静吃掉前一次修改。
+  // 取锁必须排在种子与各类迁移之前——那些步骤本身就会写 JSON。
+  try {
+    const dataLock = require('./data-lock.cjs')
+    dataLock.acquireForHost()
+    // 必须用 process.on('exit')：冒烟路径走 app.exit()，它不触发 will-quit
+    process.on('exit', () => { try { require('./data-lock.cjs').release() } catch { /* 退出路径不许抛 */ } })
+    app.on('will-quit', () => { try { dataLock.release() } catch { /* 同上 */ } })
+  } catch (err) {
+    if (err && err.code === 'DATA_DIR_BUSY') {
+      // 有出口的提示：说清该做什么，而不是丢一句 errno 或路径（I-48）
+      dialog.showErrorBox('批印坊已在运行', '另一个批印坊窗口正在使用同一份数据。请先关闭它，再重新打开本窗口。')
+      app.exit(1)
+      return
+    }
+    console.warn('[data-lock] 取锁异常，按无锁继续启动')
+  }
 
   // 首启种子：示例名单 + 7 套示例模板（证书文书 3 + 拼版小件 4；失败不阻塞启动，下次启动重试）
   try {

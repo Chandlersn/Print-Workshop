@@ -12,7 +12,7 @@
 const path = require('path')
 const crypto = require('crypto')
 const { loadJson, saveJson } = require('./store.cjs')
-const { buildColumns } = require('./keys.cjs')
+const { buildColumns, isReservedKey } = require('./keys.cjs')
 const { importGrid } = require('./importer/index.cjs')
 const { listSheets, readWorkbookGrids, detectHeaderRow, sliceFromHeader } = require('./importer/excel.cjs')
 
@@ -84,7 +84,15 @@ function gridToDataset(grid, name, sourceMeta) {
   const columns = buildColumns(headers)
   const rows = bodyRows.map((r) => {
     const rec = {}
-    columns.forEach((col, i) => { rec[col.key] = r[i] === undefined ? '' : String(r[i]) })
+    columns.forEach((col, i) => {
+      const v = r[i] === undefined ? '' : String(r[i])
+      // 普通键直接赋值；万一撞上原型槽名（keys.cjs 已加前缀，这里是第二道保险），
+      // 必须走 defineProperty：`rec['__proto__'] = v` 会被原型 setter 吞掉，整列读回来
+      // 是 Object.prototype，出片印成 `[object Object]`（I-53）
+      if (isReservedKey(col.key)) {
+        Object.defineProperty(rec, col.key, { value: v, enumerable: true, writable: true, configurable: true })
+      } else rec[col.key] = v
+    })
     return rec
   })
 

@@ -170,7 +170,9 @@ async function main() {
       tag_name: tag,
       target_commitish: 'main',
       name: `批印坊 ${tag}`,
-      body: notes ? `## ${tag}\n\n${notes}` : tag,
+      body: notes
+        ? `## ${tag}\n\n${notes}\n\n---\n\n安装包未做代码签名。下载后请对照 Release 里的 \`SHA256SUMS.txt\` 核对：\n\n\`\`\`powershell\nGet-FileHash .\\${assetName} -Algorithm SHA256\n\`\`\`\n\n哈希一致才运行；不一致说明下载被替换过，别装。`
+        : tag,
       draft: false,
       prerelease: false,
     })
@@ -211,6 +213,17 @@ async function main() {
   } else {
     console.log('     （无 blockmap，跳过；全量下载不受影响）')
   }
+
+  // ── 6c. 发布校验和 ──
+  // 安装包没有代码签名证书（个人项目不买证书），Windows SmartScreen 因此只会说
+  // 「未知发布者」——用户没有任何办法判断这个 exe 是不是被人换过。公开 SHA-256
+  // 是这种前提下唯一可用的替代手段：用户下完自己算一遍、跟这里比一遍。
+  // 校验和必须由 CI 对**已定稿的那份 exe**算，不能人工填（人填的会漂）。
+  console.log('\n== 6c. 上传 SHA256SUMS.txt（未签名安装包的替代核对手段）==')
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex')
+  const sums = `${sha256}  ${assetName}\n`
+  await uploadAsset(release.id, 'SHA256SUMS.txt', Buffer.from(sums, 'utf-8'))
+  console.log(`     sha256 = ${sha256}`)
 
   // ── 7. 回读复核 ──
   console.log('\n== 7. 回读复核 ==')

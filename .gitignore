@@ -16,17 +16,14 @@ desktop.ini
 # WorkBuddy 本地工作记忆（agent 会话数据，不入仓库）
 .workbuddy/
 # 私人化数据资产：只在本地，不入仓库
+# （2026-10-18 复核后只留这一篇：另外四篇设计依据经交叉比对真实名单库确认 0 隐私命中，
+#   已随本次一起公开，并同时解除 docs/assets 两张被引用的 SVG——否则第一性原理会图裂。
+#   留档的 开发经验总结.md 含 6 处本地工程环境引用，脱敏前不出库。）
 docs/开发经验总结.md
-docs/开发方案.md
-docs/开发计划.md
-docs/第一性原理.md
-docs/存储性能基准.md
 # 宣传素材（几十 MB 的视频/截图），只在本地
 docs/推文/
 # 推广视频的**工作目录**：录屏帧、bgm.wav、渲染脚本与分镜稿，成品才进 docs/推文/
 promo/
-docs/assets/结构总览.svg
-docs/assets/路线图.svg
 data/print-bg/
 data/print-fonts/
 data/designs/

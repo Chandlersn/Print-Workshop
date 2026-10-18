@@ -84,6 +84,10 @@ const CONTRACT = [
   { id: 'I-49', file: 'test/output-dpi.cjs', anchor: '== I-49 出片分辨率：照片按图框需要的像素预降采样，原件字节一律不动 ==' },
   { id: 'I-50', file: 'test/output-dpi.cjs', anchor: '== 10. I-50 固定图片：不带效果靠 Chromium 去重，带颜色调整/投影要烘成单份（静态核查）==' },
   { id: 'I-51', file: 'test/asset-library.cjs', anchor: '== I-51 素材保存仓库与临时底图分池存放 ==' },
+  { id: 'I-52', file: 'test/claims.cjs', anchor: '== 3. 白名单之外一律不许出现陈旧数字（新文件也不能漏网） ==' },
+  { id: 'I-53', file: 'test/sheets-import.cjs', anchor: '== 8. I-53 导入闸门：体积 / 行 / 列 / 超长格 / 原型污染 ==' },
+  { id: 'I-54', file: 'test/data-dir-lock.cjs', anchor: '== 5. 用户可见文案与接线（I-48 / I-54）==' },
+  { id: 'I-55', file: 'test/photos.cjs', anchor: '任务历史溢出改归档，不再静默销毁（I-55）' },
 ]
 
 console.log('== 1. 文档与契约清单必须一一对应 ==')

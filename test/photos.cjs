@@ -416,6 +416,38 @@ async function run() {
     assert.ok(library.referencedAssetIds().has(assetId))
     assert.ok(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, info.path)))
   })
+  await check('任务历史溢出改归档，不再静默销毁（I-55）', () => {
+    // 任务 id 必须是 36 位 [a-f0-9-]（taskPath 会校验），所以种子也用合法形状
+    const seedId = (i) => `${'0'.repeat(8)}-0000-4000-8000-${String(i).padStart(12, '0')}`
+    const seed = (n) => Array.from({ length: n }, (_, i) => ({
+      taskId: seedId(i), datasetId: 'd', column: '照片', state: 'done',
+      createdAt: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`, updatedAt: '2026-01-01T00:00:00.000Z',
+    }))
+    const first = crypto.randomUUID()
+    const second = crypto.randomUUID()
+    const task = (folderName) => ({ datasetId: 'd', column: '照片', state: 'done', binding: { folderName } })
+    const archivePath = path.join(process.env.PRINTPRESS_DATA_DIR, `${photos.TASK_HISTORY_ARCHIVE}.json`)
+    try { fs.unlinkSync(archivePath) } catch { /* 首次运行本来就没有 */ }
+
+    // 满 100 条时再写一条：被挤出的那条必须进归档，而不是消失
+    store.saveJson(photos.TASK_HISTORY, seed(photos.TASK_HISTORY_LIMIT))
+    photos.saveTask(first, task('一班'))
+    const list = store.loadJson(photos.TASK_HISTORY, { expect: 'array' })
+    const archive = store.loadJson(photos.TASK_HISTORY_ARCHIVE, { expect: 'array' })
+    assert.equal(list.length, photos.TASK_HISTORY_LIMIT, '界面列表仍只留最近 100 条')
+    assert.equal(list[0].taskId, first, '新记录在最前')
+    assert.deepEqual(archive.map(item => item.taskId), [seedId(99)], '被挤出的那一条进了归档')
+    assert.equal(archive[0].state, 'done', '归档存的是摘要（与列表同一份形状）')
+
+    // 重复写同一个任务不得在归档里堆重复；归档自身也有上限
+    photos.saveTask(first, task('一班'))
+    assert.equal(store.loadJson(photos.TASK_HISTORY_ARCHIVE, { expect: 'array' }).length, 1, '同一 taskId 不重复归档')
+    store.saveJson(photos.TASK_HISTORY_ARCHIVE, seed(photos.TASK_HISTORY_ARCHIVE_LIMIT + 50))
+    store.saveJson(photos.TASK_HISTORY, seed(photos.TASK_HISTORY_LIMIT))
+    photos.saveTask(second, task(''))
+    assert.equal(store.loadJson(photos.TASK_HISTORY_ARCHIVE, { expect: 'array' }).length,
+      photos.TASK_HISTORY_ARCHIVE_LIMIT, '归档保留上限，不无上限增长')
+  })
   console.log(`${passed} photo acceptance groups passed`)
 }
 run().catch(err => { console.error(err); process.exitCode = 1 }).finally(() => rmDeep(tmp))

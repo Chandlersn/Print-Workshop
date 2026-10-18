@@ -1,0 +1,63 @@
+<svg viewBox="0 0 680 526" width="100%" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>批印坊 v0.2 路线图：公式体检推导</title>
+  <desc>四个因子泳道加工程泳道，列出因子内加法、待定与已放弃项、范围外项，底部为升格候选</desc>
+  <text x="40" y="56" font-size="14" font-weight="500" fill="#2C2C2A" font-family="sans-serif">路线图：公式体检推导（v0.2 候选）</text>
+
+  <g>
+    <rect x="40" y="84" width="96" height="48" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+    <text x="88" y="108" font-size="13" font-weight="500" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">D 导入</text>
+    <rect x="156" y="90" width="240" height="36" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="5 4"/>
+    <text x="276" y="108" font-size="12" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">范围外 · 数据集由用户准备且已审核</text>
+  </g>
+
+  <g>
+    <rect x="40" y="148" width="96" height="48" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+    <text x="88" y="172" font-size="13" font-weight="500" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">T 设计</text>
+    <rect x="156" y="154" width="130" height="36" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+    <text x="221" y="172" font-size="12" fill="#3B6D11" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">② 多联排版</text>
+    <rect x="310" y="154" width="180" height="36" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="5 4"/>
+    <text x="400" y="172" font-size="12" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">⑤ 映射记忆 · 待定</text>
+  </g>
+
+  <g>
+    <rect x="40" y="212" width="96" height="48" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+    <text x="88" y="236" font-size="13" font-weight="500" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">P 出片</text>
+    <rect x="156" y="218" width="130" height="36" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+    <text x="221" y="236" font-size="12" fill="#3B6D11" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">① 行级勾选</text>
+    <rect x="310" y="218" width="200" height="36" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="5 4"/>
+    <text x="410" y="236" font-size="12" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">份数控制 / 图片导出 · 已放弃</text>
+  </g>
+
+  <g>
+    <rect x="40" y="276" width="96" height="48" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+    <text x="88" y="300" font-size="13" font-weight="500" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">L 留痕</text>
+    <rect x="156" y="282" width="180" height="36" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+    <text x="246" y="300" font-size="12" fill="#085041" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">③ 数据目录体检（可选）</text>
+  </g>
+
+  <g>
+    <rect x="40" y="340" width="96" height="48" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+    <text x="88" y="364" font-size="13" font-weight="500" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">工程</text>
+    <rect x="156" y="346" width="170" height="36" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+    <text x="241" y="364" font-size="12" fill="#3B6D11" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">④ 清理已下线残留</text>
+    <rect x="350" y="346" width="170" height="36" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+    <text x="435" y="364" font-size="12" fill="#3B6D11" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">⑥ 存储性能压测</text>
+  </g>
+
+  <g>
+    <rect x="40" y="404" width="560" height="60" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5" stroke-dasharray="5 4"/>
+    <text x="60" y="428" font-size="13" font-weight="500" fill="#712B13" dominant-baseline="central" font-family="sans-serif">升格候选 M：模板迁移（潜在第五乘数）</text>
+    <text x="60" y="450" font-size="12" fill="#993C1D" dominant-baseline="central" font-family="sans-serif">模板+底图打包分享 · 动手前先回答：包格式（与 T 的契约）是什么</text>
+  </g>
+
+  <g font-family="sans-serif">
+    <rect x="40" y="492" width="14" height="14" rx="3" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+    <text x="62" y="499" font-size="12" fill="#5F5E5A" dominant-baseline="central">已实现</text>
+    <rect x="140" y="492" width="14" height="14" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+    <text x="162" y="499" font-size="12" fill="#5F5E5A" dominant-baseline="central">因子内加法（按序执行）</text>
+    <rect x="320" y="492" width="14" height="14" rx="3" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="3 2"/>
+    <text x="342" y="499" font-size="12" fill="#5F5E5A" dominant-baseline="central">待定 / 已放弃</text>
+    <rect x="450" y="492" width="14" height="14" rx="3" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5" stroke-dasharray="3 2"/>
+    <text x="472" y="499" font-size="12" fill="#5F5E5A" dominant-baseline="central">升格候选</text>
+  </g>
+</svg>

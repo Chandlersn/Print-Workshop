@@ -4,15 +4,25 @@
  *
  * 规则：去首尾空白；连续空白折叠为下划线；剔除安全字符集以外的符号
  * （保留中文、字母、数字、下划线）；空结果回退 'col'。
+ *
+ * 另有**原型槽名**兜底（I-53）：`__proto__` / `constructor` / `prototype` 在 JS 对象上不是
+ * 普通属性——`rec['__proto__'] = '张三'` 会被原型 setter 吞掉，整列数据读回来是
+ * `Object.prototype`（出片印成 `[object Object]`）；`constructor` 更会把整列变成函数。
+ * 这类表头一律加 `col_` 前缀变成普通键；用户看到的列名（alias）仍是原表头。
  */
 
 // 允许保留：中英文字母、数字、下划线、空格（空格随后折叠为 _）
 const UNSAFE_CHARS = /[^\w\u4e00-\u9fa5 ]/g
 
+/** JS 对象上的原型槽名：不能直接当存储键用 */
+const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const isReservedKey = (key) => RESERVED_KEYS.has(String(key))
+
 function normalizeHeaderKey(raw) {
   if (raw === null || raw === undefined) return 'col'
   const cleaned = String(raw).trim().replace(/\s+/g, '_').replace(UNSAFE_CHARS, '')
-  return cleaned || 'col'
+  if (!cleaned) return 'col'
+  return isReservedKey(cleaned) ? `col_${cleaned}` : cleaned
 }
 
 /**
@@ -33,4 +43,4 @@ function buildColumns(headers) {
   })
 }
 
-module.exports = { normalizeHeaderKey, buildColumns }
+module.exports = { normalizeHeaderKey, buildColumns, RESERVED_KEYS, isReservedKey }

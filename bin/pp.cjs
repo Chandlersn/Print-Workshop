@@ -119,6 +119,11 @@ const HELP = `
   缺省只读。任何会改数据的命令都需要 --allow-write，这是刻意的：
   agent 误删用户名单的代价远大于多打一个参数。
 
+关于批印坊窗口开着的时候
+  界面与命令行共用同一份数据目录。窗口开着时它会一直持有数据目录的写锁，
+  此时命令行的写操作返回 DATA_DIR_BUSY（退出码 4），只读命令不受影响。
+  需要批量改数据就先关掉批印坊窗口——两个进程同时整份读改写会互相覆盖。
+
 关于 export / print
   这两个出口依赖 Electron 的隐藏窗口（printToPDF / webContents.print），
   纯 Node 下没有替代实现，会返回 GUI_REQUIRED（退出码 2）。
@@ -466,7 +471,7 @@ function resolveCommand(tokens) {
   return null
 }
 
-const EXIT_CODE = { GUI_REQUIRED: 2, WRITE_FORBIDDEN: 3 }
+const EXIT_CODE = { GUI_REQUIRED: 2, WRITE_FORBIDDEN: 3, DATA_DIR_BUSY: 4 }
 
 function emit(obj) {
   const s = flags.pretty ? JSON.stringify(obj, null, 2) : JSON.stringify(obj)

@@ -1570,6 +1570,9 @@ function call(name, params, ctx) {
   if (!op) throw unknownOp(name)
   const c = normalizeCtx(ctx)
   if (op.write && !c.allowWrite) throw writeForbidden(name)
+  // 权限之后（不是之前）再探数据目录互斥：缺写权限必须报 WRITE_FORBIDDEN，
+  // 实测 I-18 那条守卫会遍历全部写操作断言这一点。GUI 自己持锁，靠 pid 自检放行（I-54）
+  if (op.write) require('./data-lock.cjs').assertWritableByClient()
   assertCapabilities(name, op, c)
   return op.run(params || {}, c)
 }

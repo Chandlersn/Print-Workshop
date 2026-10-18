@@ -1,0 +1,50 @@
+<svg viewBox="0 0 680 320" width="100%" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>批印坊乘积式结构总览</title>
+  <desc>元公式与四大因子乘积结构，因子间以契约耦合</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <text x="40" y="52" font-size="14" font-weight="500" fill="#2C2C2A" font-family="sans-serif">批印坊乘积式结构总览</text>
+  <text x="40" y="80" font-size="13" fill="#5F5E5A" font-family="sans-serif">元公式：工具系统 = 输入 × 变换 × 输出 × 痕迹</text>
+
+  <g font-family="sans-serif">
+    <rect x="40" y="100" width="126" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+    <text x="103" y="126" font-size="14" font-weight="500" fill="#085041" text-anchor="middle" dominant-baseline="central">D 导入</text>
+    <text x="103" y="148" font-size="11" fill="#0F6E56" text-anchor="middle" dominant-baseline="central">原始名单→结构化</text>
+  </g>
+  <text x="182" y="132" font-size="14" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">×</text>
+  <g font-family="sans-serif">
+    <rect x="198" y="100" width="126" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+    <text x="261" y="126" font-size="14" font-weight="500" fill="#085041" text-anchor="middle" dominant-baseline="central">T 设计</text>
+    <text x="261" y="148" font-size="11" fill="#0F6E56" text-anchor="middle" dominant-baseline="central">数据+底图→模板</text>
+  </g>
+  <text x="340" y="132" font-size="14" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">×</text>
+  <g font-family="sans-serif">
+    <rect x="356" y="100" width="126" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+    <text x="419" y="126" font-size="14" font-weight="500" fill="#085041" text-anchor="middle" dominant-baseline="central">P 出片</text>
+    <text x="419" y="148" font-size="11" fill="#0F6E56" text-anchor="middle" dominant-baseline="central">模板×记录→交付物</text>
+  </g>
+  <text x="498" y="132" font-size="14" fill="#5F5E5A" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">×</text>
+  <g font-family="sans-serif">
+    <rect x="514" y="100" width="126" height="64" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+    <text x="577" y="126" font-size="14" font-weight="500" fill="#085041" text-anchor="middle" dominant-baseline="central">L 留痕</text>
+    <text x="577" y="148" font-size="11" fill="#0F6E56" text-anchor="middle" dominant-baseline="central">输出→可回溯对照</text>
+  </g>
+
+  <g fill="none" stroke="#0F6E56" stroke-width="1">
+    <path d="M103 164 V 206 H 253 V 170" marker-end="url(#arrow)"/>
+    <path d="M261 164 V 206 H 411 V 170" marker-end="url(#arrow)"/>
+    <path d="M419 164 V 206 H 569 V 170" marker-end="url(#arrow)"/>
+  </g>
+  <g font-size="12" fill="#0F6E56" text-anchor="middle" font-family="sans-serif">
+    <text x="182" y="198">字段目录</text>
+    <text x="340" y="198">模板 JSON</text>
+    <text x="498" y="198">任务记录</text>
+  </g>
+
+  <rect x="40" y="240" width="600" height="44" rx="8" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+  <text x="340" y="256" font-size="12" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">乘积含义：任何一项为零，全式为零</text>
+  <text x="340" y="274" font-size="12" fill="#444441" text-anchor="middle" dominant-baseline="central" font-family="sans-serif">因子间只靠契约耦合，不靠实现耦合——各自独立演进</text>
+</svg>

@@ -8,22 +8,106 @@
  *   2. parseSheetGrid + sliceFromHeader → 按选定表头行切片成标准网格
  * detectHeaderRow / sliceFromHeader 是纯函数，可独立测试。
  */
+const fs = require('fs')
 const XLSX = require('xlsx')
+
+/**
+ * 导入上限与原型污染守卫（I-53）。
+ *
+ * 为什么要有：这个函数面对的是**用户随手拖进来的文件**，而 `xlsx@0.18.5` 有两条
+ * 官方已无修复版本的安全公告（原型污染 + ReDoS）。换解析器是产品决策，在那之前
+ * 至少把「可判定的坏输入」挡在门外——上限全部取「正常名单不可能达到」的量级：
+ *  - 单文件 64 MB：证书名单不该有这个体量，超过基本是误选（拖了整个数据库导出）；
+ *  - 工作表 64 张 / 单表 20 万行 / 1024 列 / 合计 200 万格：再大就不是名单了；
+ *  - 单格 3 万字符：ReDoS 与内存膨胀都靠超长字符串放大。
+ * 另外每次解析前后对 `Object.prototype` 做一次快照，见 assertNoPrototypePollution。
+ *
+ * 上限可注入（`limits` 参数）是为了**能测**：测试不必真造一个 64 MB 的文件。
+ */
+const LIMITS = {
+  bytes: 64 * 1024 * 1024,
+  sheets: 64,
+  rows: 200000,
+  cols: 1024,
+  cells: 2000000,
+  cellChars: 30000,
+}
+
+/** 体积闸门：stat 读不到就交给 XLSX.readFile 报它自己的错（不在这里假装文件不存在） */
+function assertFileSize(filePath, limits = LIMITS) {
+  let size = 0
+  try { size = fs.statSync(filePath).size } catch { return }
+  if (size > limits.bytes) {
+    const mb = limits.bytes / 1024 / 1024
+    const shown = mb >= 1 ? `${Math.round(mb)} MB` : `${limits.bytes} 字节`
+    throw new Error(`Excel 文件超过大小上限（${shown}），请先在表格软件里拆成多个文件再导入。`)
+  }
+}
+
+/** 网格闸门：行 / 列 / 单元格总数 / 单格长度，返回本表单元格数供跨表累加 */
+function assertGridLimits(name, grid, limits = LIMITS) {
+  if (grid.length > limits.rows) {
+    throw new Error(`工作表「${name}」超过 ${limits.rows} 行上限，请先在表格软件里拆分。`)
+  }
+  let cells = 0
+  for (let i = 0; i < grid.length; i++) {
+    const row = grid[i]
+    if (row.length > limits.cols) {
+      throw new Error(`工作表「${name}」超过 ${limits.cols} 列上限，请先在表格软件里裁剪。`)
+    }
+    cells += row.length
+    for (let j = 0; j < row.length; j++) {
+      if (String(row[j]).length > limits.cellChars) {
+        throw new Error(`工作表「${name}」第 ${i + 1} 行有超长单元格（超过 ${limits.cellChars} 字符），请确认这个文件是不是选错了。`)
+      }
+    }
+  }
+  return cells
+}
+
+const prototypeSnapshot = () => new Set(Object.getOwnPropertyNames(Object.prototype))
+
+/**
+ * 原型污染守卫：解析前后比对 `Object.prototype` 的自有属性名，多出来的就是被注入的。
+ * 只检出还不够——注入的属性会一直留在进程里影响后面所有代码，所以**先清掉再报错**：
+ * 快照之外的键按定义就是这次解析新加上去的，删它不会碰到语言/框架自带的属性。
+ */
+function assertNoPrototypePollution(before) {
+  const injected = Object.getOwnPropertyNames(Object.prototype).filter((k) => !before.has(k))
+  if (!injected.length) return
+  for (const k of injected) {
+    try { delete Object.prototype[k] } catch { /* 删不掉也要把它报出来 */ }
+  }
+  throw new Error('这个 Excel 文件携带了原型污染载荷，已拒绝导入并清理现场。请换用 CSV，或用表格软件另存为新文件后再试。')
+}
 
 /** 读整个工作簿，返回 { wb, sheets: { 表名: 字符串网格 } }（空单元格补空串） */
 function readWorkbookGrids(filePath) {
-  const wb = XLSX.readFile(filePath, { dense: false })
+  assertFileSize(filePath)
+  const before = prototypeSnapshot()
+  // sheetRows 让解析器在超行时提前收手，不把整张巨表读进内存
+  const wb = XLSX.readFile(filePath, { dense: false, sheetRows: LIMITS.rows + 1 })
+  assertNoPrototypePollution(before)
   if (!wb.SheetNames.length) {
     throw new Error('Excel 文件不含任何工作表')
   }
+  if (wb.SheetNames.length > LIMITS.sheets) {
+    throw new Error(`工作簿含 ${wb.SheetNames.length} 张工作表，超过 ${LIMITS.sheets} 张上限，请先拆分。`)
+  }
   const grids = {}
+  let cells = 0
   for (const name of wb.SheetNames) {
     const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], {
       header: 1,
       raw: false, // 取显示值（日期等格式化文本，适合打印场景）
       defval: '',
     })
-    grids[name] = grid.map((r) => r.map((c) => (c === null || c === undefined ? '' : String(c))))
+    const normalized = grid.map((r) => r.map((c) => (c === null || c === undefined ? '' : String(c))))
+    cells += assertGridLimits(name, normalized)
+    if (cells > LIMITS.cells) {
+      throw new Error(`工作簿合计超过 ${LIMITS.cells} 个单元格上限，请先在表格软件里拆分。`)
+    }
+    grids[name] = normalized
   }
   return { wb, grids }
 }
@@ -117,4 +201,16 @@ function importExcel(filePath) {
   return sliced
 }
 
-module.exports = { readWorkbookGrids, listSheets, parseSheetGrid, detectHeaderRow, sliceFromHeader, importExcel }
+module.exports = {
+  readWorkbookGrids,
+  listSheets,
+  parseSheetGrid,
+  detectHeaderRow,
+  sliceFromHeader,
+  importExcel,
+  // 供验收测试直接驱动守卫（I-53）：上限可注入，测试不必真造 64 MB 文件
+  LIMITS,
+  assertFileSize,
+  assertGridLimits,
+  assertNoPrototypePollution,
+}

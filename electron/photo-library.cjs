@@ -14,6 +14,10 @@ const LIMITS = Object.freeze({ entries: 10000, photos: 5000, depth: 12, bytes: 2
 const STAGING_DIR = 'photo-import-staging'
 const ACTIVE_LOCK = `${STAGING_DIR}/active.lock`
 const TASK_HISTORY = 'photo-import-tasks'
+/** 溢出的任务记录改存归档，而不是丢进 `.slice(0, 100)` 的黑洞（I-55） */
+const TASK_HISTORY_ARCHIVE = 'photo-import-tasks-archive'
+const TASK_HISTORY_LIMIT = 100
+const TASK_HISTORY_ARCHIVE_LIMIT = 500
 let importing = false
 let activeTaskId = null
 const canceledTasks = new Set()
@@ -59,7 +63,28 @@ function saveTask(taskId, state) {
     ...(state.counts ? { counts: state.counts } : {}),
     ...(state.error ? { error: String(state.error).slice(0, 500) } : {}),
   }
-  saveJson(TASK_HISTORY, [summary, ...history.filter(item => item.taskId !== taskId)].slice(0, 100))
+  const next = [summary, ...history.filter(item => item.taskId !== taskId)]
+  // 先把被挤出上限的记录收进归档，再写只留最近 N 条的界面列表（顺序不能反）
+  archiveTaskHistoryOverflow(next.slice(TASK_HISTORY_LIMIT))
+  saveJson(TASK_HISTORY, next.slice(0, TASK_HISTORY_LIMIT))
+}
+
+/**
+ * 任务历史上限之外的记录改存归档（I-55）。
+ *
+ * 为什么：原来的 `.slice(0, 100)` 是**静默销毁**——第 101 次导入之后，最早的记录就再也找不到了。
+ * 而照片导入恰好是最容易出问题的一步（同名学生、目录被改名、图缺了张），事后想回溯
+ * 「那次绑的是哪个目录、匹配了多少张」就只能靠这条记录。归档只追加、按 taskId 去重，
+ * 并保留最近 TASK_HISTORY_ARCHIVE_LIMIT 条防止无上限增长。
+ * 目前归档只落盘、没有界面入口：它的价值是「记录还在」，不是「列表更长」。
+ */
+function archiveTaskHistoryOverflow(overflow) {
+  if (!overflow.length) return 0
+  const archived = loadJson(TASK_HISTORY_ARCHIVE, { expect: 'array' }) || []
+  const known = new Set(overflow.map(item => item.taskId))
+  const merged = [...overflow, ...archived.filter(item => !known.has(item.taskId))]
+  saveJson(TASK_HISTORY_ARCHIVE, merged.slice(0, TASK_HISTORY_ARCHIVE_LIMIT))
+  return overflow.length
 }
 function readTask(taskId) {
   const dirStat = fs.lstatSync(taskPath(taskId))
@@ -708,4 +733,4 @@ function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateO
   return { byRecord, assets: [...assets], geometry, overrides, unresolved }
 }
 
-module.exports = { importFolder, previewImport, cancelImport, report, preflightRows, exportIssues, scanFolder, prepareRows, recoverPendingImports, listTasks, LIMITS }
+module.exports = { importFolder, previewImport, cancelImport, report, preflightRows, exportIssues, scanFolder, prepareRows, recoverPendingImports, listTasks, saveTask, TASK_HISTORY, TASK_HISTORY_ARCHIVE, TASK_HISTORY_LIMIT, TASK_HISTORY_ARCHIVE_LIMIT, LIMITS }

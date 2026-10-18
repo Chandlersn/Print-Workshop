@@ -65,6 +65,14 @@ async function main() {
   assert(cols[3].alias === '列4' && cols[3].key === 'col', '空表头回退 col + 别名列N', JSON.stringify(cols[3]))
   assert(cols[4].key === 'col_2', '非法字符表头回退并去重', cols[4].key)
 
+  // 原型槽名表头（I-53）：`rec['__proto__'] = '张三'` 会被原型 setter 吞掉，整列读回来是
+  // Object.prototype（出片印成 [object Object]）；`constructor` 更会把整列变成函数。
+  // 判据：键被改写成普通键，alias 仍是用户原表头（界面显示不变）。
+  const reserved = buildColumns(['__proto__', 'constructor', 'prototype', '正常列'])
+  assert(reserved[0].key === 'col___proto__' && reserved[0].alias === '__proto__', '原型槽表头改写成普通键，别名保留原表头', JSON.stringify(reserved[0]))
+  assert(reserved[1].key === 'col_constructor' && reserved[2].key === 'col_prototype', 'constructor / prototype 同样加前缀', JSON.stringify(reserved.map((c) => c.key)))
+  assert(reserved[3].key === '正常列', '普通表头不受影响', reserved[3].key)
+
   console.log('== 4. GBK CSV 全链路导入 ==')
   const ds1 = dataset.importFromFile(path.join(FIXTURES, 'gbk-names.csv'))
   const full1 = dataset.getDataset(ds1.id)

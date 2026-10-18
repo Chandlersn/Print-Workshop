@@ -151,6 +151,71 @@ async function main() {
   const insCsv = dataset.inspectFile(csvFp)
   ok(insCsv.kind === 'csv' && insCsv.datasets[0].rowCount === 1, 'csv → 直接导入', insCsv.kind)
 
+  console.log('\n== 8. I-53 导入闸门：体积 / 行 / 列 / 超长格 / 原型污染 ==')
+  {
+    // 上限可注入，所以测试不必真造一个 64 MB 的文件——把「判据本身」钉住即可
+    const tiny = path.join(TMP, 'tiny.bin')
+    fs.writeFileSync(tiny, 'x'.repeat(64), 'utf-8')
+    let sizeErr = null
+    try { excel.assertFileSize(tiny, { bytes: 10 }) } catch (e) { sizeErr = e }
+    ok(sizeErr !== null, '体积闸门：超过上限的文件被拒', sizeErr && sizeErr.message)
+
+    // 正常文件绝不能被闸门误拒（本轮改动最可能犯的错就是把好文件也拒了）
+    const smallFp = path.join(TMP, 'small.xlsx')
+    {
+      const wb2 = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb2, XLSX.utils.aoa_to_sheet([['姓名', '奖项'], ['张三', '金奖']]), '名单')
+      XLSX.writeFile(wb2, smallFp)
+    }
+    let readErr = null
+    let grids = null
+    try { grids = excel.readWorkbookGrids(smallFp).grids } catch (e) { readErr = e }
+    ok(readErr === null && grids && grids['名单'][1][0] === '张三', '正常文件照常读取（不被闸门误拒）', readErr && readErr.message)
+
+    // 行 / 列 / 超长格：三个判据各来一发（探针上限）
+    const grid3 = [['h1', 'h2'], ['a', 'b'], ['c', 'd']]
+    let rowErr = null
+    try { excel.assertGridLimits('探针', grid3, { rows: 2, cols: 99, cellChars: 99 }) } catch (e) { rowErr = e }
+    ok(rowErr !== null && /超过 2 行上限/.test(rowErr.message), '行数超限被拒', rowErr && rowErr.message)
+
+    let colErr = null
+    try { excel.assertGridLimits('探针', grid3, { rows: 99, cols: 1, cellChars: 99 }) } catch (e) { colErr = e }
+    ok(colErr !== null && /超过 1 列上限/.test(colErr.message), '列数超限被拒', colErr && colErr.message)
+
+    let cellErr = null
+    try { excel.assertGridLimits('探针', [['短', 'x'.repeat(9)]], { rows: 99, cols: 99, cellChars: 5 }) } catch (e) { cellErr = e }
+    ok(cellErr !== null && /第 1 行有超长单元格/.test(cellErr.message), '超长单元格被拒且文案带行号', cellErr && cellErr.message)
+
+    // 原型污染：光检出不够——注入的属性会一直留在进程里，必须先清掉再报错
+    const snap = new Set(Object.getOwnPropertyNames(Object.prototype))
+    Object.defineProperty(Object.prototype, 'ppPollutedProbe', { value: 'x', configurable: true, writable: true, enumerable: false })
+    let pollErr = null
+    try { excel.assertNoPrototypePollution(snap) } catch (e) { pollErr = e }
+    ok(pollErr !== null, '原型污染：解析期被注入的属性会被检出', pollErr && pollErr.message)
+    ok(!('ppPollutedProbe' in {}), '原型污染：检出后现场已清理（不是只报错就放行）')
+
+    const msgs = [sizeErr, rowErr, colErr, cellErr, pollErr].filter(Boolean).map((e) => e.message)
+    ok(msgs.every((m) => !/[A-Za-z]:\\/.test(m) && !/\b(EPERM|EBUSY|EEXIST|ENOENT|EACCES)\b/.test(m)),
+      '闸门报错文案合规：无绝对路径、无 errno（I-48）', msgs)
+    ok(msgs.every((m) => !/\berr\.message\b|\bundefined\b/.test(m)), '闸门报错文案不夹内部细节', msgs)
+
+    // 端到端：表头就叫 __proto__ 的工作簿，整列数据必须读得回来（键加前缀 + 行对象 defineProperty）
+    const evilFp = path.join(TMP, 'proto-header.xlsx')
+    {
+      const wb3 = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb3, XLSX.utils.aoa_to_sheet([['__proto__', '姓名'], ['污染候选', '张三']]), '怪表头')
+      XLSX.writeFile(wb3, evilFp)
+    }
+    const evilDs = dataset.getDataset(dataset.importFromFile(evilFp).id)
+    const protoCol = evilDs.columns.find((c) => c.alias === '__proto__')
+    ok(evilDs.columns.length === 2 && protoCol && protoCol.key !== '__proto__',
+      '原型槽表头被改写成普通键（界面别名不变）', evilDs.columns.map((c) => c.key))
+    ok(Boolean(protoCol) && evilDs.rows[0][protoCol.key] === '污染候选',
+      '整列数据读得回来（没有被原型 setter 吞掉）', evilDs.rows[0])
+    ok(({}).__proto__ === Object.prototype && !('污染候选' in {}),
+      '这次导入没有污染进程级原型', Object.getOwnPropertyNames(Object.prototype).length)
+  }
+
   rmDeep(TMP)
   console.log(`\n共 ${passCount + failCount} 项断言：${passCount} 通过，${failCount} 失败`)
 

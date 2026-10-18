@@ -1,5 +1,5 @@
 {
-  "version": "0.6.3",
-  "notes": "模板页新增毫米标尺与参考线，支持拖出、数值编辑、吸附和撤销重做；照片导入页明确提示 PNG 匹配及选择文件夹后的确认步骤。",
+  "version": "0.6.4",
+  "notes": "导入加了体积与工作表规模闸门，并修掉表头为 __proto__ 时整列数据静默丢失；批印坊窗口开着时命令行改为只读（写操作明确提示，退出码 4），关闭后自动恢复；照片任务历史超出 100 条改为归档留底。安装包仍未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
   "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }

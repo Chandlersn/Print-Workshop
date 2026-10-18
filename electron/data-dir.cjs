@@ -7,6 +7,7 @@
  */
 const fs = require('fs')
 const path = require('path')
+const { LOCK_NAME } = require('./data-lock.cjs')
 
 const BOOTSTRAP_FILE = 'data-dir.json'
 
@@ -66,6 +67,9 @@ function nestingIssue(target, current) {
 function copyDirSync(src, dest) {
   fs.mkdirSync(dest, { recursive: true })
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    // 迁移数据目录时不搬走互斥锁：锁描述的是「哪个进程正在用当前目录」，
+    // 复制到新目录会变成一把别人 pid 占着的死锁；新目录该由调用方重新取锁（I-54）
+    if (entry.name === LOCK_NAME) continue
     const s = path.join(src, entry.name)
     const d = path.join(dest, entry.name)
     if (entry.isDirectory()) copyDirSync(s, d)
