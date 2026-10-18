@@ -112,6 +112,20 @@ app.whenReady().then(async () => {
   ipcMain.handle('app:meta', () => ({ version: '0.6.0-dev', links: {} }))
   ui = new BrowserWindow({ show: false, width: 1400, height: 950, webPreferences: { preload: path.join(ROOT, 'electron/preload.cjs'), sandbox: false, contextIsolation: true, offscreen: true, backgroundThrottling: false } })
   await ui.loadURL(pathToFileURL(path.join(ROOT, 'dist/index.html')).href)
+  /*
+   * offscreen 窗口在 CI runner（无桌面会话）里把 loading=lazy 的图判成「永不可见」：
+   * 请求根本不发，加载失败不触发 error，「缩略图缺失 → 回退原图」「缩略图解码」这类
+   * 断言永远等不到（实锤现场 2026-10-19 ci-logs：img.src 停在缩略图 URL 且 complete:false；
+   * 本机有合成器判可见所以一直绿，runner 连红半个月）。
+   * 等价前提是真实用户窗口里这些图**本来就可见**。表格行会翻页/重建、img 还带 :key，
+   * 一次性改属性会被新元素顶掉，所以装 MutationObserver 持续强制 eager——
+   * 只动加载提示，被测的 src 回退链路一行没绕。
+   */
+  await evaluate(`(() => {
+    const eager = () => document.querySelectorAll('img[loading="lazy"]').forEach(img => { img.loading = 'eager' })
+    eager()
+    new MutationObserver(eager).observe(document.documentElement, { childList: true, subtree: true, attributes: false })
+  })()`)
   await waitFor(() => evaluate(`!!document.querySelector('.ds-item')`), '名单列表')
   await clickText('.ds-name', 'people.csv')
   await waitFor(() => evaluate(`!!document.querySelector('[data-photo-key]')`), '数据页配图开关')
