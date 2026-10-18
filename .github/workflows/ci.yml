@@ -65,6 +65,12 @@ jobs:
   e2e:
     name: 端到端（120 人真实 printToPDF）
     runs-on: windows-latest
+    # 2026-10-19：补这块权限是「14 连红查不出原因」的直接答案——
+    # test job 早就有 contents: write，e2e job 一直漏配，于是 e2e 失败时
+    # 推 ci-logs 的步骤必然 403（Permission denied to github-actions[bot]），
+    # 现场永远传不上来。workflow 级只有 contents: read，推分支必须 job 级抬权。
+    permissions:
+      contents: write
     # 卡死时别烧满 6 小时（GitHub 默认 360 分钟）；已产生的日志仍由 always() 步骤传上来
     timeout-minutes: 60
     steps:
@@ -132,16 +138,29 @@ jobs:
           exit $code
 
       # job logs 要 admin、artifact 要 token，匿名都拿不到；check-run 的 annotation
-      # 对公开仓库可匿名读——把失败日志尾部写成注解，本地不用任何凭据就能看现场。
+      # 对公开仓库可匿名读——把失败现场写成注解，本地不用任何凭据就能看。
+      # 2026-10-19 重写两处（14 连红查不出原因的直接原因）：
+      #  1) 判据原来是宽松的 `FAIL|Error|error`，会命中**通过日志**里的文案词。实锤：
+      #     一次全红 run 的 15 条注解里 11 条是 02-design-e2e 的 `ok -` 行，
+      #     真正失败的 04-photo-e2e 一条没挤进来。现在只认各套件的失败哨兵
+      #     （`*_FAIL` / `*_TIMEOUT` / 行首 `FAIL `，见 test/*-e2e.cjs 的 console.error）。
+      #  2) 原来吐「文件末尾 20 行」，而失败信息在哨兵**之后**（stack、PHOTO_IMAGE_STATE），
+      #     且每个 run 的注解有 ~15 条上限，多文件平摊就截断。现在按哨兵行号取后 12 行，
+      #     并把上限留给真正失败的那一个文件。
       - name: 失败日志尾部写进 annotation（匿名可读）
         if: always()
         shell: bash
         run: |
+          set +e
           for f in e2e-logs/0*.log; do
             [ -f "$f" ] || continue
-            if grep -qE "FAIL|Error|error" "$f"; then
-              tail -n 20 "$f" | while IFS= read -r l; do echo "::error::$(basename "$f"): $l"; done
-            fi
+            sent=$(grep -nE '_FAIL|_TIMEOUT|^[[:space:]]+FAIL[ (]' "$f" | head -2)
+            [ -z "$sent" ] && continue
+            base=$(basename "$f")
+            echo "$sent" | cut -c1-280 | while IFS= read -r l; do echo "::error::$base: $l"; done
+            first=$(echo "$sent" | head -1 | cut -d: -f1)
+            last=$((first + 12))
+            sed -n "${first},${last}p" "$f" | cut -c1-280 | while IFS= read -r l; do echo "::error::$base @${first}+: $l"; done
           done
 
       - name: 上传失败现场（日志 + 失败截图 + 量测）
