@@ -437,24 +437,49 @@ async function savePhotoEdit(restore = false) {
 }
 
 /**
- * 出片分辨率的界面读数。**必须带「约」字**——体积是模型不是预言（见 output-dpi 顶部），
+ * 预览栏的两条读数。**必须带「约」字**——体积是模型不是预言（见 output-dpi 顶部），
  * 导出完成后会用真实字节数覆盖。
+ * 文案要短：这两条与页数、缩放挤在同一行，写全了会把缩放控件顶出去。
+ * 完整说法放 `title`（悬停可见），短文案只留判断所需的那几个数。
  */
+const designHint = computed(() => {
+  const d = previewInfo.value?.designInfo
+  if (!d) return null
+  const dpi = d.minDpi == null ? null : Math.round(d.minDpi)
+  return {
+    tone: dpi == null ? '' : dpiClass(d.minDpi),
+    text: `底图 · ${dpi == null ? '无位图' : `最低 ${dpi} dpi`}`,
+    title: `图层底图「${d.name}」· 第 ${d.revision} 版 · ${d.layerCount} 个图层 · ${dpi == null ? '文字与形状直接输出，不受分辨率限制' : `图片最低约 ${dpi} dpi（低于 300 印出来可能发虚）`}`,
+  }
+})
+
 const outputHint = computed(() => {
   const o = previewInfo.value?.output
   if (!o) return null
   const original = previewInfo.value.outputOriginalEstimateBytes
+  const partial = previewInfo.value.outputEstimateIncomplete ? '部分照片信息不全，未估体积' : ''
   if (o.dpi == null) {
-    return { tone: '', text: `出片分辨率：原图 · 照片按原件嵌入${original ? ` · 所选范围照片预计约 ${formatBytes(original)}` : ''}${previewInfo.value.outputEstimateIncomplete ? ' · 部分照片信息不完整，暂不提供整批体积预估' : ''}` }
+    const parts = ['原图出片']
+    if (original) parts.push(`约 ${formatBytes(original)}`)
+    if (partial) parts.push(partial)
+    return {
+      tone: '',
+      text: parts.join(' · '),
+      title: `照片按原件嵌入，不做降采样${original ? `；所选范围照片预计约 ${formatBytes(original)}` : ''}${partial ? `；${partial}` : ''}`,
+    }
   }
-  const parts = [`出片 ${o.dpi}dpi`]
-  if (o.optimized) parts.push(`${o.optimized} 张${o.encoded ? '已降到' : '预计降到'}目标像素`)
-  if (o.keptOriginal) parts.push(`${o.keptOriginal} 张保持原件`)
-  if (o.failed) parts.push(`${o.failed} 张${o.encoded ? '处理失败保持原件' : '暂无法估算'}`)
-  if (previewInfo.value.outputEstimateIncomplete) parts.push('部分照片信息不完整，暂不提供整批体积预估')
+  const parts = [`${o.dpi}dpi`]
+  if (o.optimized) parts.push(`${o.optimized} 张${o.encoded ? '已降采样' : '待降采样'}`)
+  if (o.keptOriginal) parts.push(`${o.keptOriginal} 张原件`)
+  if (o.failed) parts.push(`${o.failed} 张${o.encoded ? '失败留原件' : '未估算'}`)
+  if (partial) parts.push(partial)
   const est = previewInfo.value.outputEstimateBytes
-  if (est) parts.push(`所选范围照片预计约 ${formatBytes(est)}${original ? `（原图约 ${formatBytes(original)}）` : ''}`)
-  return { tone: 'dpi-good', text: parts.join(' · ') }
+  if (est) parts.push(`约 ${formatBytes(est)}${original ? `（原 ${formatBytes(original)}）` : ''}`)
+  return {
+    tone: 'dpi-good',
+    text: parts.join(' · '),
+    title: `出片 ${o.dpi}dpi：照片先按图框毫米 × 目标 DPI 降采样，原件不动${o.optimized ? `；本次 ${o.optimized} 张${o.encoded ? '已降到' : '预计降到'}目标像素` : ''}${o.keptOriginal ? `；${o.keptOriginal} 张保持原件` : ''}${o.failed ? `；${o.failed} 张${o.encoded ? '处理失败，保留原件' : '暂无法估算'}` : ''}${partial ? `；${partial}` : ''}${est ? `；所选范围照片预计约 ${formatBytes(est)}${original ? `（原图约 ${formatBytes(original)}）` : ''}` : ''}`,
+  }
 })
 
 // 模板切换 → 自动带出绑定的数据集（模板保存时已绑定；旧模板未绑定时才需手选）
@@ -886,18 +911,17 @@ onMounted(refreshAll)
           <span>第 {{ (previewInfo.previewPage ?? previewPage) + 1 }} / {{ previewInfo.pageCount || 1 }} 页</span>
           <button class="btn" :disabled="busy || previewLoading || previewPage + 1 >= previewInfo.pageCount" @click="previewPage++">下一页</button>
         </div>
-        <span v-if="previewInfo?.designInfo" class="preview-dpi" :class="previewInfo.designInfo.minDpi == null ? '' : dpiClass(previewInfo.designInfo.minDpi)">
-          图层底图「{{ previewInfo.designInfo.name }}」· 第 {{ previewInfo.designInfo.revision }} 版 · {{ previewInfo.designInfo.layerCount }} 个图层
-          <template v-if="previewInfo.designInfo.minDpi != null"> · 图片最低约 {{ Math.round(previewInfo.designInfo.minDpi) }} dpi</template>
-          <template v-else> · 文字与形状直接输出</template>
+        <span v-if="designHint" class="preview-dpi" :class="designHint.tone" :title="designHint.title" data-testid="print-design-dpi">
+          {{ designHint.text }}
         </span>
-        <span v-if="previewInfo?.bgDpi" class="preview-dpi" :class="dpiClass(previewInfo.bgDpi.dpi)">
-          底图 {{ previewInfo.bgDpi.width }}×{{ previewInfo.bgDpi.height }}px · 输出约 {{ Math.round(previewInfo.bgDpi.dpi) }} dpi
-          <template v-if="previewInfo.bgDpi.stretched"> · 比例不符，会被拉伸</template>
+        <span v-if="previewInfo?.bgDpi" class="preview-dpi" :class="dpiClass(previewInfo.bgDpi.dpi)"
+          :title="`底图 ${previewInfo.bgDpi.width}×${previewInfo.bgDpi.height}px，按成品尺寸换算输出约 ${Math.round(previewInfo.bgDpi.dpi)} dpi${previewInfo.bgDpi.stretched ? '；底图比例与成品不符，会被拉伸' : ''}`">
+          底图 · 约 {{ Math.round(previewInfo.bgDpi.dpi) }} dpi
+          <template v-if="previewInfo.bgDpi.stretched"> · 比例不符</template>
         </span>
         <!-- 出片分辨率读数（I-49）。预览只做规划不编码，所以这里的张数与体积是「预计」，
              导出完成后用真实字节数覆盖（见 execute）。不静默：档位与结果都摆在明面上。 -->
-        <span v-if="outputHint" class="preview-dpi" :class="outputHint.tone" data-testid="print-output-dpi">
+        <span v-if="outputHint" class="preview-dpi" :class="outputHint.tone" :title="outputHint.title" data-testid="print-output-dpi">
           {{ outputHint.text }}
         </span>
         <span class="tb-label">缩放</span>
@@ -1331,6 +1355,9 @@ onMounted(refreshAll)
   border: 1px solid var(--line);
   color: var(--stone);
   max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preview-dpi.dpi-good { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }

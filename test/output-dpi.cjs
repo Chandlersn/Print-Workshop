@@ -297,7 +297,22 @@ check('界面读数必须带「约」字（体积是模型不是预言）', () =
   assert.ok(from > 0 && hint.length > 200, '必须能定位到读数实现')
   assert.ok(/约 \$\{formatBytes\(/.test(hint), '估算必须标「约」，否则是在给用户下保证')
   assert.ok(/data-testid="print-output-dpi"/.test(src), '读数要有稳定测试锚点')
-  assert.ok(/出片分辨率：原图/.test(hint), '「原图」档位也要有读数，否则用户不知道当前没压缩')
+  assert.ok(/原图出片/.test(hint), '「原图」档位也要有读数，否则用户不知道当前没压缩')
+})
+check('读数要短（与页数、缩放挤一行），完整说法放 title', () => {
+  const src = view()
+  const from = src.indexOf('const outputHint')
+  const hint = src.slice(from, src.indexOf('function outputResultText'))
+  // 可见文案只用短词；「所选范围照片预计约」这类长句只许出现在 title 里
+  assert.ok(/待降采样|已降采样/.test(hint), '降采样进度用短词表达')
+  assert.ok(!/text: `[^`]*所选范围照片预计约/.test(hint), '长句不许进可见文案（会把缩放控件顶出去）')
+  assert.ok(!/text: `[^`]*暂不提供整批体积预估/.test(hint), '长句不许进可见文案')
+  assert.ok(/title:/.test(hint), '短文案必须把完整说法留在 title 里，不能把信息删掉')
+  // 底图读数同样是「短文案 + title」
+  assert.ok(/data-testid="print-design-dpi"/.test(src), '底图读数要有稳定测试锚点')
+  const design = src.slice(src.indexOf('const designHint'), src.indexOf('const outputHint'))
+  assert.ok(/最低 \$\{dpi\} dpi/.test(design), '底图读数只报最低 dpi')
+  assert.ok(/第 \$\{d\.revision\} 版/.test(design), '「第 N 版」的完整说法留在 title')
 })
 check('导出完成后用真实字节数覆盖估算，并如实报出降采样结果', () => {
   const src = view()

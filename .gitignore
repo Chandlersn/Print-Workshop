@@ -24,6 +24,8 @@ docs/开发经验总结.md
 docs/推文/
 # 推广视频的**工作目录**：录屏帧、bgm.wav、渲染脚本与分镜稿，成品才进 docs/推文/
 promo/
+# 同上（v3 重做版：合成素材 120 张证件照 + 2x 截图 + 中间音频，约 80 MB）
+promo3/
 data/print-bg/
 data/print-fonts/
 data/designs/
