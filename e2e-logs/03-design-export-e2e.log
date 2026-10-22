@@ -1,0 +1,75 @@
+
+> printpress@0.6.6 test:design-export-e2e
+> node test/helpers/electron-runner.cjs test/design-export-e2e.cjs
+
+
+  ok - 存在可见主窗口时执行隐藏PNG渲染
+  ok - 无图片A4文字与形状在可见主窗口旁完成PNG截图
+  ok - 测试启用Windows 200%显示缩放
+  ok - 150DPI精确输出150×75px
+  ok - 返回尺寸等于PNG真实尺寸
+  ok - 150DPI形状像素为不透明红色
+  ok - 150DPI保留原PNG半透明alpha=128
+  ok - 150DPI空白画布透明
+  ok - 150DPI物理分辨率元数据正确
+  ok - 300DPI精确输出300×150px
+  ok - 返回尺寸等于PNG真实尺寸
+  ok - 300DPI形状像素为不透明红色
+  ok - 300DPI保留原PNG半透明alpha=128
+  ok - 300DPI空白画布透明
+  ok - 300DPI物理分辨率元数据正确
+  ok - 600DPI精确输出600×300px
+  ok - 返回尺寸等于PNG真实尺寸
+  ok - 600DPI形状像素为不透明红色
+  ok - 600DPI保留原PNG半透明alpha=128
+  ok - 600DPI空白画布透明
+  ok - 600DPI物理分辨率元数据正确
+  ok - 参考线不进入导出像素
+  ok - 非透明导出使用白色背景
+  ok - 半透明图片正确合成到白色背景
+  ok - 透明 PNG 导出移除画板渐变
+  ok - 形状外侧实际输出半透明黑色阴影像素
+  ok - 阴影不覆盖形状主体的红色像素
+  ok - 阴影之外的透明 PNG 背景仍透明
+  ok - 阴影遵循透明渐变填充的实际 alpha
+  ok - 贴近画板边缘的模糊阴影未被图层边框提前裁断
+  ok - 描边真的画在框内侧（1mm 绿环落在 x=6–7mm）
+  ok - 描边没有吃掉图片主体（x=11mm 仍是红色原图）
+  ok - 描边不收在框内就会溢到框外——这里必须是透明
+  ok - 图片投影真的投到了框外（dx=3mm ⇒ x=18mm 处是黑色阴影）
+  ok - 投影之外的透明 PNG 背景仍透明
+  ok - 投影跟随源图 alpha（半透明图 ⇒ 阴影像素也半透明；box-shadow 会给 255，实得 128）
+  ok - 对照组：半透明图本身确实是 50% alpha（实得 128）
+  ok - 图片与它自己的影子叠在一起时是 0.5 + 0.5×0.5 = 75%（实得 192，再次说明影子也带着源图的 alpha）
+  ok - A4 600DPI超屏幕大图输出4961×7016原生像素
+  ok - A4高清PNG文件实际像素正确
+  ok - jpeg 真实输出 300×150 像素
+  ok - jpeg 结果带回格式与真实字节数
+  ok - jpeg flattened 只报「透明要求被替换掉」这件事
+  ok - webp 真实输出 300×150 像素
+  ok - webp 结果带回格式与真实字节数
+  ok - webp flattened 只报「透明要求被替换掉」这件事
+  ok - JPEG + 勾透明 ⇒ flattened 为真（界面据此提示已铺底）
+  ok - JPEG 能被系统解码器打开
+  ok - JPEG 形状像素仍是红色
+  ok - JPEG 没有 alpha：空白处铺成不透明底色，不是透明
+  ok - JPEG 紧跟 SOI 写入 JFIF 密度 300 dpi
+  ok - JPEG 里恰好一个 JFIF 段（没有重复注入）
+  ok - JPEG 质量参数真的影响体积（20 比 85 小）
+  ok - WebP 是真正的 RIFF/WEBP 容器，不是改了扩展名的 PNG
+  ok - WebP 能被 Chromium 解码为 300×150（不是坏文件）
+  ok - WebP 形状像素仍是红色
+  ok - WebP 保留透明背景（多格式没有把 alpha 挤掉）
+  ok - 同质量下 WebP 比 JPEG 小
+  ok - PNG 仍然保留透明背景（多格式没有把它挤成不透明）
+  ok - PNG 仍然写入 pHYs 分辨率元数据
+  ok - 上传字体实际渲染文字像素
+  ok - 历史工程上传字体缺失时即使草稿省略映射也阻断PNG输出
+  ok - 失败和成功导出均销毁隐藏窗口，保留主窗口
+  ok - 宿主注入PNG出口可正常调用
+  ok - 「打开所在文件夹」定位到的正是刚导出的那个 PNG
+  ok - 「用系统程序打开」打开的是刚导出的那个 PNG
+  ok - 调用方塞进来的路径被忽略，只打开主进程记着的文件（渲染进程传不进路径）
+  ok - 无 GUI 上下文调用「用系统程序打开」得到 GUI_REQUIRED（agent 够不到这条能力）
+  ok - 刚导出的 PNG 被删掉后「打开」明确报错，而不是静默无反应
+PNG_E2E_OK checks=69 artifacts=D:\a\Print-Workshop\Print-Workshop\.workbuddy-ai\tmp\design-png-acceptance

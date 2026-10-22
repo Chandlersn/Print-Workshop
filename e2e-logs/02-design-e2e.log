@@ -1,0 +1,299 @@
+
+> printpress@0.6.6 test:design-e2e
+> node test/helpers/electron-runner.cjs test/design-e2e.cjs
+
+
+  ok - single 原图仅嵌入一次
+  ok - single 每份画板和图形渐变的 SVG ID 唯一
+  ok - single 每份外阴影滤镜的 SVG ID 唯一
+  ok - single PDF页数正确：2
+  ok - single PDF保留原始JPEG码流
+  ok - single PDF保留1024×768源像素
+  ok - single PDF含真实字体对象
+  ok - single PDF保留可选取文字的文本绘制指令
+  ok - grid 原图仅嵌入一次
+  ok - grid 每份画板和图形渐变的 SVG ID 唯一
+  ok - grid 每份外阴影滤镜的 SVG ID 唯一
+  ok - grid PDF页数正确：1
+  ok - grid PDF保留原始JPEG码流
+  ok - grid PDF保留1024×768源像素
+  ok - grid PDF含真实字体对象
+  ok - grid PDF保留可选取文字的文本绘制指令
+  ok - fold 原图仅嵌入一次
+  ok - fold 每份画板和图形渐变的 SVG ID 唯一
+  ok - fold 每份外阴影滤镜的 SVG ID 唯一
+  ok - fold PDF页数正确：2
+  ok - fold PDF保留原始JPEG码流
+  ok - fold PDF保留1024×768源像素
+  ok - fold PDF含真实字体对象
+  ok - fold PDF保留可选取文字的文本绘制指令
+  ok - 保存新版本不改变模板旧版本
+  ok - 首次进入底图制作时「常用模板」下拉就可用，不用先切页再回来
+  ok - 「常用模板」下拉分成「内置模板」与「常用」两组
+  ok - 双击文字图层在画布上就地编辑并自动聚焦
+  ok - 就地编辑框整段选中，可直接重写
+  ok - 就地编辑框与图层几何重合（偏差 0.00/0.00/0.00/0.00 px）
+  ok - 编辑时画布上的原文字已隐去，不会与编辑框叠成双影
+  ok - 就地编辑框内容随输入更新
+  ok - 画布上重新画出改后的文字
+  ok - Esc 退出时没改过内容就不产生新版本
+  ok - Esc 空退出不改动撤销栈
+  ok - 真实点击颜色控件整块盒子即可唤起取色器（不依赖 label 转发）
+  ok - 只发 input 事件时画布上的文字颜色也跟着变
+  ok - change 收尾后颜色保持最终值
+  ok - 撤销一步即回到取色前的颜色（一次取色只记一条历史）
+  ok - 重做恢复取色结果
+  ok - 打断后取色仍生效
+  ok - 撤销取色不连带回滚中间那次普通编辑
+  ok - 界面文字编辑保存后可读取
+  ok - 界面改的文字颜色保存后可读取
+  ok - 界面撤销重做保留矩形
+  ok - 切换页面后工程状态保留
+  ok - 真实鼠标拖动改变物理坐标
+  ok - 一次撤销还原完整拖动
+  ok - 撤销回已保存内容后恢复已保存状态
+  ok - 锁定图层不会被Delete删除
+  ok - 测试环境可用 ClipboardEvent 模拟粘贴文件
+  ok - 粘贴截图落成图片图层并沿用文件名
+  ok - 刚粘贴的临时素材不进入素材库列表
+  ok - 粘贴的图片字节原样落盘，不受前端文件名影响
+  ok - 投放后拖拽高亮提示消失
+  ok - 拖入文件同样落成图片图层
+  ok - 拖入的图片字节原样落盘
+  ok - 相同字节复用同一素材，不重复占盘
+  ok - 非图片拖入不会新增图层
+  ok - 撤销可完整回退粘贴与拖入产生的图层
+  ok - 旧版缺少 source 的临时索引不会让粘贴素材出现在素材库
+  ok - pasted original and ephemeral metadata exist before deleting its layer
+  ok - deleting the only pasted layer removes its original and metadata from the asset pool
+  ok - 删除后同步清除旧版素材库索引记录
+  ok - 图片缩放手柄可拖动
+  ok - 裁切翻转与缩放比例持久化
+  ok - 界面导入和裁切不改写源图片字节
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+  ok - 重开工程恢复裁切属性
+  ok - 尺寸/比例预设下拉同时给出证件照毫米规格与纯比例，首项是「自定义」（实得 ["","size:photo-1s","size:photo-1"]…）
+  ok - 套用 1 寸预设后图层是 25×35mm 成品尺寸（实得 25×35）
+  ok - 裁切跟着改成同一长宽比，脸不会被拉长（可见源区域比例 0.7143 vs 目标 0.7143）
+  ok - 重新裁切仍落在原图内（浮点尾巴会让 normalizeDesign 拒绝整份工程）
+  ok - 套用后下拉回位成「自定义」，同一个预设能再点一次
+  ok - 比例预设保持宽度 25mm、只把高度改成 25mm（实得 25×25）
+  ok - 撤销连带把裁切也回退（尺寸与裁切是同一个动作，撤销也必须是）
+  ok - 图层分组与名称保存为格式版本2
+  ok - 界面整组旋转同步作用于全部成员
+  ok - 整组缩放同步调整文字字号
+  ok - 列表单选成员后Delete仅删除选中成员
+  ok - 撤销成员删除完整恢复分组
+  ok - 列表单选成员方向键不会移动其他组员
+  ok - 整组真实拖动保持成员相对位置
+  ok - 一次撤销恢复整组位置与已保存状态
+  ok - 整组锁定后Delete不会删除任何成员
+  ok - 组隐藏会隐藏全部成员的实际渲染
+  ok - 复制组生成新的组和全部成员
+  ok - 解组保留复制出的全部图层
+  ok - 删除副本组不影响原组及图片
+  ok - 水平和垂直参考线显示在编辑视图
+  ok - 参考线显示开关生效
+  ok - 组合拖动吸附到参考线的毫米坐标
+  ok - 工程落盘保留分组和参考线毫米位置
+  ok - 标尺与网格默认不显示（只想摆图层的人不被打扰）
+  ok - 打开标尺后横向与纵向两条都在
+  ok - 开标尺不会挤动画布（标尺挂在画布外缘、绝对定位，不参与布局——I-34 的同类教训）
+  ok - 标尺与画布等宽，刻度一直铺到画布右缘（末根刻度 717.6px / 画布 720.0px，共 75 根）
+  ok - 打开网格后画布上出现网格辅助层
+  ok - 网格按「间距 10mm / 细分数 5」画出 10mm 主格线与 2mm 次格线
+  ok - 改成「间距 20mm / 细分数 2」后主格线变 20mm、次格线变 10mm
+  ok - 旧配置的 2mm 次格线已消失（参数真的生效，不是画了个固定图案）
+  ok - 关掉网格后辅助层消失
+  ok - 从标尺往外拖时先出现预览线（拖动过程不落库）
+  ok - 拖出的参考线落在指针所在的毫米位置（期望 30mm，实得 30）
+  ok - 一次撤销就整条回退——拖动过程没有把几十条中间态灌进撤销栈
+  ok - 新增一个矩形作为吸附探针（单独选中，拖动时包围盒只属于它）
+  ok - 吸附目标缺省：画布边缘 / 参考线 / 图层开，网格关（网格默认不显示，看不见的吸附线比不吸附更糟）
+  ok - 只开参考线时，图层左缘精确吸到 280mm（实得 279.997）
+  ok - 四类全关后同样的拖拽不再吸（落在 279.379mm，差的正是那 1.5px）
+  ok - 只开画布边缘时吸到画布中线 148.5mm（实得 148.500）
+  ok - 删除吸附探针图层，文档回到保存态
+  ok - 工程包导出页明确显示固定版本号
+  ok - 导出过程通过 preload 收到逐条目进度
+  ok - 界面导出按钮生成可读取的 .ppdesign 文件
+  ok - 导入检查页显示工程包图层摘要
+  ok - 界面导入创建新 ID 和第 1 版，不覆盖来源工程
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+  ok - 工程包往返保留分组与参考线
+  ok - 导入副本在当前编辑器中完整打开
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+  ok - 新增的矩形出现在图层列表里
+  ok - 图层属性面板有「仅编辑可见（不打印）」开关，默认关闭
+  ok - 编辑器画布仍然渲染参考框（否则没法照着对齐）
+  ok - 图层列表给参考框标注「仅编辑」
+  ok - 参考框的「仅编辑可见」落盘
+  ok - 带参考框的工程标记为格式版本3（旧应用明确拒绝，而不是把参考框当普通图层印出去）
+  ok - 参考框在画布上能选中并拖动，用户照着它对齐图片
+  ok - 界面导出PNG得到指定DPI的精确像素
+  ok - 透明PNG有实际图层像素且空白角落透明
+  ok - 导出时画布上确实盖着一个铺满整张画布的不透明参考框
+  ok - 铺满画布的不透明参考框没有漏进导出 PNG（否则整张图不会再有透明像素）
+  ok - 导出当前草稿不保存新版本也不清除未保存状态
+  ok - PNG导出后原始图片字节保持不变
+  ok - 切到 JPEG 后「透明背景」勾选框置灰（没有 alpha 通道）
+  ok - 界面明确写出 JPEG 会铺画布底色，而不是静默丢掉透明层
+  ok - 有损格式才出现质量滑杆
+  ok - 面板给出体积预估并标明是估算值
+  ok - 界面导出的确实是 JPEG（不是改了扩展名的 PNG）
+  ok - 界面导出JPEG得到指定DPI的精确像素
+  ok - 界面导出JPEG写入了 150 dpi 的 JFIF 密度
+  ok - JPEG 空白角落是不透明底色（没有 alpha 通道）
+  ok - 完成条标明导出的是 JPEG
+  ok - 导出成功后给出「打开所在文件夹 / 用系统程序打开」两个动作
+  ok - 完成条里带完整导出路径，用户照着就能找到文件
+  ok - 渲染层暴露的这两个方法是零参的（界面上无处传路径）
+  ok - 「打开所在文件夹」定位到刚导出的文件（按钮真的接到了主进程）
+  ok - 「用系统程序打开」打开的是刚导出的文件
+  ok - 「关闭」只收起完成条，磁盘上的导出文件不受影响
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+  ok - 重启恢复未保存的位置修改
+  ok - 重新载入后恢复图层组与参考线
+  ok - 选中图片图层时给出「描边（衬边）」与「投影」两个开关
+  ok - 未开启时不展开具体参数（不白占版面）
+  ok - 描边不改变框的毫米尺寸（用 border 会挤掉内容盒 ⇒ 等于把照片拉长）
+  ok - 描边不用 outline（Chromium 把它画在图片之下，整圈会被盖住）
+  ok - 投影走 drop-shadow（按轮廓）而不是 box-shadow（按包围盒投出一个方盒）
+  ok - 描边与投影写进草稿（实得 {"stroke":"#ffffff","strokeWidth":1.2,"blur":2}）
+  ok - 带图片描边/投影的工程标记为格式版本7（旧应用明确拒绝，实得 7）
+  ok - 描边与投影落盘
+  ok - 关掉后画布上不再有描边与投影
+  ok - 关掉后字段被真删除（实得残留 []）
+  ok - 滑杆上限与 schema 的取值口径一致：去色/反相是 0~1 ⇒ 100%，乘数类是 0~3 ⇒ 300%（实得 {"design-adjust-brightness":{"max":"300","value":"100"},"design-adjust-contrast":{"max":"300","value":"100"},"design-adjust-saturate":{"max":"300","value":"100"},"design-adjust-grayscale":{"max":"100","value":"0"},"design-adjust-invert":{"max":"100","value":"0"}}）
+  ok - 没调过时滑杆停在各自字段的**恒等值**（去色 0%、亮度 100%——去色的恒等值是 0 而不是 100）
+  ok - 滑杆旁回显当前百分比，能看清调到哪一档（去色 50%）
+  ok - 画布上的图片真的带上了 grayscale(0.5)（画布与出片同源，不是只在状态里改了数）
+  ok - 中间档位都能落进 schema，两个滑杆不再是「只有关和拉满」（反相 0.3、亮度 1.2）
+  ok - 画布仍在正常渲染且没有报错（口径不一致时 renderDesign 会抛错、画布直接变空）
+  ok - 滑杆类控件一次手势只留一条撤销（拖动过程不进撤销栈）
+  ok - 颜色调整以 schema 口径落盘（{"brightness":1.2,"contrast":1,"saturate":1,"grayscale":0.5,"invert":0.3}）
+  ok - 颜色调整不会把已经是 7 的工程降回 6（版本号 Math.max 语义，实得 7）
+  ok - 「恢复原始颜色」把整块 adjust 删掉，而不是把各项写回默认值（渲染侧少一个 filter）
+  ok - 重置后画布上不再有 grayscale（回到与升级前逐字节一致的渲染）
+  ok - 模板标尺贴在画布外侧，不覆盖纸面
+  ok - 模板参考线按毫米落在纸张正确位置
+  ok - 模板画布放大只改变视图尺寸，不改字段坐标
+  ok - 模板参考线跟随画布缩放，毫米位置不漂移
+  ok - 隐藏参考线只改变视图，保留参考线数据
+  ok - 适合宽度不会留下横向溢出
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+Error occurred in handler for 'design:save': Error: 底图已更新至版本 2，当前版本 1 不能覆盖，请重新打开或另存副本
+    at D:\a\Print-Workshop\Print-Workshop\electron\designs.cjs:425:19
+    at withLock (D:\a\Print-Workshop\Print-Workshop\electron\designs.cjs:107:12)
+    at Object.saveDesign (D:\a\Print-Workshop\Print-Workshop\electron\designs.cjs:420:10)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:808:25)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28) {
+  code: 'DESIGN_CONFLICT'
+}
+  ok - 编辑旧版本的冲突向用户显示
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+  ok - 模板引用编辑后保存的精确版本
+  ok - 模板编辑应用不会改变原有固定版本
+  ok - 图层底图不会遮挡变量字段点击
+  ok - 有图层底图时变量字段仍可真实拖动
+  ok - 模板字段撤销独立于底图图层
+  ok - 不应用返回保留模板草稿
+  ok - 再次出片包含新静态标题与变量字段
+  ok - 编辑应用后的PDF仍保留原图码流与字体对象
+  ok - 下拉第一项是占位、紧接着就是唯一的内置模板（实得 ["","preset:id-card-a4"]）
+  ok - 内置模板只剩身份证一套
+  ok - 「常用」里列出了用户自己的工程
+  ok - 下拉选完自动复位，再选同一项仍会触发
+  ok - 新建后给出「已按某模板新建工程」的提示
+  ok - 选「内置模板」确实新建了一份独立工程，不动已有工程
+  ok - 证件预设整份都是「仅编辑可见」的参考框，并标记为格式版本 3
+  ok - 编辑器画布照样把参考框画出来（否则没法照着它对齐图片）
+  ok - 图层列表把每个参考框都标成「仅编辑」
+  ok - 预设刚建出来的工程没有使用记录（不该自动进「常用」）
+  ok - 刚按预设建出来的工程**没有**出现在「常用」里
+  ok - 再选一次「身份证」不会新增工程——打开已有的那份（「每点一次多一个」的根因就此堵住）
+  ok - 复用时打开的确实是那份身份证工程
+  ok - 复用（打开）一份从没保存过的工程，也不会把它塞进「常用」
+  ok - 用户保存后工程才有了使用记录
+  ok - 工程库里确实堆着 3 份同名工程（人为造的重复）
+  ok - 同名工程在「常用」里只列一条（实得 1 条）
+Error occurred in handler for 'asset:get': Error: 素材库里没有这个素材
+    at Object.getEntry (D:\a\Print-Workshop\Print-Workshop\electron\asset-library.cjs:244:21)
+    at Object.run (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1041:34)
+    at Object.call (D:\a\Print-Workshop\Print-Workshop\electron\api.cjs:1699:13)
+    at D:\a\Print-Workshop\Print-Workshop\electron\ipc.cjs:96:11
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:77979)
+    at WebContents.emit (node:events:517:28)
+  ok - 从「常用」打开**不会**新增工程（这正是当初堆出 18 个的根因）
+  ok - 打开后被记入「常用」（lastUsedAt 刷新，且不碰版本号）
+  ok - 打开别的工程不会改动先前那份证件预设工程
+  ok - 顶部提示条 5 秒后自动消失（无需手动关闭）
+  ok - 待删的临时原件已在磁盘
+  ok - 删临时件不再弹确认框（不打断操作）
+  ok - 临时原件随图层同步删除（删除行为不变）
+  ok - 图层已删除
+  ok - 顶部提示条告知「未加入素材库的原图已同步清理」（非阻塞，替代原确认框）
+  ok - 无关编辑（先加的那个矩形）仍能撤销回去
+  ok - 连加 12 个矩形可全部撤销（上限已从 5 放宽到 50）
+  ok - 画布渐变开关在右侧属性栏可见
+  ok - 画布渐变角度可在界面编辑
+  ok - 画布渐变可增加色标并立即重绘
+  ok - 画布和矩形的渐变在编辑画布中使用不同 ID
+  ok - 矩形渐变角度可在界面编辑
+  ok - 矩形外阴影开关在属性栏可见
+  ok - 阴影水平偏移可在界面编辑
+  ok - 新矩形作为样式复制目标被选中
+  ok - 形状样式按参数复制，保留目标图层
+  ok - 专注画布收起两侧面板
+  ok - 放大画布可通过导航图定位
+  ok - 画布保留横向滚动范围，但不再显示第二条原生横向滚动条
+  ok - 横向滚动条显示在画布底部、属性面板左侧
+  ok - 移至最右侧后画布未被属性面板遮挡且可以操作
+  ok - 界面无控制台错误：
+DESIGN_E2E_OK checks=226 artifacts=D:\a\Print-Workshop\Print-Workshop\.workbuddy-ai\tmp\design-acceptance

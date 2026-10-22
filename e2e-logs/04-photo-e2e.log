@@ -1,0 +1,57 @@
+
+> printpress@0.6.6 test:photo-e2e
+> node test/helpers/electron-runner.cjs test/photo-e2e.cjs
+
+
+  ok - 外链原图主动从 file 页面加载
+  ok - 21 张不同原图在真实打印窗口解码完成
+  ok - PDF 保留 JPEG 原始码流
+  ok - 实际 PDF 包含 21 页
+  ok - 缺少原件时阻断打印加载
+  ok - 快照引用相对照片文件，无内联照片
+  ok - 迁移整个任务目录后，普通文件页面仍可解码全部照片
+  ok - 数据页移除照片匹配按钮及遮挡弹窗
+  ok - 匹配照片自动入库后直接显示表格，不再重复展示照片卡片
+  ok - 真实 UI 显示具体缺图行
+  ok - 真实 UI 提示多人共用照片
+  ok - 搜索结果同时显示筛选数量与名单总量
+  ok - 缺图状态筛选与姓名搜索共同生效
+  ok - 界面导出保留原始行号和所选识别字段
+Error: net::ERR_FILE_NOT_FOUND
+    at SimpleURLLoaderWrapper.<anonymous> (node:electron/js2c/browser_init:2:108522)
+    at SimpleURLLoaderWrapper.emit (node:events:517:28)
+  ok - 缺失缩略图自动回退系统原件，多行共用照片也能正常显示
+  ok - 修改名单后重新检查得到最新匹配
+  ok - 点击问题行自动展开隐藏列并进入对应单元格编辑
+  ok - 点击列头配图后只有姓名列启用
+  ok - 列头选择已持久化
+  ok - 多份名单已配图时仍跟随数据页当前名单，无需重复选择关联名单
+  ok - 切到姓名重新导入只保存两张匹配照片，王五缺图显示空位
+  ok - 表格优先使用缩略图缓存，不同时解码原图
+  ok - 自动关联保持原姓名
+  ok - 数据页切换名单后照片库自动切换，未混入上一份名单照片
+  ok - 当前名单关闭配图时不擅自切换到其他名单导图
+  ok - 改选照片编号时自动取消姓名列
+  ok - 首份名单未开启配图时，自动选择已开启的名单且过滤未开启项
+  ok - 变量图未开启时仅置灰，无长提醒和悬浮提示
+  ok - 配图已关闭时入口复核并置灰，不打开弹窗
+  ok - 数据页开启匹配后返回编辑器，变量图按钮自动可用
+  ok - 弹窗打开后关闭匹配也无法插入变量图
+  ok - 其他名单已配图也不能绕过当前名单关闭匹配的限制
+  ok - 通过真实界面插入并保存绑定照片列的变量图，新图层名称同步更新
+  ok - 实际打印窗口逐行换图，重复照片复用原件
+  ok - 人像模板导出真实三页 PDF
+  ok - 模板编辑页使用同一变量图渲染规则显示名单样例照片
+  ok - 打印中心变量图模板有高亮与标签，普通文字模板不误标
+  ok - 选中模板后仍显示变量图标识
+  ok - 单人取景按记录与图框保存，原件保持不变
+PHOTO_E2E_FAIL AssertionError [ERR_ASSERTION]: 打印页内显示所选范围照片人数和页数，不弹遮挡预检窗口
+    at ok (D:\a\Print-Workshop\Print-Workshop\test\photo-e2e.cjs:23:43)
+    at D:\a\Print-Workshop\Print-Workshop\test\photo-e2e.cjs:311:3 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '=='
+}
+PHOTO_IMAGE_STATE []

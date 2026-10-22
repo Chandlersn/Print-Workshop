@@ -1,0 +1,7 @@
+
+> printpress@0.6.6 test:e2e
+> node test/helpers/electron-runner.cjs test/m3-e2e.cjs
+
+
+E2E_OK pdf=D:\a\Print-Workshop\Print-Workshop\test\.tmp-out\batch-120.pdf
+E2E_PAGES=120 bytes=96479 bg=ok
