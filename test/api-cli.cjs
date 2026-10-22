@@ -138,6 +138,7 @@ const ADDED_CHANNELS = [
   'design:packagePickFont',
   // 分批出片（S1.3-b/c）：按整纸切批的进度与取消（进度是事件，取消是操作）
   'print:photoPreflight',
+  'print:exportImages',
   'print:cancel',
 ]
 

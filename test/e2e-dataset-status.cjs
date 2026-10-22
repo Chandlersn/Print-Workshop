@@ -75,6 +75,7 @@ app.whenReady().then(async () => {
   fs.mkdirSync(path.join(jobDir, 'photos'))
   fs.writeFileSync(path.join(jobDir, 'photos', 'copy.jpg'), 'PHOTO COPY')
   await evaluate(`document.querySelectorAll('.nav-label')[4].click()`)
+  await click('.history-trigger')
   await waitFor(`!!document.querySelector('.job-del')`, '打印历史')
   await click('.job-del')
   ok(await evaluate(`document.querySelector('.cd-msg').textContent.includes('PDF') && document.querySelector('.cd-msg').textContent.includes('归档照片副本')`), '删除确认明确照片副本与保留数据')

@@ -1,6 +1,6 @@
 {
   "name": "printpress",
-  "version": "0.6.4",
+  "version": "0.6.6",
   "description": "批印坊 PrintPress - 本地离线通用批量打印工具",
   "type": "module",
   "main": "electron/main.cjs",
@@ -9,9 +9,12 @@
     "build": "vite build",
     "start": "electron .",
     "pp": "node bin/pp.cjs",
+    "ppw": "node tools/ppw.cjs",
+    "mcp": "node bin/pp-mcp.cjs",
+    "test:mcp-e2e": "node test/mcp-e2e.cjs",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5199 && electron .\"",
     "smoke": "electron . --smoke",
-    "test": "node test/m1-import.cjs && node test/m2-templates.cjs && node test/template-origin.cjs && node test/m3-render.cjs && node test/render-grid.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/placeholder.cjs && node test/print-scope.cjs && node test/dataset-edit.cjs && node test/dataset-batch.cjs && node test/canvas-layout.cjs && node test/canvas-align.cjs && node test/bg-fidelity.cjs && node test/column-visibility.cjs && node test/template-layout.cjs && node test/field-edit.cjs && node test/print-jobs.cjs && node test/version-check.cjs && node test/storage-guard.cjs && node test/cache.cjs && node test/print-failure.cjs && node test/robustness.cjs && node test/ipc-hardening.cjs && node test/ipc-wiring.cjs && node test/api-cli.cjs && node test/e2e-harness.cjs && node test/designs.cjs && node test/design-render.cjs && node test/design-editor.cjs && node test/design-effects.cjs && node test/design-blend-adjust.cjs && node test/design-presets.cjs && node test/design-export.cjs && node test/design-crop-presets.cjs && node test/design-image-effects.cjs && node test/designer-aids.cjs && node test/asset-library.cjs && node test/asset-storage.cjs && node test/template-asset-library.cjs && node test/design-package.cjs && node test/photos.cjs && node test/pdf-merge.cjs && node test/print-batch.cjs && node test/pack-root.cjs && node test/user-error.cjs && node test/output-dpi.cjs && node test/data-dir-lock.cjs && node test/claims.cjs && node test/invariants.cjs",
+    "test": "node test/m1-import.cjs && node test/m2-templates.cjs && node test/template-origin.cjs && node test/m3-render.cjs && node test/render-grid.cjs && node test/data-dir.cjs && node test/sheets-import.cjs && node test/placeholder.cjs && node test/print-scope.cjs && node test/field-check.cjs && node test/ppw.cjs && node test/dataset-edit.cjs && node test/dataset-batch.cjs && node test/canvas-layout.cjs && node test/canvas-align.cjs && node test/bg-fidelity.cjs && node test/column-visibility.cjs && node test/template-layout.cjs && node test/field-edit.cjs && node test/print-jobs.cjs && node test/version-check.cjs && node test/storage-guard.cjs && node test/cache.cjs && node test/print-failure.cjs && node test/robustness.cjs && node test/ipc-hardening.cjs && node test/ipc-wiring.cjs && node test/api-cli.cjs && node test/e2e-harness.cjs && node test/designs.cjs && node test/design-render.cjs && node test/design-editor.cjs && node test/design-effects.cjs && node test/design-blend-adjust.cjs && node test/design-presets.cjs && node test/design-export.cjs && node test/design-crop-presets.cjs && node test/design-image-effects.cjs && node test/designer-aids.cjs && node test/asset-library.cjs && node test/asset-storage.cjs && node test/template-asset-library.cjs && node test/design-package.cjs && node test/photos.cjs && node test/pdf-merge.cjs && node test/print-batch.cjs && node test/pack-root.cjs && node test/user-error.cjs && node test/output-dpi.cjs && node test/data-dir-lock.cjs && node test/claims.cjs && node test/invariants.cjs",
     "test:template-origin": "node test/template-origin.cjs",
     "verify:template-origin-shipped": "node test/template-origin-shipped.cjs",
     "test:e2e": "node test/helpers/electron-runner.cjs test/m3-e2e.cjs",
@@ -19,6 +22,7 @@
     "test:design-export-e2e": "node test/helpers/electron-runner.cjs test/design-export-e2e.cjs",
     "test:photo-e2e": "node test/helpers/electron-runner.cjs test/photo-e2e.cjs",
     "test:dataset-status-e2e": "node test/helpers/electron-runner.cjs test/e2e-dataset-status.cjs",
+    "test:print-images-e2e": "node test/helpers/electron-runner.cjs test/print-images-e2e.cjs",
     "bench:storage": "node test/bench-storage.cjs",
     "dist": "node scripts/check-pack-root.cjs && npm run build && electron-builder --win --x64 --publish never",
     "pack:check": "node scripts/check-pack-root.cjs",
@@ -27,7 +31,8 @@
     "release:upload": "node scripts/release-upload.cjs",
     "test:output-dpi-e2e": "node test/helpers/electron-runner.cjs test/output-dpi-e2e.cjs",
     "test:fixed-image-dedupe-e2e": "node test/helpers/electron-runner.cjs test/fixed-image-dedupe-e2e.cjs",
-    "test:about-cache-e2e": "node test/about-cache-e2e.cjs"
+    "test:about-cache-e2e": "node test/about-cache-e2e.cjs",
+    "pack:skill": "node scripts/pack-skill.cjs"
   },
   "author": "lyq",
   "license": "MIT",
@@ -61,6 +66,10 @@
     },
     "icon": "build/icon.png",
     "extraResources": [
+      {
+        "from": "bin/pp-mcp.cjs",
+        "to": "mcp/pp-mcp.cjs"
+      },
       {
         "from": "build/seed",
         "to": "seed"

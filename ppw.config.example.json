@@ -1,0 +1,44 @@
+{
+  "_说明": "复制成 ppw.config.json 后按自己的批次改。真实的批次配置含单位名与姓名，不进仓库（已在 .gitignore）。字段匹配规则务必按自己名册的真实表头写：先试 eq: 精确匹配，重复列名或带星号/括号的用 prefix: 或 contains:。",
+
+  "rosterDir": "D:/名单目录",
+  "rosters": [
+    "合并_1-60号.xlsx",
+    "合并_61-120号.xlsx"
+  ],
+  "outputDir": "D:/成品目录",
+  "reportDir": "D:/成品目录/_报告",
+  "reportBaseName": "批次_对账表",
+  "templateId": "替换成实际模板 id",
+  "outputDpi": 300,
+  "fileNameFields": ["1", "姓名"],
+
+  "_requiredFields说明": "不必把模板里的字段全列一遍：清单由模板 fields[].column 推导（模板声明几个就校验几个，5 个、9 个都成立），这里只需要列出「表头写法与列名不一致、或必须用 prefix/contains 才认得出」的列；其余列自动按精确同名匹配。列出的列如果模板不渲染，也会多校验一次，不影响出片。",
+  "requiredFields": [
+    { "key": "姓名", "match": "prefix:姓名" },
+    { "key": "组别", "match": "eq:组别" },
+    { "key": "省自治区直辖市", "match": "prefix:省" },
+    { "key": "所在学校必须写全名", "match": "prefix:所在学校" },
+    { "key": "指导老师", "match": "contains:指导" },
+    { "key": "证书编号", "match": "eq:证书编号" },
+    { "key": "奖项情况", "match": "eq:奖项情况" },
+    { "key": "赛项", "match": "eq:赛项" }
+  ],
+
+  "_skipCert说明": "个别人不出成品（如不参赛、幼儿组单独处理）。用 单位 + 姓名 定位，必须写真实值。",
+  "skipCert": [
+    { "sheet": "99_某单位", "name": "某某", "reason": "个案不出证书（日期 + 确认人）" }
+  ],
+
+  "excelPending": [],
+
+  "_excelSettled说明": "源表与数据集已确认一致、不必再提示差异的人。",
+  "excelSettled": [
+    { "sheet": "99_某单位", "name": "某某" }
+  ],
+
+  "_knownDialects说明": "已知且正确的口径差异，不计入漂移。规则要窄，且命中数会打印出来——几千行的豁免说明匹配规则吃错了列。",
+  "knownDialects": [
+    { "field": "奖项情况", "datasetIs": "个人复赛{excel}" }
+  ]
+}

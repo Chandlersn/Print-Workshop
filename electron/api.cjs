@@ -38,6 +38,7 @@ const designs = require('./designs.cjs')
 const designPresets = require('./design-presets.cjs')
 const fonts = require('./fonts.cjs')
 const assetLibrary = require('./asset-library.cjs')
+const fieldCheck = require('./field-check.cjs')
 const photoLibrary = require('./photo-library.cjs')
 const designPackage = require('./design-package.cjs')
 const printDomain = require('./print.cjs')
@@ -95,6 +96,23 @@ function describeOutput(stats, bake) {
   if (bake && bake.baked) bits.push(`带效果的底图烘焙 ${bake.baked} 层`)
   if (bake && bake.failed) bits.push(`底图烘焙失败 ${bake.failed} 层`)
   return bits.length ? `（${bits.join('，')}）` : ''
+}
+
+/**
+ * 出口校验（契约：模板上的关键字段全有值才能出证书）。
+ * 判空口径与错误结构在 field-check.cjs —— 那是纯函数，单独有测试。
+ * 行级勾选只校验被选中的行；显式传 allowIncomplete 时放行（历史数据补录场景）。
+ */
+function assertFieldsFilled(scope, tpl, field1, field2) {
+  const required = [...new Set([
+    ...(tpl.fields || []).map(f => f.column).filter(Boolean),
+    String(field1), String(field2),
+  ])]
+  fieldCheck.assertFieldsFilled(
+    scope.rows,
+    required,
+    row => `${String(row[field1] ?? '').trim()}_${String(row[field2] ?? '').trim()}`.replace(/^_+|_+$/g, '')
+  )
 }
 
 function cancelPrintTask(jobKey) {
@@ -1380,6 +1398,110 @@ const OPS = {
       } finally {
         printTasks.delete(jobKey)
       }
+    },
+  },
+
+  'print:exportImages': {
+    write: true,
+    gui: 'printer',
+    params: {
+      datasetId: { required: true, desc: '数据集 id' },
+      templateId: { required: true, desc: '模板 id' },
+      rows: { required: false, desc: '行级勾选索引集合（0 基）；缺省 = 全量' },
+      outputDir: { required: false, desc: '显式输出目录；提供时无需 GUI 目录选择框' },
+      field1: { required: true, desc: '图片文件名字段一' },
+      field2: { required: true, desc: '图片文件名字段二' },
+      outputDpi: { required: false, desc: '图片分辨率 150/300/600；缺省 300' },
+      allowIncomplete: { required: false, desc: 'true 时跳过「关键字段为空即拒出」的校验；缺省 false（默认拦截）' },
+      preflightFingerprint: { required: false, desc: '页面照片预检快照' },
+      jobKey: { required: false, desc: '进度关联任务键' },
+    },
+    run: async (p, ctx) => {
+      let dir
+      if (p.outputDir !== undefined && p.outputDir !== null && String(p.outputDir).trim()) {
+        dir = path.resolve(String(p.outputDir))
+      } else {
+        if (!ctx.dialog) throw guiRequired('print:exportImages', '文件夹选择对话框（无 GUI 时请指定 outputDir）')
+        const picked = await ctx.dialog.openDirectory({ title: '选择图片保存文件夹', properties: ['openDirectory', 'createDirectory'] })
+        if (picked.canceled || !picked.filePaths?.[0]) return { canceled: true, count: 0 }
+        dir = path.resolve(picked.filePaths[0])
+      }
+      const dsId = String(p.datasetId)
+      const tplId = String(p.templateId)
+      const dpi = Number(p.outputDpi || 300)
+      if (![150, 300, 600].includes(dpi)) throw new Error('图片分辨率必须是 150、300 或 600 dpi')
+      await printDomain.assertPhotoPreflight(dsId, tplId, p.rows, p.preflightFingerprint)
+      await printDomain.warmBatchBakes(tplId, dpi)
+      const ds = dataset.getDataset(dsId)
+      const keys = new Set((ds.columns || []).map(column => column.key))
+      const field1 = String(p.field1)
+      const field2 = String(p.field2)
+      if (field1 === field2 || !keys.has(field1) || !keys.has(field2)) throw new Error('请选择两个不同且有效的数据字段作为图片名称')
+      const scope = printDomain.resolveScope(ds, { rows: p.rows })
+      if (!scope.rows.length) throw new Error('没有可导出的记录')
+      const tpl = templates.getTemplate(tplId)
+      if (!p.allowIncomplete) assertFieldsFilled(scope, tpl, field1, field2)
+      fs.mkdirSync(dir, { recursive: true })
+      const spec = require('./render-engine.cjs').pageSpec(tpl.pageSize)
+      const safePart = value => String(value ?? '').trim()
+        .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+        .slice(0, 100).replace(/[. ]+$/g, '') || '空值'
+      const used = new Set()
+      let count = 0
+      const files = []
+      const whole = printDomain.buildBatchHtml(dsId, tplId, p.rows, { outputDpi: dpi })
+      const fingerprint = printInputFingerprint(dsId, tplId)
+      const guardedDomain = guardedPrintDomain(dsId, tplId, fingerprint)
+      const jobBase = {
+        templateId: tplId, templateName: whole.templateName,
+        datasetId: dsId, datasetName: whole.datasetName, mode: 'images',
+        recordCount: whole.recordCount, totalRows: whole.scope.total, partial: whole.scope.partial,
+        selection: whole.selection, selectionIds: whole.selectionIds,
+        snapshotHtml: whole.snapshotHtml, photoAssets: whole.photoAssets,
+        imageNameFields: [field1, field2], outputDpi: dpi,
+      }
+      try {
+        for (let i = 0; i < scope.rows.length; i++) {
+          const row = scope.rows[i]
+          const stem = `${safePart(row[field1])}_${safePart(row[field2])}`
+          let name = stem
+          let suffix = 2
+          while (used.has(name.toLocaleLowerCase()) || fs.existsSync(path.join(dir, `${name}.png`))) name = `${stem} (${suffix++})`
+          used.add(name.toLocaleLowerCase())
+          const rowIndex = scope.rowIndexes ? scope.rowIndexes[i] : i
+          const savePath = path.join(dir, `${name}.png`)
+          const built = guardedDomain.buildBatchHtml(dsId, tplId, [rowIndex], { outputDpi: dpi })
+          const result = await ctx.printer.exportPng(built.html, savePath, {
+            widthMm: spec.w, heightMm: spec.h, dpi,
+            cropToCell: Boolean(built.layout?.enabled && !built.layout?.fold),
+          })
+          const stat = fs.existsSync(savePath) ? fs.statSync(savePath) : null
+          const signature = stat && stat.size >= 8 ? Buffer.alloc(8) : null
+          if (signature) {
+            const fd = fs.openSync(savePath, 'r')
+            try { fs.readSync(fd, signature, 0, 8, 0) } finally { fs.closeSync(fd) }
+          }
+          if (!result || path.resolve(result.path || '') !== path.resolve(savePath) || !stat || stat.size < 8 || !signature || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+            throw new Error(`图片未成功写入磁盘：${savePath}`)
+          }
+          files.push(savePath)
+          count++
+          try {
+            ctx.emit('print:progress', {
+              jobKey: String(p.jobKey || ''), phase: 'image-done', index: count, total: scope.rows.length,
+            })
+          } catch { /* Progress notifications do not undo saved files. */ }
+        }
+        if (printInputFingerprint(dsId, tplId) !== fingerprint) throw new Error('出片期间名单、模板或照片发生变化，请重新预览后出片')
+      } catch (err) {
+        printDomain.createJob({ ...jobBase, status: 'failed', completedCount: count,
+          detail: `已保存 ${count}/${whole.recordCount} 张 PNG：${String(err.message || err)}` })
+        throw err
+      }
+      const job = printDomain.createJob({ ...jobBase, status: 'ok', completedCount: count,
+        detail: `${count} 张 PNG（${dpi} dpi）→ ${dir}` })
+      if (printDomain.shouldMarkPrinted(whole.scope)) dataset.markPrinted(dsId, 'images')
+      return { canceled: false, count, directory: dir, files, dpi, jobId: job.id, scope: whole.scope }
     },
   },
 

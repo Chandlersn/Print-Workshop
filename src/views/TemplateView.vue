@@ -198,6 +198,7 @@ const samplePhotos = ref({})
 const samplePhotoStyles = ref({})
 let photoReadToken = 0
 const selectedIdx = ref(-1)
+const fieldPaletteCollapsed = ref(false)
 const msg = ref('')
 const errorMsg = ref('')
 const dragState = ref(null)
@@ -1208,7 +1209,7 @@ function alignSelected(kind) {
   }
 }
 
-// ---- 键盘：方向键微调（0.1%，Shift 1%）、Delete 删除选中项（字段 / 底图）、Ctrl+Z/Y 撤销重做 ----
+// ---- 键盘：方向键微调（0.01%，Shift 1%）、Delete 删除选中项（字段 / 底图）、Ctrl+Z/Y 撤销重做 ----
 
 /**
  * 连续键盘微调只记一次撤销。
@@ -1251,7 +1252,7 @@ function onKeydown(e) {
 
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeField(); return }
 
-  const step = e.shiftKey ? 1 : 0.1
+  const step = e.shiftKey ? 1 : 0.01
   let dx = 0
   let dy = 0
   if (e.key === 'ArrowLeft') dx = -step
@@ -1264,8 +1265,8 @@ function onKeydown(e) {
   for (const i of targets) {
     const f = activeTpl.value.fields[i]
     if (!f) continue
-    f.x = clampPct(f.x + dx)
-    f.y = clampPct(f.y + dy)
+    if (dx) f.x = clampPct(f.x + dx, 2)
+    if (dy) f.y = clampPct(f.y + dy, 2)
   }
 }
 
@@ -1744,18 +1745,28 @@ onBeforeUnmount(() => {
           <div v-if="activeDatasetId || selectedField || bgSelected" class="field-dock">
             <!-- 字段面板：固定悬浮在窗口右侧，不占画布布局空间 -->
             <div v-if="activeDatasetId" class="field-palette">
-              <span class="palette-label">字段面板</span>
-              <button
-                v-for="opt in fieldOptions"
-                :key="opt.value"
-                class="palette-chip"
-                :disabled="opt.disabled"
-                :title="opt.disabled ? '整列为空，点击后打印将留空' : `点击把「${opt.label}」加入画布`"
-                @click="addField(opt.value)"
-              >{{ opt.label }}</button>
-              <span v-if="!fieldOptions.length" class="palette-empty">
-                没有已启用的字段——去数据页表格列头点「印」开启
-              </span>
+              <div class="palette-head">
+                <span class="palette-label">字段面板</span>
+                <button
+                  type="button"
+                  class="palette-toggle"
+                  :aria-expanded="!fieldPaletteCollapsed"
+                  @click="fieldPaletteCollapsed = !fieldPaletteCollapsed"
+                >{{ fieldPaletteCollapsed ? '展开字段' : '折叠字段' }}</button>
+              </div>
+              <template v-if="!fieldPaletteCollapsed">
+                <button
+                  v-for="opt in fieldOptions"
+                  :key="opt.value"
+                  class="palette-chip"
+                  :disabled="opt.disabled"
+                  :title="opt.disabled ? '整列为空，点击后打印将留空' : `点击把「${opt.label}」加入画布`"
+                  @click="addField(opt.value)"
+                >{{ opt.label }}</button>
+                <span v-if="!fieldOptions.length" class="palette-empty">
+                  没有已启用的字段——去数据页表格列头点「印」开启
+                </span>
+              </template>
             </div>
 
             <aside v-if="selectedField || bgSelected" class="props">
@@ -1823,7 +1834,7 @@ onBeforeUnmount(() => {
                   <span class="prop-meta">x {{ selectedField.x }}% · y {{ selectedField.y }}%</span>
                 </div>
                 <button class="btn-danger prop-remove" @click="removeField">移除字段</button>
-                <p class="kbd-hint">方向键微调 0.1%（Shift 加速）· Ctrl+Z 撤销 · Delete 删除选中项</p>
+                <p class="kbd-hint">方向键微调 0.01%（Shift 1%）· Ctrl+Z 撤销 · Delete 删除选中项</p>
               </template>
             </aside>
           </div>
@@ -2659,11 +2670,33 @@ onBeforeUnmount(() => {
   overflow-y: auto;
 }
 
-.palette-label {
+.palette-head {
   grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.palette-label {
   font-size: 12px;
   font-weight: 600;
   color: var(--stone);
+}
+
+.palette-toggle {
+  padding: 2px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--paper);
+  color: var(--stone);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.palette-toggle:hover {
+  border-color: var(--cinnabar);
+  color: var(--cinnabar);
 }
 
 .palette-chip {

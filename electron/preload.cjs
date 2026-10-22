@@ -182,6 +182,7 @@ contextBridge.exposeInMainWorld('printpress', {
     printPhotoPreflight: (payload) => invoke('print:photoPreflight', payload),
   printGenerate: (payload) => invoke('print:generate', payload),
   printExportPdf: (payload) => invoke('print:exportPdf', payload),
+  printExportImages: (payload) => invoke('print:exportImages', payload),
   printSend: (payload) => invoke('print:send', payload),
   /** 取消进行中的打印/导出（S1.3-c）：批次边界生效，见 print:cancel */
   printCancel: (jobKey) => invoke('print:cancel', { jobKey }),

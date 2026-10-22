@@ -493,7 +493,7 @@ function removeArchiveDirectory(job) {
  * 范围字段：partial 标记部分出片（供 UI 标注「部分 N/总」并与全量区分），
  * selection 仅在部分出片时落盘（全量为 null，避免冗余）。
  */
-function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, selectionIds, snapshotHtml, photoAssets = [], status, detail }) {
+function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, selectionIds, snapshotHtml, photoAssets = [], status, detail, imageNameFields, outputDpi, completedCount }) {
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const jobId = `job_${now.getTime().toString(36)}${crypto.randomBytes(3).toString('hex')}`
@@ -517,7 +517,7 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     templateName: templateName || '',
     datasetId: datasetId || '',
     datasetName: datasetName || '',
-    mode: mode || 'pdf', // 'pdf' | 'print'
+    mode: mode || 'pdf', // 'pdf' | 'print' | 'images'
     recordCount: recordCount || 0,
     totalRows: Number(totalRows) || recordCount || 0,
     partial: isPartial,
@@ -526,6 +526,11 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     status: status || 'ok', // 'ok' | 'failed' | 'canceled'
     detail: detail || '',
     snapshot: snapshotRel,
+    ...(mode === 'images' ? {
+      imageNameFields: Array.isArray(imageNameFields) ? imageNameFields.slice(0, 2) : [],
+      outputDpi: Number(outputDpi) || 300,
+      completedCount: Number(completedCount) || 0,
+    } : {}),
   }
   const prev = loadJson(JOBS_STORE, { expect: 'array' }) || []
   // 只保留最近 200 条：历史无上限会让 print-jobs.json 无限膨胀（实测 60 条

@@ -446,7 +446,7 @@ function markPrinted(id, mode) {
   if (!ds) throw new Error('所选数据集已不存在（可能已被删除），请刷新后重新选择')
   ds.printCount = (ds.printCount || 0) + 1
   ds.lastPrintedAt = new Date().toISOString()
-  ds.lastPrintMode = mode === 'print' ? 'print' : 'pdf'
+  ds.lastPrintMode = ['print', 'images'].includes(mode) ? mode : 'pdf'
   persistAll(list)
   return { printCount: ds.printCount, lastPrintedAt: ds.lastPrintedAt }
 }

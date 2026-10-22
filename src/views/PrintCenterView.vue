@@ -16,6 +16,7 @@ import { toUserMessage } from '../../electron/user-error.cjs'
 const datasets = ref([])
 const templates = ref([])
 const jobs = ref([])
+const historyOpen = ref(false)
 const selDs = ref('')
 const selTpl = ref('')
 const previewHtml = ref('')
@@ -47,13 +48,14 @@ const previewLoading = ref(false)
 const activeJobKey = ref('')
 const taskProgress = ref(null)
 const cancelRequested = ref(false)
-const cancelable = computed(() => activeJobKey.value && !cancelRequested.value && !['single', 'merge', 'publish', 'finished'].includes(taskProgress.value?.phase))
+const cancelable = computed(() => activeJobKey.value && !activeJobKey.value.startsWith('images-') && !cancelRequested.value && !['single', 'merge', 'publish', 'finished'].includes(taskProgress.value?.phase))
 const progressText = computed(() => {
   const p = taskProgress.value
   if (cancelRequested.value) return '正在取消，等待当前批次结束；已提交的打印内容无法撤回。'
   if (!p) return '正在准备出片…'
   if (p.phase === 'merge') return '正在合并 PDF…'
   if (p.phase === 'publish') return 'PDF 已生成，正在保存归档…'
+  if (p.phase === 'image-done') return `已导出 ${p.index} / ${p.total} 张图片`
   if (p.phase === 'single') return '正在输出当前批次…'
   if (p.phase === 'batch-start') return `正在导出第 ${p.index} / ${p.batches} 批`
   if (p.phase === 'batch-done') return `已完成 ${p.index} / ${p.batches} 批`
@@ -140,6 +142,11 @@ const boundDsMissing = computed(() =>
 const selRows = ref(null)
 const selRowsMeta = ref(null) // { dsId, rowCount }：行数漂移守卫比对基准
 const dsDetail = ref(null)    // 当前数据集完整数据（行选择面板用）
+const imageNameField1 = ref('')
+const imageNameField2 = ref('')
+const imageNameFieldOptions = computed(() => (dsDetail.value?.columns || []).map(column => ({
+  value: column.key, label: column.label || column.name || column.key,
+})))
 const scopeOpen = ref(false)
 const scopeSearch = ref('')
 const scopePicked = ref(new Set())
@@ -545,6 +552,16 @@ async function confirmRebind() {
 watch(selDs, async () => {
   setScope(null)
   await loadDetail()
+  const keys = imageNameFieldOptions.value.map(option => option.value)
+  if (!keys.includes(imageNameField1.value)) imageNameField1.value = keys[0] || ''
+  if (!keys.includes(imageNameField2.value) || imageNameField2.value === imageNameField1.value) {
+    imageNameField2.value = keys.find(key => key !== imageNameField1.value) || ''
+  }
+})
+watch(imageNameField1, value => {
+  if (imageNameField2.value === value) {
+    imageNameField2.value = imageNameFieldOptions.value.find(option => option.value !== value)?.value || ''
+  }
 })
 // 范围变化同样要重建预览（预览与出片共用同一份范围）
 watch([selDs, selTpl, selRows], () => {
@@ -560,6 +577,42 @@ watch([selDs, selTpl, selRows], () => {
 // 所以切档位不会触发 500 张照片的首编码，可以放心即时刷新。
 watch(outputDpi, () => rebuildPreview())
 watch(previewPage, rebuildPreview)
+
+async function exportIndividualImages() {
+  if (!ready.value || busy.value || mismatched.value) return
+  if (!imageNameField1.value || !imageNameField2.value || imageNameField1.value === imageNameField2.value) {
+    say('请选择两个不同的数据字段作为图片名称')
+    return
+  }
+  busy.value = true
+  try {
+    const photo = await loadPhotoPreflight()
+    if (!photo || !photo.canOutput) {
+      if (photo && !photo.canOutput) showPhotoIssues('')
+      say(photoPreflightError.value || '照片预检未通过，请先处理问题后导出')
+      return
+    }
+    const jobKey = `images-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    activeJobKey.value = jobKey
+    const r = await window.printpress.printExportImages({
+      ...buildPayload(), field1: imageNameField1.value, field2: imageNameField2.value,
+      outputDpi: outputDpi.value === 'original' ? 300 : Number(outputDpi.value),
+      preflightFingerprint: photo.fingerprint, jobKey,
+    })
+    if (r.canceled) say('已取消选择保存文件夹')
+    else say(`已导出 ${r.count} 张 PNG 图片（${r.dpi} dpi），保存到：${r.directory}`)
+  } catch (err) {
+    say(`图片导出失败：${toUserMessage(err)}`)
+  } finally {
+    activeJobKey.value = ''
+    taskProgress.value = null
+    busy.value = false
+  }
+  try {
+    jobs.value = await window.printpress.listJobs()
+    datasets.value = await window.printpress.listDatasets()
+  } catch (err) { console.warn('[打印中心] 刷新图片导出记录失败', err) }
+}
 
 /** 校验 → 有空值先弹窗（可中断可放行），字段缺失不可放行；无问题直接执行 */
 async function runAction(action) {
@@ -720,7 +773,7 @@ const pendingDelete = ref(null)
 /** 删除打印任务：元数据 + 磁盘归档目录一并清理，不可恢复，先过确认弹窗 */
 function deleteJob(job) {
   pendingDelete.value = {
-    message: `删除打印任务「${job.templateName} × ${job.recordCount} 份（${fmtTime(job.createdAt)}）」？\n其归档快照及归档照片副本会一并删除，该操作不可恢复。已导出的 PDF、照片库原件和名单打印状态保留。`,
+      message: `删除打印任务「${job.templateName} × ${job.recordCount} 份（${fmtTime(job.createdAt)}）」？\n其归档快照及归档照片副本会一并删除，该操作不可恢复。已导出的 PDF/PNG、照片库原件和名单打印状态保留。`,
     job,
   }
 }
@@ -770,12 +823,23 @@ async function reprint(job) {
       return
     }
   }
+  historyOpen.value = false
   selTpl.value = job.templateId
   selDs.value = datasetId
   await nextTick()
   await loadDetail()
   // 部分历史按稳定 ID 解析；旧记录缺少 ID 或名单有人被删除时已在上面拦下。
   setScope(rows)
+  if (job.mode === 'images') {
+    if (job.imageNameFields?.length === 2) {
+      imageNameField1.value = job.imageNameFields[0]
+      imageNameField2.value = job.imageNameFields[1]
+    }
+    outputDpi.value = String(job.outputDpi || 300)
+    await nextTick()
+    await exportIndividualImages()
+    return
+  }
   runAction(job.mode === 'print' ? 'print' : 'pdf')
 }
 
@@ -783,7 +847,7 @@ function fmtTime(iso) {
   return String(iso || '').replace('T', ' ').slice(0, 19)
 }
 
-const modeLabel = { pdf: '导出 PDF', print: '打印', grouped: '分组导出（已下线）' }
+const modeLabel = { pdf: '导出 PDF', print: '打印', images: '导出 PNG', grouped: '分组导出（已下线）' }
 const statusLabel = { ok: '完成', failed: '失败', canceled: '取消' }
 
 onMounted(refreshAll)
@@ -791,30 +855,51 @@ onMounted(refreshAll)
 
 <template>
   <section class="page">
-    <PageHeader title="打印中心" description="选模板 → 预览确认 → 导出 PDF 或直接送打印机。" />
+    <PageHeader title="打印中心" description="选模板 → 预览确认 → 导出 PDF、逐条保存 PNG 或直接送打印机。">
+      <template #actions>
+        <button class="btn btn-mini history-trigger" @click="historyOpen = true">打印历史<span>{{ jobs.length }}</span></button>
+      </template>
+    </PageHeader>
 
     <div class="toolbar">
-      <span class="tb-label">模板</span>
-      <CustomSelect v-model="selTpl" :disabled="busy" :options="tplOptions" placeholder="选择模板" width="240px" />
-      <!-- 模板已绑定数据集：直接显示关联关系，不可错配 -->
-      <template v-if="boundTpl && boundTpl.datasetId">
-        <span class="bound-ds">关联数据集：{{ boundTpl.datasetName || '（已删除）' }}（{{ dsTotalRows }} 行）</span>
-        <button class="btn btn-mini" :disabled="busy" @click="openRebind">更换数据集</button>
-      </template>
-      <!-- 旧模板未绑定：兼容路径，允许临时选择 -->
-      <template v-else-if="selTpl">
-        <span class="tb-label">数据集</span>
-        <CustomSelect v-model="selDs" :disabled="busy" :options="dsOptions" placeholder="选择数据集" width="200px" />
-        <span class="scope-note">旧模板未绑定数据集，建议回模板工坊保存一次完成绑定</span>
-      </template>
-      <span class="tb-spacer"></span>
-      <!-- 出片分辨率（I-49）：照片按「图框毫米 × 目标 DPI」降到需要的像素再出片。
-           实测同一图框 34×50mm：3000×3000 的原件出片 PDF 16.27 MB → 降到 402×591 后 0.40 MB。
-           默认 300，可关（选「原图」）——选原图时一行都不缩，与升级前逐字节一致。 -->
-      <span class="tb-label">出片分辨率</span>
-      <CustomSelect v-model="outputDpi" :disabled="busy" :options="outputDpiOptions" width="170px" />
-      <button class="btn" :disabled="!ready || busy || mismatched" @click="runAction('print')">直接打印</button>
-      <button class="btn btn-primary" :disabled="!ready || busy || mismatched" @click="runAction('pdf')">导出 PDF</button>
+      <div class="toolbar-row toolbar-row-template">
+        <div class="toolbar-control">
+          <span class="tb-label">模板</span>
+          <CustomSelect v-model="selTpl" :disabled="busy" :options="tplOptions" placeholder="选择模板" width="240px" />
+        </div>
+        <!-- 模板已绑定数据集：直接显示关联关系，不可错配 -->
+        <template v-if="boundTpl && boundTpl.datasetId">
+          <span class="bound-ds">关联数据集：{{ boundTpl.datasetName || '（已删除）' }}（{{ dsTotalRows }} 行）</span>
+          <button class="btn btn-mini" :disabled="busy" @click="openRebind">更换数据集</button>
+        </template>
+        <!-- 旧模板未绑定：兼容路径，允许临时选择 -->
+        <div v-else-if="selTpl" class="toolbar-control">
+          <span class="tb-label">数据集</span>
+          <CustomSelect v-model="selDs" :disabled="busy" :options="dsOptions" placeholder="选择数据集" width="200px" />
+          <span class="scope-note">旧模板未绑定数据集，建议回模板工坊保存一次完成绑定</span>
+        </div>
+      </div>
+
+      <div class="toolbar-row toolbar-row-output">
+        <!-- 出片分辨率（I-49）：默认 300，可选原图、150、300 或 600 dpi。 -->
+        <div class="toolbar-control">
+          <span class="tb-label">出片分辨率</span>
+          <CustomSelect v-model="outputDpi" :disabled="busy" :options="outputDpiOptions" width="170px" />
+        </div>
+        <div class="toolbar-control toolbar-name-control">
+          <span class="tb-label">图片名称</span>
+          <div class="toolbar-name-fields">
+            <CustomSelect v-model="imageNameField1" :disabled="busy" :options="imageNameFieldOptions" width="135px" />
+            <span class="toolbar-name-plus" aria-hidden="true">+</span>
+            <CustomSelect v-model="imageNameField2" :disabled="busy" :options="imageNameFieldOptions.filter(option => option.value !== imageNameField1)" width="135px" />
+          </div>
+        </div>
+        <div class="toolbar-actions" aria-label="出片操作">
+          <button class="btn" :disabled="!ready || busy || mismatched || imageNameFieldOptions.length < 2" @click="exportIndividualImages">{{ busy && activeJobKey.startsWith('images-') ? '正在导出图片…' : '逐条导出 PNG' }}</button>
+          <button class="btn" :disabled="!ready || busy || mismatched" @click="runAction('print')">直接打印</button>
+          <button class="btn btn-primary" :disabled="!ready || busy || mismatched" @click="runAction('pdf')">导出 PDF</button>
+        </div>
+      </div>
     </div>
 
     <!-- 模板绑定的数据集已被删除：结构断链，给可读出路而非让预览静默失败 -->
@@ -846,16 +931,16 @@ onMounted(refreshAll)
         出片范围：{{ scopeLabel }}
         <template v-if="selRows">· 不改数据集「已打」状态，仅留痕</template>
       </span>
+      <span v-if="photoPreflight" class="scope-note range-count">本次 {{ photoPreflight.recordCount }} 人 · 预计 {{ photoPreflight.pageCount }} 页</span>
       <span class="tb-spacer"></span>
       <button class="btn btn-mini" :disabled="busy || !dsDetail" @click="openScope">选择打印行</button>
       <button v-if="selRows" class="btn btn-mini" :disabled="busy" @click="setScope(null)">恢复全量</button>
     </div>
 
-    <div v-if="ready" class="photo-preflight" data-testid="print-photo-preflight">
+    <div v-if="ready && (photoPreflightLoading || photoPreflightError || photoPreflight?.photoLayerCount)" class="photo-preflight" data-testid="print-photo-preflight">
       <span v-if="photoPreflightLoading" class="scope-note">正在检查本次范围的照片…</span>
       <span v-else-if="photoPreflightError" class="photo-preflight-error">照片预检失败：{{ photoPreflightError }}</span>
       <template v-else-if="photoPreflight">
-        <span class="scope-note">本次 {{ photoPreflight.recordCount }} 人 · 预计 {{ photoPreflight.pageCount }} 页</span>
         <template v-if="photoPreflight.photoLayerCount">
           <span v-if="!photoPreflight.photoEnabled" class="scope-note">配图已关闭，{{ photoPreflight.recordCount }} 人的照片留白</span>
           <template v-else>
@@ -893,7 +978,7 @@ onMounted(refreshAll)
     <div v-else class="preview-wrap">
       <div v-if="activeJobKey" class="output-progress" role="status" data-testid="print-progress">
         <span>{{ progressText }}</span>
-        <button class="btn" :disabled="!cancelable" data-testid="print-cancel" @click="cancelOutput">{{ cancelRequested ? '正在取消…' : '取消出片' }}</button>
+        <button v-if="!activeJobKey.startsWith('images-')" class="btn" :disabled="!cancelable" data-testid="print-cancel" @click="cancelOutput">{{ cancelRequested ? '正在取消…' : '取消出片' }}</button>
       </div>
       <div class="preview-bar">
         <span v-if="previewInfo" class="preview-meta">
@@ -985,44 +1070,45 @@ onMounted(refreshAll)
       </span>
     </div>
 
-    <div class="history-block">
-      <h3 class="block-title">打印历史</h3>
-      <table v-if="jobs.length" class="job-table">
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th>模板</th>
-            <th>数据集</th>
-            <th>方式</th>
-            <th>份数</th>
-            <th>状态</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="j in jobs" :key="j.id">
-            <td>{{ fmtTime(j.createdAt) }}</td>
-            <td>{{ j.templateName }}</td>
-            <td>{{ j.datasetName }}</td>
-            <td>
-              {{ modeLabel[j.mode] || j.mode }}
-              <span
-                v-if="j.partial"
-                class="partial-tag"
-                :title="`仅出片 ${j.recordCount} 行，数据集共 ${j.totalRows} 行；不影响「已打」状态`"
-              >部分 {{ j.recordCount }}/{{ j.totalRows }}</span>
-            </td>
-            <td>{{ j.recordCount }}</td>
-            <td><span class="det-flag" :class="'st-' + j.status">{{ statusLabel[j.status] || j.status }}</span></td>
-            <td class="row-actions">
-              <button v-if="j.snapshot" class="btn btn-mini" @click="openSnapshot(j.id)">查看</button>
-              <button class="btn btn-mini" :disabled="busy" @click="reprint(j)">重打</button>
-              <button class="btn btn-mini job-del" @click="deleteJob(j)">删除</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-else class="hint-sub">暂无打印记录</p>
+    <div v-if="historyOpen" class="modal-mask history-mask" @click.self="historyOpen = false" @keydown.esc.window="historyOpen = false">
+      <section class="modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <header class="history-head">
+          <div>
+            <h3 id="history-title" class="modal-title">打印历史</h3>
+            <p class="history-count">共 {{ jobs.length }} 条记录</p>
+          </div>
+          <button class="btn btn-mini" @click="historyOpen = false">关闭</button>
+        </header>
+        <div class="history-table-wrap">
+          <table v-if="jobs.length" class="job-table">
+            <thead>
+              <tr><th>时间</th><th>模板</th><th>数据集</th><th>方式</th><th>份数</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="j in jobs" :key="j.id">
+                <td>{{ fmtTime(j.createdAt) }}</td>
+                <td>{{ j.templateName }}</td>
+                <td>{{ j.datasetName }}</td>
+                <td>
+                  {{ modeLabel[j.mode] || j.mode }}
+                  <span v-if="j.partial" class="partial-tag" :title="`仅出片 ${j.recordCount} 行，数据集共 ${j.totalRows} 行；不影响「已打」状态`">部分 {{ j.recordCount }}/{{ j.totalRows }}</span>
+                </td>
+                <td :title="j.mode === 'images' && j.status === 'failed' ? `已保存 ${j.completedCount || 0} 张，计划 ${j.recordCount} 张` : ''">
+                  <template v-if="j.mode === 'images' && j.status === 'failed'">{{ j.completedCount || 0 }}/{{ j.recordCount }}</template>
+                  <template v-else>{{ j.recordCount }}</template>
+                </td>
+                <td><span class="det-flag" :class="'st-' + j.status">{{ statusLabel[j.status] || j.status }}</span></td>
+                <td class="row-actions">
+                  <button v-if="j.snapshot" class="btn btn-mini" @click="openSnapshot(j.id)">查看</button>
+                  <button class="btn btn-mini" :disabled="busy" @click="reprint(j)">重打</button>
+                  <button class="btn btn-mini job-del" @click="deleteJob(j)">删除</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="hint-sub history-empty">暂无打印记录</p>
+        </div>
+      </section>
     </div>
 
     <!-- 出口校验弹窗：可中断可放行 -->
@@ -1188,18 +1274,50 @@ onMounted(refreshAll)
 
 .toolbar {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
   margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-card);
 }
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.toolbar-row-output {
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.toolbar-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toolbar-name-fields,
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.toolbar-name-plus { color: var(--stone); font-size: 13px; }
+.toolbar-actions { margin-left: auto; }
 
 .tb-label {
   font-size: 13px;
   color: var(--stone);
-}
-
-.tb-spacer {
-  flex: 1;
 }
 
 .scope-bar {
@@ -1215,6 +1333,8 @@ onMounted(refreshAll)
 }
 
 .scope-note { font-size: 12px; color: var(--stone); }
+.range-count { color: var(--ink-2); font-weight: 600; }
+.tb-spacer { flex: 1; }
 
 .photo-preflight{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:9px 12px;margin-bottom:14px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
 .photo-preflight-error{font-size:12px;color:var(--cinnabar)}
@@ -1293,6 +1413,18 @@ onMounted(refreshAll)
 .btn-primary:hover:not(:disabled) {
   color: #fff;
   opacity: 0.9;
+}
+
+@media (max-width: 1120px) {
+  .toolbar-actions { margin-left: 0; }
+}
+
+@media (max-width: 680px) {
+  .toolbar { padding: 10px; }
+  .toolbar-row { align-items: flex-start; }
+  .toolbar-control { align-items: flex-start; flex-direction: column; }
+  .toolbar-actions { width: 100%; }
+  .toolbar-actions .btn { flex: 1 1 auto; }
 }
 
 .btn-mini {
@@ -1385,15 +1517,16 @@ onMounted(refreshAll)
   transform-origin: top left;
 }
 
-.history-block {
-  margin-top: 20px;
-}
-
-.block-title {
-  margin: 0 0 10px;
-  font-size: 14px;
-  color: var(--ink);
-}
+.history-trigger { display: inline-flex; align-items: center; gap: 7px; }
+.history-trigger span { min-width: 18px; padding: 1px 5px; border-radius: 9px; background: var(--cinnabar-soft); color: var(--cinnabar); text-align: center; font-size: 11px; }
+.modal-mask.history-mask { z-index: 110; }
+.modal.history-modal { width: min(1120px, calc(100vw - 32px)); max-height: 86vh; }
+.history-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.history-head .modal-title { margin: 0; }
+.history-count { margin: 4px 0 0; color: var(--stone); font-size: 12px; }
+.history-table-wrap { min-height: 0; overflow: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.history-table-wrap .job-table { min-width: 900px; }
+.history-empty { padding: 20px; text-align: center; }
 
 .job-table {
   width: 100%;

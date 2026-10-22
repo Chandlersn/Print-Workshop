@@ -14,7 +14,10 @@ vite.config.js.timestamp-*.mjs
 Thumbs.db
 desktop.ini
 # WorkBuddy 本地工作记忆（agent 会话数据，不入仓库）
-.workbuddy/
+# 例外：项目级 Agent Skill 是交付物，要入库。注意 git 无法「排除父目录后再包含其中的文件」，
+# 所以写成「排除全部直接子项 + 放行 skills/」，否则 !.workbuddy/skills 是无效规则。
+.workbuddy/*
+!.workbuddy/skills/
 # 私人化数据资产：只在本地，不入仓库
 # （2026-10-18 复核后只留这一篇：另外四篇设计依据经交叉比对真实名单库确认 0 隐私命中，
 #   已随本次一起公开，并同时解除 docs/assets 两张被引用的 SVG——否则第一性原理会图裂。
@@ -37,3 +40,8 @@ data/archive/
 # WorkBuddy 本地会话数据（agent 会话数据，不入仓库）
 .workbuddy-i/
 test-logs/
+
+# 批次配置文件含真实单位名与姓名（用于定位例外名单），不进仓库；仓库里只放脱敏模板
+ppw.config.json
+# 分发用的 skill 打包产物：刻意不输出到 dist/——那是 vite 的产物目录，每次 build 都被清空
+packages/

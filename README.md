@@ -4,8 +4,8 @@
 
 |        |                                                       |
 | ------ | ----------------------------------------------------- |
-| 当前版本   | v0.6.4                                                |
-| 验收状态   | 安装包已发布；真实打印机验收仍在进行 |
+| 当前版本   | v0.6.6                                                |
+| 验收状态   | PNG 实图与打印中心界面已复核；真实打印机验收仍在进行 |
 | 平台     | Windows x64（NSIS 安装包 / 免安装目录）                         |
 | 协议     | MIT                                                   |
 | 数据存放   | 本机数据目录，默认 `%APPDATA%\printpress\data`                 |
@@ -32,7 +32,7 @@
 
 > 详细图文步骤见 [docs/使用说明.md](./docs/使用说明.md)。
 
-**从 [GitHub Releases](https://github.com/Chandlersn/Print-Workshop/releases/latest) 下载最新安装包**（当前为 `PrintPress-0.6.4-Setup.exe`），双击安装即可。自行构建运行 `npm ci && npm run dist`，产物在 `release/`。
+**从 [GitHub Releases](https://github.com/Chandlersn/Print-Workshop/releases/latest) 下载公开安装包**，双击安装即可。自行构建当前版本运行 `npm ci && npm run dist`，产物在 `release/`。
 
 > 安装包尚未签名；若 Windows SmartScreen 提示，请核对下载来源后再决定是否运行。
 
@@ -105,12 +105,13 @@ Get-FileHash .\PrintPress-*-Setup.exe -Algorithm SHA256   # 比对 Release 附�
   - 唯独**字段缺失**（模板字段在数据集里根本不存在）**直接阻断**——补值解决不了。
 - **出片范围你说了算**：默认打整份；补打某几个人时取消全选、按姓名搜索、勾选目标行即可。**部分出片只留痕、不改数据集的「已打」状态**，不会让你误以为整份都打完了。
 - **批量出片不裁边**：预览整页无裁切（缩放 50%~125%），一人一页批量生成 PDF 或直接送打印机，毫米级排版保证位置与设计一致。
-- **遗漏提醒就在历史上方**：选中模板后，「有记录 / 无记录」统计条显示在打印历史上方——尚无全量打印或导出记录的名单会悬着一条提醒，和记录清单贴在一起对照，不会漏打。
+- **逐条导出 PNG**：选择两个字段组合图片名，将本次范围逐人导出到文件夹；重名自动追加序号。PNG 与 PDF 一样写入打印历史并归档快照，成功全量导出自动标记数据集「已打」，部分导出与失败仅留痕。
+- **打印历史按需查看**：标题栏的小按钮打开独立历史弹窗，预览区域不被列表占用；支持查看快照、保留格式与选行范围重打、删除历史。名单的「有记录 / 无记录」统计保留在预览下方。
 - **打印即留痕**：每次成功出片自动归档当时的内容快照（按月分目录），历史列表在**应用内窗口**回看原件、按原模板一键重打、可删除（元数据 + 归档一并清理）。点了打印又取消的不落盘，只在历史里留一条「取消」记录。**失败也留痕**——「每次出片都留痕」说到做到。
 
 ---
 
-## 三种用法
+## 五种用法
 
 ### 一、桌面应用（GUI）
 
@@ -124,7 +125,7 @@ Get-FileHash .\PrintPress-*-Setup.exe -Algorithm SHA256   # 比对 Release 附�
 
 ```bash
 node bin/pp.cjs env                                  # 看当前数据目录与环境
-node bin/pp.cjs ops                                  # 列出全部 96 个操作及其参数
+node bin/pp.cjs ops                                  # 列出全部 97 个操作及其参数
 node bin/pp.cjs dataset list                         # 列数据集
 node bin/pp.cjs --allow-write dataset import 名单.csv --name 秋季班
 node bin/pp.cjs dataset fields <数据集id>              # 字段目录（类型 / 填充率 / 长度提示）
@@ -141,7 +142,100 @@ node bin/pp.cjs --help                               # 全部命令
 - **两个出口需要 GUI**。`export`（PDF 落盘）与 `print`（直打）依赖 Electron 的隐藏窗口，纯命令行下返回 `GUI_REQUIRED`。无人值守场景请用 `render` 产出 HTML 再自行处理。
 - **数据目录默认对齐已安装的应用**（`%APPDATA%\printpress\data`，也会读界面里设过的自定义目录）。要操作仓库里的开发数据请显式 `--data-dir ./data`。
 
-### 三、开发模式（改代码时用）
+### 三、批处理工作台 `ppw`（一次处理一批名单）
+
+`pp` 走「一次 API 调用」，`ppw` 走「一批任务」：读名册 Excel、托管宿主进程、按单位出片、三方对账。适合「两千人的名单拆成 60 家单位，每家一个文件夹」这种活。
+
+```bash
+npm run --silent ppw -- status                      # 环境自检：数据目录 / 名册 / 成品数
+npm run --silent ppw -- check --all                 # 离线字段体检（不连宿主、不出图）
+npm run --silent ppw -- export --roster 合并_61-120号.xlsx --dry   # 先看计划
+npm run --silent ppw -- export --roster 合并_61-120号.xlsx         # 真出片
+npm run --silent ppw -- fix --sheet 59_某单位 --name 某某 --set 所在学校必须写全名=某某小学
+npm run --silent ppw -- sync --roster 合并_121-180号.xlsx --sheet 121_某单位 --cols 指导老师
+npm run --silent ppw -- audit --all                 # 三层对账，产多页 xlsx
+npm run --silent ppw -- pending --all               # 待补数据清单
+npm run --silent ppw -- drift --all                 # 只查 Excel↔数据集 差异（最快）
+npm run --silent ppw -- verify                      # 校验模板字段是否都点亮了「印」开关
+```
+
+| 命令 | 干什么 | 连宿主 |
+|---|---|---|
+| `status` | 数据目录、名册可读性、成品数量、备份目录里有没有躺着成品 | 否 |
+| `check` | 必填字段体检，列出「谁能出、谁不能」 | 否 |
+| `import` | 名册按工作表拆成数据集，点亮模板用到的列开关 | 是 |
+| `export` | 批量出片，缺字段的行在写盘前拦下 | 是 |
+| `fix` | 改指定人的字段后重出那一张（可一次多条、可改姓名） | 是 |
+| `sync` | 把某单位某几列从 Excel 同步进数据集，再整单位重出 | 是 |
+| `audit` | 名册×磁盘、名册×字段、名册×数据集 三层对账 | 否 |
+| `pending` | 还差谁的数据、补完是重做还是新出 | 否 |
+| `drift` | 只扫 Excel 与数据集的字段差异 | 否 |
+| `verify` | 模板字段 ↔ 必填清单 ↔ 数据集「印」开关是否对齐 | 否 |
+
+几条刻意的设计：
+
+- **宿主是托管起来的**。不再需要手开 `electron --mcp-stdio` 再跑脚本；`ppw` 自己 spawn `bin/pp-mcp.cjs`，跑完收尾，也不用手动处理 `ELECTRON_RUN_AS_NODE`。
+- **写盘前拦截**。必填字段有空值的行直接不出（成品上会留一条「指导教师：」的空白栏，纸证书发出去改不了），被拦的行连同「缺哪个字段」一起进 CSV。
+- **三级命令都支持 `--dry`**。`export` / `fix` / `sync` 先打印「要改什么、要出几张、落在哪」，不动数据也不出图。
+- **出片后回扫磁盘复核**，不信 API 返回值。API 说 5 张、盘上只有 4 张的情况真实存在。
+- **备份目录默认不采信**。`_partial_backup` 里是上次出片的旧版，可能已过时；`export` 会把这类图单独计数并提示，确认可用再加 `--include-backup` 直接认它。
+
+两个必须先懂的口径：
+
+1. **出片读的是数据集，不是 Excel 原件。** 改完 Excel 必须 `sync` / `fix` 才会生效，否则重出的图和旧图 MD5 一模一样。
+2. **跑批期间不要手工改数据集。** 宿主会用内存里的数据整份回写，改动会被覆盖。`ppw` 自己串行处理，只要不同时手工改就没事。
+
+批次的路径、模板、字段匹配规则、已知口径都收在 `ppw.config.json` 里，换一批名单只改这一份文件，不用动代码。**必填字段清单不在这里写死**：工具读模板的 `fields[].column` 决定校验哪些字段（模板声明 5 个就校验 5 个，9 个就 9 个），配置只负责补「这一列怎么从表头认出来」——表头写法与列名一致时连补都不用补。这份文件含具体单位名与姓名（用于定位例外名单），**不进仓库**（已加入 `.gitignore`）；仓库里放的是脱敏模板 `ppw.config.example.json`，复制改名后按自己的批次填。
+
+还有一个出片后的核对小工具：
+
+```bash
+node tools/png-crop.cjs 成品图.png 局部.png [x y w h] [放大倍数]
+```
+
+2481×3508 的成品图缩到能一屏看全时，`钥/玥`、`街/节` 这类只差一个偏旁的字已经糊成一片，而「一字之差」恰好是名单里最高频的错误。它把指定矩形裁出来并**最近邻**放大（不插值，避免把偏旁插平），输出的小图不会被预览层二次压缩。省略坐标时默认对准「就读学校 / 指导教师」两行 —— 这两个字段是错字的常客。
+
+### 四、MCP 服务（给支持 MCP 的 agent）
+
+仓库提供 stdio MCP 服务，工具直接调用与 GUI / CLI 共用的领域 API，并带 Electron 隐藏渲染器，所以可以在无主窗口的情况下导出 PDF 和逐张 PNG。证书工作流可调用 `pp_dataset_list` / `pp_dataset_importFile`、`pp_template_list` / `pp_template_save`、`pp_print_validate`、`pp_print_exportPdf`、`pp_print_exportImages`；`printpress_operations` 会列出完整操作目录和参数。图片导出通过 `outputDir` 指定目录，避免目录选择对话框。
+
+从仓库根目录启动：
+
+```bash
+npm run --silent mcp -- --allow-write
+```
+
+在 MCP 客户端中推荐将 `node` 配为命令，参数为本仓库 `bin/pp-mcp.cjs` 的绝对路径和 `--allow-write`，不依赖客户端的工作目录。Node 负责 stdio，通过本地管道调用 Electron 隐藏渲染器；启动器会清除会破坏 Electron 的 `ELECTRON_RUN_AS_NODE` 和 `NODE_OPTIONS`。若使用 npm 启动，需保留 `--silent`，避免 npm 的启动提示混入协议消息。
+
+安装包同时携带启动器，位于安装目录的 `resources/mcp/pp-mcp.cjs`。MCP 客户端用 `node` 调用该文件并添加 `--allow-write` 即可，启动器会自动调用同一安装目录中的批印坊，无需源码和开发依赖；电脑需安装 Node.js。
+
+从源码启动默认使用仓库的 `data/`；要操作已安装应用的数据，请通过环境变量 `PRINTPRESS_DATA_DIR` 指向实际数据目录（默认 `%APPDATA%\printpress\data`，也可能是界面设置的自定义目录）。写操作默认关闭；只有启动时显式添加 `--allow-write` 才能导入名单、保存模板或导出文件。MCP 服务持有数据目录写锁，使用同一目录前需关闭批印坊窗口。
+
+`printpress_render_html` 可以生成 HTML 预览文件；PDF 和 PNG 工具会写入指定路径并返回作业记录。MCP stdout 专用于协议消息，诊断信息写到 stderr。
+
+运行 `npm run test:mcp-e2e` 可验收真实 stdio 握手、读写权限、名单与模板、分批 PDF、150/300/600 dpi PNG、重名保护和历史留痕，测试使用隔离数据目录。
+
+### 五、Agent Skill（给外部 agent 的作业纪律）
+
+`ppw` 解决了「怎么跑」，但没解决「怎么跑对」。批量出片最容易错的地方，都不是命令用错，而是判断错：把没同步当成没差异、把取错列当成数据干净、把看不清当成核对完了。这些教训沉淀成了一份标准 Agent Skill：
+
+```
+.workbuddy/skills/batch-output-integrity/
+├── SKILL.md                        五条铁律 + 标准四步 + 落地检查清单
+└── references/
+    ├── failure-modes.md            五个真实事故的完整复盘（症状→成因→排查→防线）
+    ├── ppw-commands.md             十命令手册与通用选项
+    ├── print-on-switch.md           「印」开关控制什么、不控制什么、怎么校验
+    └── reconciliation-model.md     三层对账口径、行索引双口径、什么算「已出」
+```
+
+前提是**模板由你自己做好并已成功导出过一小批**——agent 接手的是「已验证的模板 + 已审核的名单」的批量生产，不是替你设计版式；模板没验证过时，自动化只会把版式问题放大到几百张。
+
+它不是命令文档，而是**判断纪律**：哪些情况下「零差异」不可信、用户说改了但系统看不到时该取证哪三件事、重出的图与旧图 MD5 相同时先怀疑什么、备份目录里哪些能信哪些不能信。命令细节放在 references 里按需加载。
+
+`packages/batch-output-integrity.zip` 是打包好的分发版（`npm run pack:skill` 生成），解压到任意支持 Agent Skills 的 agent 的 skills 目录即可（如 `.claude/skills/`）。由于它引导 agent 调用本仓库的 `ppw`，运行时仍需在仓库根目录。skill 源文件在 `.workbuddy/skills/` 下，已随仓库一起入库。
+
+### 六、开发模式（改代码时用）
 
 ```bash
 npm install           # 安装依赖（Electron 走 npmmirror 镜像）
@@ -184,7 +278,7 @@ npm run electron:dev  # vite + electron 热更新开发
 
 四条不变量：
 
-- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（96 个操作）里，界面通道（`ipc.cjs`）与命令行（`bin/pp.cjs`）都是它的调用方。改业务逻辑只改一处，两条入口不会漂移——出片这种要留痕的操作，一旦各自实现就会「账对不上」。
+- **契约只有一份**：全部领域能力登记在 `api.cjs` 的注册表（97 个操作）里，界面通道（`ipc.cjs`）、命令行（`bin/pp.cjs`）与 MCP（`electron/mcp-server.cjs`）都是它的调用方。改业务逻辑只改一处，出片留痕也共用同一实现。
 - **领域层零 electron 依赖**：`api.cjs` 及其下游模块都不 require electron，只有 `ipc.cjs` / `printer.cjs` / `main.cjs` / `preload.cjs` 依赖它。需要 GUI 的能力（弹窗、打印）经 `ctx` 注入，纯 Node 下拿不到就报 `GUI_REQUIRED`，而不是崩在 import 上。
 - **出片产物自包含**：底图与上传字体以 base64 内联进渲染 HTML——导出 PDF、直打窗口、归档快照在任何上下文（包括系统浏览器打开归档件）都完整显示，不依赖应用内协议。
 - **写路径唯一**：元数据写入口只有 `store.cjs` 的 `saveJson` 一条路，避免多套实现并存导致「改一处、另一处不生效」。
@@ -195,7 +289,8 @@ npm run electron:dev  # vite + electron 热更新开发
 批印坊 PrintPress
 ├── electron/                       主进程（纯 Node，零 electron 依赖的领域层）
 │   ├── main.cjs                    入口：窗口 / 协议 / 通道装配
-│   ├── api.cjs                     领域能力注册表：96 个操作的唯一权威源
+│   ├── api.cjs                     领域能力注册表：97 个操作的唯一权威源
+│   ├── mcp-server.cjs              MCP stdio 入口：将领域操作暴露给 agent
 │   ├── ipc.cjs                     IPC 薄壳：把注册表挂到 ipcMain，注入 GUI 能力
 │   ├── data-dir.cjs                数据目录决策唯一权威源（默认 / 自定义 / 测试注入）
 │   ├── importer/                   CSV 多编码 + Excel 解析
@@ -211,7 +306,16 @@ npm run electron:dev  # vite + electron 热更新开发
 │   ├── asset-thumbnails.cjs        素材缩略图（nativeImage 压到最长边 320）
 │   └── fonts.cjs / keys.cjs        字体管理、键名规范化
 ├── bin/
-│   └── pp.cjs                      命令行入口：给 agent / 脚本 / 批处理的无 GUI 操作接口
+│   ├── pp.cjs                      命令行入口：给 agent / 脚本 / 批处理的无 GUI 操作接口
+│   └── pp-mcp.cjs                  MCP 启动器：Node stdio 与 Electron 渲染进程的本地管道桥接
+├── tools/
+│   ├── png-crop.cjs                局部裁剪：核对「钥/玥」这类只差偏旁的字（纯 Node 解 PNG，无依赖）
+│   └── ppw/                        批处理工作台：读名册 → 托管宿主 → 出片 → 三方对账
+│       ├── host.cjs                宿主托管与 MCP 客户端（复用 bin/pp-mcp.cjs，不另建管道）
+│       ├── roster.cjs              名册解析：行口径、必填字段校验、Excel×数据集差异判定
+│       ├── store.cjs               数据集 / 出片目录 / 备份目录的只读视图
+│       ├── config.cjs              配置：路径、模板、字段匹配规则；必填清单由模板推导（见 mergeRequiredFields）
+│       └── cmd/                    十个命令：status / check / import / export / fix / sync / audit / pending / drift / verify
 ├── src/                            渲染进程（Vue 3 + Vite，宣纸墨韵主题，全 UI 无 emoji）
 │   ├── views/                      数据 / 底图制作 / 模板 / 打印中心 四页
 │   ├── components/                 CustomSelect、ConfirmDialog 等统一组件
@@ -219,6 +323,8 @@ npm run electron:dev  # vite + electron 热更新开发
 ├── test/                           领域层测试 + CDP 真机 e2e（含隔离数据目录与共享 helper）
 │   └── helpers/
 │       └── electron-runner.cjs     Electron 启动器：摘除破坏性环境变量后再拉起
+├── .workbuddy/skills/
+│   └── batch-output-integrity/     Agent Skill：批量成品的核对与重出纪律（给外部 agent 读的判断规则）
 ├── scripts/                        示例底图 / 应用图标生成、发版上传（release-upload.cjs）
 ├── docs/                           使用说明（面向使用者）、开发方案（权威定义源）、开发计划
 └── release/                        安装包与免安装目录（构建产物，不进仓库）
@@ -241,7 +347,7 @@ npm run electron:dev  # vite + electron 热更新开发
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：50 套件，断言统计见运行结果
+npm test                        # 领域层测试：52 套件，断言统计见运行结果
 npm run test:output-dpi-e2e       # 真实 PDF 降采样、EXIF 方向与原件归档
 npm run test:fixed-image-dedupe-e2e # 固定图片效果缓存、旋转与多页复用
 npm run test:about-cache-e2e      # 缓存统计与清理的真实界面验证
@@ -278,7 +384,7 @@ node test/print-failure.cjs     # 出片：补打范围、版式回退提示、�
 node test/output-dpi.cjs        # 出片分辨率：按目标 DPI 预降采样，原件字节不动（I-49）
 node test/robustness.cjs        # 健壮性：越界布局拒存、前端竞态与守卫
 node test/ipc-hardening.cjs     # IPC：存储白名单、外链白名单、文件名消毒
-node test/ipc-wiring.cjs        # 装配：96 个操作全部挂上、参数归一化逐通道正确
+node test/ipc-wiring.cjs        # 装配：97 个操作全部挂上、参数归一化逐通道正确
 node test/api-cli.cjs           # 分层：api.cjs 零 electron 依赖、写权限闸门、CLI 端到端
 node test/user-error.cjs        # 文案：面向用户的报错里不许出现 IPC 壳 / 绝对路径 / errno（I-48）
 node test/e2e-harness.cjs       # e2e 夹具：启动器必须摘掉破坏性环境变量
@@ -343,10 +449,10 @@ e2e 测试通过 `PRINTPRESS_DATA_DIR` 注入隔离数据目录，不碰真实�
 
 ## 版本迭代史
 
-- **v0.6.4（2026-10-18）**：**加固了一轮导入与并发，把口径数字交给机器守着**。导入加了闸门——超大 Excel、异常多的工作表／行／列／超长单元格会被拒绝并说明怎么拆，而不是读到一半卡死；解析前后核对 JS 原型，带恶意载荷的表格当场拒绝并清理现场。修掉一个静默数据损坏：表头写着 `__proto__` 时那一列的数据会读不回来（界面上列在、填充率永远 0，出片印成 `[object Object]`），现在自动改成安全键名且界面列名不变。**批印坊窗口开着时命令行改为只读**（写操作返回明确提示，退出码 4）——此前两个进程各自整份读改写同一份数据，后写的会安静吃掉先写的修改；只读命令照常，窗口关掉后自动恢复。照片导入任务历史超出 100 条改为归档留底，不再静默丢弃。新增 `test/claims.cjs`：README 与使用说明里的操作数、套件数、不变量条数一律与实现实测比对（首跑就抓到一处漂了三个版本的旧数字）。发版流程顺带产出 `SHA256SUMS.txt`——安装包仍未签名，请下载后用 `Get-FileHash` 核对再安装。领域层测试 50 套件、不变量 55 条全绿。
+- **v0.6.6（2026-10-22）**：批量改名单、重出单张从临时脚本变成常驻命令（`ppw` 十个命令），改完名册一条命令定位差异并重出。出片前加出口校验，必填字段为空即拦下，不再印出空白证书。修掉「实际奖项 / 奖项情况」取错列导致证书奖项从未被真正校验的问题。安装包仍未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。
+- **v0.6.5（2026-10-21）**：打印中心支持逐条导出 PNG，用两个数据字段组合文件名；图片导出纳入历史快照和数据集已打状态，部分导出与失败不标记整份名单。修正截图裁切像素取整导致的尺寸误报，预览缩放与出图解耦。打印历史移入独立弹窗，范围与人数页数合并显示；模板字段面板支持一键折叠和展开。
+- **v0.6.4（2026-10-18）**：**加固了一轮导入与并发，把口径数字交给机器守着**。导入加了闸门——超大 Excel、异常多的工作表／行／列／超长单元格会被拒绝并说明怎么拆，而不是读到一半卡死；解析前后核对 JS 原型，带恶意载荷的表格当场拒绝并清理现场。修掉一个静默数据损坏：表头写着 `__proto__` 时那一列的数据会读不回来（界面上列在、填充率永远 0，出片印成 `[object Object]`），现在自动改成安全键名且界面列名不变。**批印坊窗口开着时命令行改为只读**（写操作返回明确提示，退出码 4）——此前两个进程各自整份读改写同一份数据，后写的会安静吃掉先写的修改；只读命令照常，窗口关掉后自动恢复。照片导入任务历史超出 100 条改为归档留底，不再静默丢弃。新增 `test/claims.cjs`：README 与使用说明里的操作数、套件数、不变量条数一律与实现实测比对（首跑就抓到一处漂了三个版本的旧数字）。发版流程顺带产出 `SHA256SUMS.txt`——安装包仍未签名，请下载后用 `Get-FileHash` 核对再安装。领域层测试 50 个测试套件、不变量 55 条全绿。
 - **v0.6.3（2026-10-17）**：模板画布增加毫米标尺与参考线，支持拖出、数值编辑、字段吸附和撤销重做；照片导入页补充 PNG 匹配与选择文件夹后确认入库的说明。
-
-日期按版本提交记录（北京时间）整理；重发不改变首次迭代日期，无独立发布版本的开发里程碑按功能提交日标注。
 
 - **v0.6.2（2026-10-16）**：大批量照片按实际出片尺寸预降采样，带效果的固定图片预处理后复用，降低 PDF 体积而不改写原件；打印中心显示体积预估与处理数量。受管理素材和临时底图分池，受管理素材可配置独立目录。
 - **v0.6.1（2026-10-13）**：模板设计画布新增 25%–250% 缩放、恢复 100% 与适合宽度，可滚动查看放大后的字段细节。缩放只影响编辑视图，不改变字段位置、字号或打印输出。

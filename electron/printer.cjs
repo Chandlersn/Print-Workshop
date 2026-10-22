@@ -9,7 +9,7 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const { pathToFileURL } = require('url')
-const { BrowserWindow, shell, session } = require('electron')
+const { BrowserWindow, shell, session, nativeImage } = require('electron')
 
 /**
  * 隐藏窗口（不出现在任务栏，不抢焦点）。
@@ -214,6 +214,81 @@ async function exportPdf(html, savePath, { partition } = {}) {
   return { ok: true, path: savePath, bytes: buf.length }
 }
 
+/** Render one print layout to a PNG at the requested physical resolution. */
+async function exportPng(html, savePath, { widthMm, heightMm, dpi = 300, cropToCell = false, partition } = {}) {
+  if (!Number.isFinite(widthMm) || !Number.isFinite(heightMm) || widthMm <= 0 || heightMm <= 0) {
+    throw new Error('图片尺寸无效')
+  }
+  if (![150, 300, 600].includes(dpi)) throw new Error('图片分辨率必须是 150、300 或 600 dpi')
+  const scale = dpi / 96
+  const width = Math.ceil(widthMm / 25.4 * dpi)
+  const height = Math.ceil(heightMm / 25.4 * dpi)
+  const cssWidth = widthMm / 25.4 * 96
+  const cssHeight = heightMm / 25.4 * 96
+  const win = offscreenWindow(true, partition)
+  const debug = win.webContents.debugger
+  let debuggerAttached = false
+  try {
+    await loadHtmlOnce(win, html)
+    await win.webContents.executeJavaScript(`(${waitPrintResources.toString()})(${defaultResourceTimeout(html)})`)
+    win.webContents.setZoomFactor(1)
+    debug.attach('1.3')
+    debuggerAttached = true
+    // Keep layout at CSS 100%; only the isolated screenshot uses the requested
+    // raster scale. This is independent of preview zoom and Windows display scaling.
+    await debug.sendCommand('Emulation.setDeviceMetricsOverride', {
+      width: Math.ceil(cssWidth), height: Math.ceil(cssHeight), deviceScaleFactor: 1, mobile: false,
+    })
+    await win.webContents.executeJavaScript(`(() => {
+      document.body.style.background = '#fff'
+      const page = document.querySelector('.page')
+      if (!page) throw new Error('打印页面为空')
+      document.querySelectorAll('.page, .cell, .fold-half').forEach(el => { el.style.backgroundColor = '#fff' })
+      document.querySelectorAll('.cell.cut').forEach(el => { el.style.outline = 'none' })
+    })()`)
+    await new Promise(resolve => setTimeout(resolve, 40))
+    const bounds = await win.webContents.executeJavaScript(`(() => {
+      const page = document.querySelector('.page')
+      const target = ${cropToCell ? "document.querySelector('.page .cell')" : "document.querySelector('.page')"}
+      if (!page || !target) return null
+      const p = page.getBoundingClientRect()
+      const r = target.getBoundingClientRect()
+      return {
+        page: { x: p.x, y: p.y, width: p.width, height: p.height },
+        target: { x: r.x, y: r.y, width: r.width, height: r.height },
+      }
+    })()`)
+    if (!bounds || bounds.target.width <= 0 || bounds.target.height <= 0) throw new Error('无法确定图片截取范围')
+    if (Math.abs(bounds.page.width - cssWidth) > 1.5 || Math.abs(bounds.page.height - cssHeight) > 1.5) {
+      throw new Error(`页面比例异常：页面 ${bounds.page.width.toFixed(1)}×${bounds.page.height.toFixed(1)} CSS px，与纸张比例不符`)
+    }
+    const rect = bounds.target
+    const outputWidth = cropToCell ? Math.ceil(rect.width * scale) : width
+    const outputHeight = cropToCell ? Math.ceil(rect.height * scale) : height
+    const screenshot = await debug.sendCommand('Page.captureScreenshot', {
+      format: 'png', fromSurface: true, captureBeyondViewport: true,
+      clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale },
+    })
+    let bytes = Buffer.from(screenshot.data, 'base64')
+    let actual = require('./images.cjs').imageSizeFromBuffer(bytes)
+    if (!actual || actual.width <= 0 || actual.height <= 0) throw new Error('图片渲染失败：PNG 尺寸无效')
+    // Chromium rounds fractional CSS millimetres differently across versions.
+    // Normalize the final bitmap so every exported page has the requested pixels.
+    if (actual.width !== outputWidth || actual.height !== outputHeight) {
+      bytes = nativeImage.createFromBuffer(bytes).resize({
+        width: outputWidth, height: outputHeight, quality: 'best',
+      }).toPNG()
+      actual = require('./images.cjs').imageSizeFromBuffer(bytes)
+    }
+    if (!actual || actual.width !== outputWidth || actual.height !== outputHeight) throw new Error(`图片像素尺寸无法校正为 ${outputWidth}×${outputHeight}px`)
+    fs.writeFileSync(savePath, bytes)
+    return { path: savePath, bytes: bytes.length, width: actual.width, height: actual.height }
+  } finally {
+    if (debuggerAttached && debug.isAttached()) debug.detach()
+    win.destroy()
+  }
+}
+
 /** 直接送打印机：silent=false 时弹系统打印对话框（默认，用户可确认/取消） */
 async function sendToPrinter(html, { silent = false, partition } = {}) {
   const win = await loadHtml(html, { partition })
@@ -274,7 +349,7 @@ async function openLastDesignPng() {
 }
 
 module.exports = {
-  exportPdf, sendToPrinter, loadHtml, waitPrintResources, printToPdfBuffer,
+  exportPdf, exportPng, sendToPrinter, loadHtml, waitPrintResources, printToPdfBuffer,
   prepareDesignPng: (payload) => require('./design-export.cjs').prepareExport(payload),
   exportDesignPng,
   revealLastDesignPng,

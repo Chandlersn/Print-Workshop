@@ -16,6 +16,9 @@ const autoUpdate = require('./auto-update.cjs')
 // 运行数据目录：优先用户自定义（data-dir.json 引导配置），否则
 // 开发态放仓库 data/（便于查看与备份），打包后放 %APPDATA%
 const isSmoke = process.argv.includes('--smoke')
+const isMcp = process.argv.includes('--mcp-stdio')
+// MCP stdio reserves stdout for JSON-RPC frames; keep startup diagnostics on stderr.
+if (isMcp) console.log = (...args) => console.error(...args)
 const dataDirModule = require('./data-dir.cjs')
 // 测试注入口：外部已设 PRINTPRESS_DATA_DIR（e2e 隔离数据目录）时直接采用，
 // 不读自定义配置也不迁移；生产环境无此变量，走常规解析
@@ -109,7 +112,7 @@ function main() {
   // **不看**我们的 PRINTPRESS_DATA_DIR。测试一个接一个起多个实例、甚至与开发者已开着的
   // 窗口并存，第二个实例会静默 app.quit()，症状是「窗口没出现 / CDP 连不上」，
   // 排查起来完全不指向锁。生产环境不设这个变量，照常生效。
-  const isolatedInstance = Boolean(process.env.PRINTPRESS_DATA_DIR)
+  const isolatedInstance = Boolean(process.env.PRINTPRESS_DATA_DIR) || isMcp
   if (!isolatedInstance && !app.requestSingleInstanceLock()) {
     app.quit()
     return
@@ -143,12 +146,43 @@ function main() {
     app.on('will-quit', () => { try { dataLock.release() } catch { /* 同上 */ } })
   } catch (err) {
     if (err && err.code === 'DATA_DIR_BUSY') {
+      if (isMcp) {
+        console.error('[mcp] 数据目录正在被批印坊使用；请关闭窗口后重试')
+        app.exit(1)
+        return
+      }
       // 有出口的提示：说清该做什么，而不是丢一句 errno 或路径（I-48）
       dialog.showErrorBox('批印坊已在运行', '另一个批印坊窗口正在使用同一份数据。请先关闭它，再重新打开本窗口。')
       app.exit(1)
       return
     }
     console.warn('[data-lock] 取锁异常，按无锁继续启动')
+  }
+
+  if (isMcp) {
+    // Rendering closes its hidden windows between batches; keep the MCP host alive.
+    app.on('window-all-closed', () => {})
+    app.whenReady().then(() => {
+      registerMediaProtocol()
+      const { start, setQuit } = require('./mcp-server.cjs')
+      setQuit(() => app.quit())
+      const input = process.env.PRINTPRESS_MCP_PIPE
+        ? require('net').createConnection(process.env.PRINTPRESS_MCP_PIPE)
+        : process.stdin
+      input.on('error', err => { console.error('[mcp] transport:', err.message); app.exit(1) })
+      start({
+        api: require('./api.cjs'),
+        printer: require('./printer.cjs'),
+        input,
+        output: process.env.PRINTPRESS_MCP_PIPE ? input : process.stdout,
+        app: { version: app.getVersion(), isPackaged: app.isPackaged, platform: process.platform, userDataDir: app.getPath('userData') },
+        allowWrite: process.argv.includes('--allow-write'),
+      })
+    }).catch((err) => {
+      console.error('[mcp] startup failed:', err && err.stack || err)
+      app.exit(1)
+    })
+    return
   }
 
   // 首启种子：示例名单 + 7 套示例模板（证书文书 3 + 拼版小件 4；失败不阻塞启动，下次启动重试）

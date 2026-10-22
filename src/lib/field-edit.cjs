@@ -10,9 +10,10 @@ const SNAP_PX = 6           // 吸附阈值（像素，源项目同值）
 const UNDO_CAP = 50         // 撤销栈上限
 const NUDGE_MERGE_MS = 800  // 连续方向键微调的合并窗口（距上次超过它才算新一段操作）
 
-/** 百分比坐标钳位：0–100，保留 1 位小数 */
-function clampPct(v) {
-  return Math.min(100, Math.max(0, Math.round(v * 10) / 10))
+/** 百分比坐标钳位：0–100；默认保留 1 位小数，键盘精调使用 2 位。 */
+function clampPct(v, decimals = 1) {
+  const scale = 10 ** decimals
+  return Math.min(100, Math.max(0, Math.round(v * scale) / scale))
 }
 
 /**
