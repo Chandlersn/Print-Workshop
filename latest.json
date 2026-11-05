@@ -1,5 +1,5 @@
 {
-  "version": "0.6.7",
-  "notes": "新增图片裁剪与背景修复、PSD/PSB 单向导入及转换报告；优化画布侧栏、颜色调整和页面按钮。打印中心逐条出图支持 PNG、JPG 和 WebP。PSD 导入存在转换限制，请查看导入报告并检查画面。安装包未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
+  "version": "0.6.8",
+  "notes": "修复桌面端启动及手动检查更新、后台下载和重启安装流程，改善更新进度与错误提示。安装包未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
   "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }
