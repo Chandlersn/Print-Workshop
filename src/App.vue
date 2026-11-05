@@ -140,6 +140,19 @@ const foundVersion = ref('')
 const updateState = ref({ phase: 'idle' })
 const updateBusy = ref(false)
 const updateMsg = ref('')
+let dismissedUpdateVersion = ''
+
+function applyUpdateState(s) {
+  if (!s || (s.at || 0) < (updateState.value.at || 0)) return
+  updateState.value = s
+  if (s.info && s.info.version !== dismissedUpdateVersion) updateInfo.value = s.info
+  if (s.phase === 'none') updateInfo.value = null
+}
+
+function dismissUpdate() {
+  dismissedUpdateVersion = updateInfo.value?.version || ''
+  updateInfo.value = null
+}
 
 const updatePhase = computed(() => (updateState.value && updateState.value.phase) || 'idle')
 
@@ -167,12 +180,13 @@ async function onCheckUpdate() {
   updateMsg.value = ''
   try {
     const r = await window.printpress.checkUpdate()
+    if (r.state) applyUpdateState(r.state)
     if (r.status === 'newer') {
       foundVersion.value = r.info.version
       updateInfo.value = r.info
       checkState.value = 'newer'
-      // 信标说「有新版本」还不够——必须真正触发更新器，否则就是「点了没反应」
-      await startRealUpdate()
+      // 安装态检测已启动下载；仅开发态信标需要另行请求更新器。
+      if (!r.state) await startRealUpdate()
     } else if (r.status === 'current') {
       checkState.value = 'current'
     } else {
@@ -187,8 +201,10 @@ async function onCheckUpdate() {
 async function startRealUpdate() {
   if (updateBusy.value) return
   updateBusy.value = true
+  updateMsg.value = ''
   try {
     const r = (await window.printpress.startUpdate()) || {}
+    if (r.state) applyUpdateState(r.state)
     if (!r.started) updateMsg.value = r.reason || '当前环境不支持应用内更新'
   } catch (err) {
     updateMsg.value = '无法启动更新：' + toUserMessage(err)
@@ -306,6 +322,15 @@ async function onClearCache() {
 }
 
 onMounted(async () => {
+  // 先订阅再发起任何异步请求，避免快速检测或命中下载缓存时漏掉状态。
+  try { window.printpress.onUpdateState(applyUpdateState) } catch { /* 手动检查仍可用 */ }
+  try {
+    window.printpress.onUpdateAvailable((info) => { updateInfo.value = info })
+  } catch { /* 手动检查仍可用 */ }
+  try {
+    meta.value = await window.printpress.getAppMeta()
+    if (meta.value?.updateState) applyUpdateState(meta.value.updateState)
+  } catch { /* 元信息失败不阻塞 */ }
   try {
     const settings = await window.printpress.loadData('settings') || {}
     applyTheme(settings.theme === 'dark' ? 'dark' : 'light')
@@ -316,15 +341,6 @@ onMounted(async () => {
   } catch (err) {
     env.value = { error: toUserMessage(err) }
   }
-  try { meta.value = await window.printpress.getAppMeta() } catch { /* 元信息失败不阻塞 */ }
-  try {
-    window.printpress.onUpdateAvailable((info) => { updateInfo.value = info })
-  } catch { /* 订阅失败仅影响自动提醒，手动检查仍可用 */ }
-  try {
-    // 订阅应用内更新的阶段变化：启动时那次自动下载、以及「检查更新」触发的下载，
-    // 进度与失败原因都经这里进界面（订阅一次，整个会话有效）
-    window.printpress.onUpdateState((s) => { updateState.value = s || { phase: 'idle' } })
-  } catch { /* 订阅失败仅影响进度显示，按钮仍可用 */ }
 })
 </script>
 
@@ -361,7 +377,8 @@ onMounted(async () => {
       <span class="ub-text">
         新版本 <b>v{{ updateInfo.version }}</b> 已发布{{ updateInfo.notes ? '：' + updateInfo.notes : '' }}
       </span>
-      <span v-if="updatePhaseText" class="ub-state">{{ updatePhaseText }}</span>
+      <span v-if="updatePhase === 'error'" class="ub-state">更新失败：{{ updateState.message || '未知原因' }}</span>
+      <span v-else-if="updatePhaseText" class="ub-state">{{ updatePhaseText }}</span>
       <span v-else-if="updateMsg" class="ub-state">{{ updateMsg }}</span>
       <button
         v-if="updatePhase === 'downloaded'"
@@ -369,7 +386,7 @@ onMounted(async () => {
         @click="onInstallUpdate"
       >立即重启安装</button>
       <button
-        v-else-if="updatePhase !== 'checking' && updatePhase !== 'downloading'"
+        v-else-if="updatePhase !== 'checking' && updatePhase !== 'available' && updatePhase !== 'downloading'"
         class="ub-action"
         :disabled="updateBusy"
         @click="startRealUpdate"
@@ -379,7 +396,7 @@ onMounted(async () => {
         :href="updateInfo.url || (meta && meta.releasesUrl) || '#'"
         target="_blank"
       >前往发布页</a>
-      <button class="ub-close" @click="updateInfo = null">知道了</button>
+      <button class="ub-close" @click="dismissUpdate">知道了</button>
     </div>
 
     <main class="app-main">
@@ -484,7 +501,7 @@ onMounted(async () => {
           </div>
         </div>
         <div class="onboard-actions">
-          <span class="onboard-note">更新检测仅读取仓库中的版本号文件，不收集任何本机数据</span>
+          <span class="onboard-note">启动时检查已发布版本并后台下载更新，确认后重启安装，不上传名单或模板</span>
           <button class="footer-btn" @click="showAbout = false">关闭</button>
         </div>
       </div>

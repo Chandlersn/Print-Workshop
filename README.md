@@ -350,7 +350,7 @@ npm run electron:dev  # vite + electron 热更新开发
 ## 测试与质量检查
 
 ```bash
-npm test                        # 领域层测试：54 套件，断言统计见运行结果
+npm test                        # 领域层测试：56 套件，断言统计见运行结果
 npm run test:psd-import         # PSD/PSB 导入、转换、取消与快照验证
 npm run build && npm run test:image-edit-e2e # 图片裁剪、擦除及 Photoshop 导入界面
 npm run test:output-dpi-e2e       # 真实 PDF 降采样、EXIF 方向与原件归档

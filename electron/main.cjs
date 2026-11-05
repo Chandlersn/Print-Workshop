@@ -239,20 +239,16 @@ function main() {
     }
   } catch (err) { console.error('照片导入恢复异常:', err) }
 
-  // 产品化接口位（M5 预留，不提前实现）：
-  // 1. 自动更新：当前用 version-check.cjs 做轻量版本信标检测（只提示不自装），
-  //    后续若做全量自更新再挂 electron-updater；
-  // 2. 授权校验：settings.json 预留 license 字段位（{ key, activatedAt }），
-  //    对外产品化时在此挂载启动时校验与功能门控。
-
   // 更新检测 IPC：meta 给渲染层版本与出口链接；checkUpdate 支持手动触发（卡点可见）
   ipcMain.handle('app:meta', () => ({
     version: app.getVersion(),
     releasesUrl: versionCheck.RELEASES_URL,
     feedbackUrl: versionCheck.FEEDBACK_URL,
+    updateState: autoUpdate.currentState(),
   }))
   ipcMain.handle('app:checkUpdate', async () =>
-    versionCheck.checkForUpdate({ currentVersion: app.getVersion() }))
+    app.isPackaged ? autoUpdate.checkUpdate()
+      : versionCheck.checkForUpdate({ currentVersion: app.getVersion() }))
 
   // IPC 通道装配（store / 后续 dataset / template / print 引擎都在这里挂载）
   const { registerIpc } = require('./ipc.cjs')
@@ -271,18 +267,10 @@ function main() {
     })
     const win = createWindow()
 
-    // 启动自动更新检测：页面加载完才查一次、3 秒超时、任何失败静默——
-    // 只有远程版本更大才通知渲染层弹横幅（离线用户零打扰）
-    win.webContents.on('did-finish-load', () => {
-      versionCheck.checkForUpdate({ currentVersion: app.getVersion() })
-        .then((r) => {
-          if (r.status === 'newer') {
-            win.webContents.send('update:available', r.info)
-            // 检测到新版即后台下载，实现「点更新 → 自动下载 → 重启安装」
-            autoUpdate.startUpdate()
-          }
-        })
-        .catch(() => { /* 检测永不阻塞、永不报错 */ })
+    // 直接检查已发布的安装包；CDN 版本信标不再决定是否运行更新器。
+    // once 避免页面刷新时重复检查；晚订阅的界面通过 app:meta 补齐状态。
+    win.webContents.once('did-finish-load', () => {
+      if (app.isPackaged && !isSmoke) autoUpdate.startUpdate()
     })
 
     if (isSmoke) {

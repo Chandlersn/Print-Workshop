@@ -4,7 +4,7 @@
  *
  * 为什么是脚本而不是网页拖拽：网页传 80MB 要等、还容易传错版本；
  * 这个脚本会逐项核对（版本号三处一致 → tag 在不在 → 包大小对不对），
- * 传完再回读一次资产大小复核。已存在的 Release 会复用，大小一致直接收工。
+ * 传完再回读全部必需资产大小复核；复用已有 Release 时也补齐更新清单。
  *
  * 用法：
  *   npm run release:check                      # 只体检，不写任何东西
@@ -104,13 +104,8 @@ async function main() {
   ok(pkgVer === readmeVer, `README 头部与 package.json 一致（${pkgVer}）`, { pkg: pkgVer, readme: readmeVer })
 
   const tag = `v${pkgVer}`
-  let exe = path.join(ROOT, 'release', `批印坊 Setup ${pkgVer}.exe`)
-  if (!fs.existsSync(exe)) {
-    const relDir = path.join(ROOT, 'release')
-    const cands = fs.existsSync(relDir) ? fs.readdirSync(relDir).filter((f) => f.toLowerCase().endsWith('.exe')) : []
-    console.log(`     release/ 下的 .exe: ${cands.join(', ') || '(无)'}`)
-    if (cands.length) exe = path.join(relDir, cands[0])
-  }
+  // 不得拿目录里任意旧版 exe 冒充当前版本，否则清单版本与实际安装结果不一致。
+  const exe = path.join(ROOT, 'release', `批印坊 Setup ${pkgVer}.exe`)
   ok(fs.existsSync(exe), `本地安装包存在`, path.basename(exe))
   const localSize = fs.existsSync(exe) ? fs.statSync(exe).size : 0
   if (localSize) console.log(`     包大小: ${localSize} 字节`)
@@ -138,12 +133,9 @@ async function main() {
     console.log(`     已存在 Release: ${release.html_url}`)
     const hit = (release.assets || []).find((a) => a.name === assetName)
     if (hit && hit.size === localSize) {
-      // 完全一致：同一次构建重跑，无需上传
-      console.log(`     资产大小与本地一致（${hit.size}），无需上传`)
-      console.log('\n无需上传，全部就绪。')
-      process.exit(bad ? 1 : 0)
-    }
-    if (hit) {
+      // 大小相同不代表完整发布：旧流程可能只传了 exe、没有 latest.yml。
+      console.log(`     安装包大小一致（${hit.size}），仍同步更新清单与校验和`)
+    } else if (hit) {
       // 同版本重发（改了代码重新构建）→ 大小必然变，属正常，覆盖重传即可
       console.log(`     已存在旧资产但大小不同（远端 ${hit.size} / 本地 ${localSize}），将覆盖重传`)
     } else {
@@ -190,7 +182,7 @@ async function main() {
   await uploadAsset(release.id, assetName, buf)
 
   // ── 6b. 自动更新清单 latest.yml（electron-updater 靠它校验 sha512 + 定位安装包）──
-  console.log('\n== 6b. 上传 latest.yml（自动更新清单）==')
+  console.log('\n== 6b. 生成 latest.yml（所有安装资产就绪后上传）==')
   const sha512 = crypto.createHash('sha512').update(buf).digest('base64')
   const latestYml = [
     `version: ${pkgVer}`,
@@ -202,7 +194,7 @@ async function main() {
     `sha512: ${sha512}`,
     `releaseDate: '${new Date().toISOString()}'`,
   ].join('\n') + '\n'
-  await uploadAsset(release.id, 'latest.yml', Buffer.from(latestYml, 'utf-8'))
+  const latestYmlBytes = Buffer.from(latestYml, 'utf-8')
 
   // 差异更新用的 blockmap（若存在则一并上传，全量下载不依赖它）
   const blockmapName = `PrintPress-${pkgVer}-Setup.exe.blockmap`
@@ -225,6 +217,9 @@ async function main() {
   await uploadAsset(release.id, 'SHA256SUMS.txt', Buffer.from(sums, 'utf-8'))
   console.log(`     sha256 = ${sha256}`)
 
+  // 清单最后发布，避免客户端先看到清单、却还下载不到对应资产。
+  await uploadAsset(release.id, 'latest.yml', latestYmlBytes)
+
   // ── 7. 回读复核 ──
   console.log('\n== 7. 回读复核 ==')
   const after = await api('GET', `${API}/repos/${OWNER}/${REPO}/releases/tags/${tag}`)
@@ -232,6 +227,10 @@ async function main() {
   ok(Boolean(asset), '资产已挂到 Release 上')
   ok(Boolean(asset) && asset.size === localSize, '**远端大小 == 本地大小**（没传一半）',
     { 远端: asset && asset.size, 本地: localSize })
+  for (const [name, size] of [['latest.yml', latestYmlBytes.length], ['SHA256SUMS.txt', Buffer.byteLength(sums)]]) {
+    const hit = after.ok && (after.json.assets || []).find(a => a.name === name)
+    ok(Boolean(hit) && hit.size === size, `必需资产 ${name} 已完整上传`)
+  }
   if (asset) {
     console.log(`     下载地址: ${asset.browser_download_url}`)
     console.log(`     状态: ${asset.state}`)
