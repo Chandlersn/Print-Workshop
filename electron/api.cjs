@@ -986,9 +986,10 @@ const OPS = {
     params: {
       token: { required: true, desc: '检查令牌' },
       fontDecisions: { required: false, desc: '{ 原字体名: { action: substitute|default|file, family?, filePath? } }' },
+      rasterizeText: { required: false, desc: 'PSD/PSB 导入时，将有像素预览的文字转为图片以保留外观' },
       name: { required: false, desc: '导入后的工程名；默认用包里的名字' },
     },
-    run: (p) => String(p.token || '').startsWith('psd_') ? require('./psd-import.cjs').commit(p.token) : designPackage.commitPackage(p.token, { fontDecisions: p.fontDecisions, name: p.name }),
+    run: (p) => String(p.token || '').startsWith('psd_') ? require('./psd-import.cjs').commit(p.token, { rasterizeText: p.rasterizeText === true }) : designPackage.commitPackage(p.token, { fontDecisions: p.fontDecisions, name: p.name }),
   },
 
   'design:packageCancel': {

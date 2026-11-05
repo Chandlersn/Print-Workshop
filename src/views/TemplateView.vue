@@ -1481,10 +1481,10 @@ onBeforeUnmount(() => {
             <button class="btn-ghost" @click="uploadFont">上传字体</button>
             <a
               class="btn-ghost font-download"
-              href="https://www.maoken.com/"
+              href="https://www.alibabafonts.com/#/font"
               target="_blank"
               rel="noopener noreferrer"
-              title="猫啃网：国内收录最全的免费商用中文字体站（800+ 款，授权清晰），下载 ttf/otf 后点「上传字体」装入"
+              title="前往阿里巴巴字体网站，下载 ttf/otf 后点「上传字体」装入"
             >下载字体</a>
           </div>
           <div class="font-list">

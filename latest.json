@@ -1,5 +1,5 @@
 {
-  "version": "0.6.8",
-  "notes": "修复桌面端启动及手动检查更新、后台下载和重启安装流程，改善更新进度与错误提示。安装包未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
+  "version": "0.6.9",
+  "notes": "改进 PSD/PSB 导入的图层顺序、字体预览保留和转换提示，支持更大的导入文件；图层管理支持拖动排序；魔法擦除增加更细的画笔和放大档位。安装包未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
   "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }

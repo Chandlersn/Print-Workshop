@@ -7,8 +7,10 @@ const { Worker, isMainThread, parentPort, workerData } = require('worker_threads
 const { BLEND_MODES, normalizeDesign } = require('./design-layout.cjs')
 const { toUserMessage } = require('./user-error.cjs')
 
-const MAX_FILE = 128 * 1024 * 1024
-const MAX_MEMORY = 256 * 1024 * 1024
+const MAX_FILE_MB = 512
+const MAX_FILE = MAX_FILE_MB * 1024 * 1024
+const MAX_MEMORY = 1024 * 1024 * 1024
+const PARSE_TIMEOUT_MS = 120000
 const TTL = 15 * 60 * 1000
 const sessions = new Map()
 const id = prefix => `${prefix}_${crypto.randomBytes(8).toString('hex')}`
@@ -63,9 +65,10 @@ function rectangle(layer) {
 }
 function parse(filePath) {
   const stat = fs.statSync(filePath)
-  if (!stat.isFile() || stat.size < 26 || stat.size > MAX_FILE) throw new Error('PSD/PSB 文件不存在或超过 128 MB')
+  if (!stat.isFile() || stat.size < 26) throw new Error('PSD/PSB 文件无效或不完整')
+  if (stat.size > MAX_FILE) throw new Error(`PSD/PSB 文件超过 ${MAX_FILE_MB} MB`)
   const bytes = fs.readFileSync(filePath)
-  if (bytes.length > MAX_FILE) throw new Error('PSD/PSB 文件超过 128 MB')
+  if (bytes.length > MAX_FILE) throw new Error(`PSD/PSB 文件超过 ${MAX_FILE_MB} MB`)
   if (bytes.toString('ascii',0,4) !== '8BPS' || ![1,2].includes(bytes.readUInt16BE(4))) throw new Error('这不是有效的 PSD/PSB 文件')
   if (bytes.readUInt16BE(22) !== 8 || bytes.readUInt16BE(24) !== 3) throw new Error('目前仅支持 8 位 RGB 的 PSD/PSB；请在 Photoshop 中转换后保存副本')
   const width = bytes.readUInt32BE(18), height = bytes.readUInt32BE(14)
@@ -77,7 +80,7 @@ function parse(filePath) {
   let dpi = ri?.horizontalResolution
   if (ri?.horizontalResolutionUnit === 'PPCM') dpi *= 2.54
   const warnings = []
-  const note = (layer, message) => warnings.push({ layer: cleanName(layer, '文档'), message })
+  const note = (layer, message, details = {}) => warnings.push({ layer: cleanName(layer, '文档'), message, ...details })
   if (!Number.isFinite(dpi) || dpi < 1 || dpi > 2400) { dpi = 72; note('文档', '未找到有效分辨率，按 72 DPI 换算画布尺寸。') }
   const mm = n => round(n * 25.4 / dpi)
   if (mm(width) < 1 || mm(height) < 1 || mm(width) > 2000 || mm(height) > 2000) throw new Error('按 PSD 分辨率换算后的画布尺寸超出 1–2000 mm，请先调整分辨率')
@@ -86,7 +89,9 @@ function parse(filePath) {
   const layers = [], groups = [], images = []
   function visit(children, parent = null, inheritedVisible = true, inheritedOpacity = 1, depth = 0) {
     if (depth > 20) throw new Error('PSD 分组嵌套过深')
-    for (const layer of [...children].reverse()) {
+    // ag-psd 的实际解码顺序与工程数组一致：从底到顶；分组成员也应保持原序。
+    // 反转会让底图盖住上方内容。用重叠像素与原 PSD 合并画面验证，不能只核对图层列表。
+    for (const layer of children) {
       const name = cleanName(layer.name, '图层')
       if (Array.isArray(layer.children)) {
         if (parent) note(name, '嵌套分组已展开到外层分组。')
@@ -122,10 +127,22 @@ function parse(filePath) {
           if (fontSize >= 1 && fontSize <= 1000) {
             const font = cleanName(style.font?.name, '')
             const lineHeightMm = fontSize * 25.4 / 72 * 1.2
-            layers.push({ ...base, type:'text', x:mm(layer.left), y:mm(layer.top), w:Math.max(.01,mm(layer.right-layer.left)), h:Math.max(.01,mm(layer.bottom-layer.top),lineHeightMm), rotation:Math.atan2(matrix[1],matrix[0])*180/Math.PI, text:str, fontFamily:font, fontSize, color:color(style.fillColor), bold:!!style.fauxBold, align:['center','right'].includes(t.paragraphStyle?.justification) ? t.paragraphStyle.justification : 'left' })
-            note(name, '文字保持可编辑；字形、定位和换行可能与 Photoshop 不完全一致，请检查字体。')
-            if ((t.styleRuns?.length || 0) > 1) note(name, '多段文字样式仅保留第一段。')
-            if (t.warp?.style && t.warp.style !== 'none') note(name, '文字变形未保留。')
+            // 保存 PSD 自带的栅格预览供用户选择；原文件稍后可能变化，不能在确认时重新读取。
+            let textPreview = null
+            const img = layer.imageData
+            if (img && img.width && img.height && img.data) {
+              let visiblePixel = false
+              for (let i = 3; i < img.data.length; i += 4) if (img.data[i]) { visiblePixel = true; break }
+              if (visiblePixel) {
+                try { textPreview = { imageIndex:images.push(pngFromPixels(img))-1, x:mm(layer.left), y:mm(layer.top), w:mm(img.width), h:mm(img.height) } }
+                catch { /* 无有效预览或像素过大时仍保留可编辑文字，不阻止导入。 */ }
+              }
+            }
+            layers.push({ ...base, type:'text', x:mm(layer.left), y:mm(layer.top), w:Math.max(.01,mm(layer.right-layer.left)), h:Math.max(.01,mm(layer.bottom-layer.top),lineHeightMm), rotation:Math.atan2(matrix[1],matrix[0])*180/Math.PI, text:str, fontFamily:font, fontSize, color:color(style.fillColor), bold:!!style.fauxBold, align:['center','right'].includes(t.paragraphStyle?.justification) ? t.paragraphStyle.justification : 'left', textPreview })
+            const detail = { category:'editable-text', layerId:base.id }
+            note(name, '作为可编辑文字导入时，字形、定位和换行可能与 Photoshop 不完全一致。', detail)
+            if ((t.styleRuns?.length || 0) > 1) note(name, '多段文字样式仅保留第一段。', detail)
+            if (t.warp?.style && t.warp.style !== 'none') note(name, '文字变形未保留。', detail)
             continue
           }
         }
@@ -163,7 +180,7 @@ async function inspect(filePath) {
   if (sessions.size >= 3) throw new Error('待导入文件过多，请先完成或取消之前的导入')
   const result = await new Promise((resolve,reject) => {
     const worker = new Worker(__filename, { workerData:{filePath} })
-    const timer = setTimeout(() => { worker.terminate(); reject(new Error('PSD 解析超时，请缩小文件后重试')) }, 60000)
+    const timer = setTimeout(() => { worker.terminate(); reject(new Error('PSD 解析超时，请缩小文件后重试')) }, PARSE_TIMEOUT_MS)
     worker.once('message', message => { clearTimeout(timer); if (message.error) reject(new Error(message.error)); else resolve(message.result) })
     worker.once('error', err => { clearTimeout(timer); reject(err) })
     worker.once('exit', code => { if (code) { clearTimeout(timer); reject(new Error('PSD 解析进程异常退出')) } })
@@ -172,20 +189,25 @@ async function inspect(filePath) {
   const timer = setTimeout(() => sessions.delete(token), TTL)
   timer.unref()
   sessions.set(token, { result, expires:Date.now()+TTL, timer })
-  return { token, kind:'psd', name:result.name, artboard:result.artboard, totalBytes:result.totalBytes, stats:{layerCount:result.layers.length,imageCount:result.images.length,fontCount:0}, width:result.width,height:result.height,dpi:result.dpi,warnings:result.warnings,fonts:[],unresolved:[] }
+  const textLayers = result.layers.filter(layer => layer.type === 'text')
+  const previewLayers = textLayers.filter(layer => layer.textPreview)
+  return { token, kind:'psd', name:result.name, artboard:result.artboard, totalBytes:result.totalBytes, stats:{layerCount:result.layers.length,imageCount:result.layers.filter(layer => layer.type === 'image').length,fontCount:0}, width:result.width,height:result.height,dpi:result.dpi,warnings:result.warnings,fonts:[],unresolved:[], textPreview:{ available:previewLayers.length, unavailable:textLayers.length-previewLayers.length, layerIds:previewLayers.map(layer => layer.id) } }
 }
 function cancel(token) { const session = sessions.get(token); if (session) clearTimeout(session.timer); return { ok:sessions.delete(token), canceled:true } }
-function commit(token) {
+function commit(token, { rasterizeText = false } = {}) {
   expire()
   const session = sessions.get(token)
   if (!session) throw new Error('PSD 检查已失效，请重新选择文件')
   const data = session.result, designs = require('./designs.cjs'), assets = {}
   const layers = data.layers.map(layer => {
-    if (layer.type !== 'image') return layer
-    const asset = designs.importImageBuffer(Buffer.from(data.images[layer.imageIndex]), layer.name + '.png', 'managed')
+    const { textPreview, ...original } = layer
+    const preview = layer.type === 'text' && rasterizeText ? textPreview : null
+    if (layer.type !== 'image' && !preview) return original
+    const imageIndex = preview ? preview.imageIndex : layer.imageIndex
+    const asset = designs.importImageBuffer(Buffer.from(data.images[imageIndex]), layer.name + '.png', 'managed')
     assets[asset.id] = asset
-    const { imageIndex, ...out } = layer
-    return { ...out, assetId:asset.id }
+    const { imageIndex: _imageIndex, ...out } = original
+    return preview ? { ...out, type:'image', x:preview.x, y:preview.y, w:preview.w, h:preview.h, rotation:0, assetId:asset.id } : { ...out, assetId:asset.id }
   })
   const result = designs.saveDesign(normalizeDesign({ name:data.name,artboard:data.artboard,layers,groups:data.groups,assets }))
   clearTimeout(session.timer)

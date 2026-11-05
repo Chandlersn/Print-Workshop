@@ -246,10 +246,16 @@ async function main() {
   assert.ok(await evaluate(`document.querySelector('[data-testid="design-menu-crop"]').disabled && document.querySelector('[data-testid="design-menu-erase"]').disabled`), '锁定图层禁止裁剪与擦除')
   const { writePsdBuffer } = require('ag-psd')
   const psdImage = { width: 10, height: 10, data: new Uint8ClampedArray(400).fill(255) }
+  const psdBackground = { width: 40, height: 40, data: new Uint8ClampedArray(40 * 40 * 4) }
+  for (let i = 0; i < psdBackground.data.length; i += 4) { psdBackground.data[i] = 255; psdBackground.data[i + 3] = 255 }
   const psdFile = path.join(DATA, 'sample.psd')
   fs.writeFileSync(psdFile, writePsdBuffer({ width: 40, height: 40, imageData: { width: 40, height: 40, data: new Uint8ClampedArray(6400) }, children: [
-    { name: 'Hello', left: 2, top: 2, imageData: psdImage, text: { text: 'Hello', style: { fontSize: 12, font: { name: 'ArialMT' } } } },
-    { name: 'Image', left: 10, top: 10, imageData: psdImage },
+    { name: 'Background', imageData: psdBackground },
+    { name: 'Foreground group', children: [
+      { name: 'Image', left: 10, top: 10, imageData: psdImage },
+      { name: 'Hello', left: 2, top: 2, imageData: psdImage, text: { text: 'Hello', style: { fontSize: 12, font: { name: 'ArialMT' } } } },
+      { name: 'Hello2', left: 25, top: 2, imageData: psdImage, text: { text: 'World', style: { fontSize: 12, font: { name: 'ArialMT' } } } },
+    ] },
   ] }))
   const dialog = require('electron').dialog, originalOpenDialog = dialog.showOpenDialog
   dialog.showOpenDialog = async () => ({ canceled:false, filePaths:[psdFile] })
@@ -257,19 +263,117 @@ async function main() {
     await click('[data-testid="design-import-package"]')
     await wait(`Boolean(document.querySelector('[data-testid="design-psd-report"]'))`, 'PSD 转换报告')
     assert.ok(await evaluate(`document.querySelector('[data-testid="design-psd-report"]').textContent.includes('Hello')`), '报告提示文字转换')
+    assert.ok(await evaluate(`document.querySelector('[data-testid="design-psd-report"] details summary')?.textContent.includes('2 个图层')`),'重复的文字提示合并并可展开')
+    assert.equal(await evaluate(`document.querySelector('[data-testid="psd-text-as-image"]').checked`),false,'默认保留文字可编辑')
     await click('[data-testid="design-package-import-confirm"]')
     await wait(`!document.querySelector('[data-testid="design-package-import-dialog"]') && document.querySelector('.notice.success')?.textContent.includes('已导入副本')`, 'PSD 导入为副本')
     const imported = designs.listDesigns().find(item => item.name === 'sample')
     assert.ok(imported, '导入后工程可在工程库中找到')
     const importedDoc = designs.getDesign(imported.id)
-    assert.deepEqual(importedDoc.layers.map(l=>l.type), ['image','text'])
-    assert.equal(importedDoc.layers[1].text, 'Hello')
-    const importedImage = nativeImage.createFromPath(path.join(DATA, importedDoc.assets[importedDoc.layers[0].assetId].path))
+    assert.deepEqual(importedDoc.layers.map(l=>l.type), ['image','image','text','text'])
+    assert.equal(importedDoc.layers[2].text, 'Hello')
+    assert.deepEqual(importedDoc.layers.map(l=>l.name), ['Background','Image','Hello','Hello2'])
+    const importedImage = nativeImage.createFromPath(path.join(DATA, importedDoc.assets[importedDoc.layers[1].assetId].path))
     assert.deepEqual(importedImage.getSize(), { width:10, height:10 })
     assert.equal(pixel(importedImage, 5, 5), 255, 'PSD 图层像素与透明度写入可读取的 PNG')
+    const composed = nativeImage.createFromBuffer(await exporter.renderPng(exporter.prepareExport({ design: importedDoc, dpi: 150, transparent: true })))
+    const pixels = composed.toBitmap(), stride = composed.getSize().width
+    const channel = (x,y,c) => pixels[(y*stride+x)*4+c]
+    assert.ok(channel(30,30,0) > 240 && channel(30,30,1) > 240 && channel(30,30,2) > 240, '导出中分组前景白色图片盖住红色底图')
+    assert.ok(channel(60,60,0) < 10 && channel(60,60,1) < 10 && channel(60,60,2) > 240, '导出中无遮挡区域保留红色底图')
     assert.ok(await evaluate(`Boolean(document.querySelector('[data-canvas-layer-id="photo"]'))`), '导入副本不替换当前画板')
+
+    const previousIds = new Set(designs.listDesigns().map(item=>item.id))
+    await click('[data-testid="design-import-package"]')
+    await wait(`Boolean(document.querySelector('[data-testid="psd-text-as-image"]'))`, 'PSD 文字外观选项')
+    await click('[data-testid="psd-text-as-image"]')
+    await wait(`!document.querySelector('[data-testid="design-psd-report"]').textContent.includes('字形、定位和换行')`, '选择预览后消除已解决的文字提示')
+    await click('[data-testid="design-package-import-confirm"]')
+    await wait(`!document.querySelector('[data-testid="design-package-import-dialog"]')`, '以文字预览导入副本')
+    const rasterCopy = designs.listDesigns().find(item=>!previousIds.has(item.id))
+    assert.ok(rasterCopy,'以预览方式另建工程')
+    const rasterDoc = designs.getDesign(rasterCopy.id)
+    assert.deepEqual(rasterDoc.layers.map(l=>l.type),['image','image','image','image'],'选择后文字层变成图片，不依赖字体')
+    assert.deepEqual(rasterDoc.fontAssets,{})
+    const originalTextPixels=nativeImage.createFromPath(path.join(DATA,rasterDoc.assets[rasterDoc.layers[2].assetId].path))
+    assert.equal(pixel(originalTextPixels,5,5),255,'文字图片保留 PSD 图层像素')
   } finally { dialog.showOpenDialog = originalOpenDialog }
   console.log('ok - Photoshop 文件经导入检查、转换报告和真实 IPC 保存为独立副本')
+  const sorting = designs.saveDesign({ name:'图层拖动验收', artboard:{w:60,h:40}, assets:{}, layers:[
+    {id:'order-locked',name:'锁定层',type:'rect',x:50,y:0,w:10,h:10,locked:true,fill:'#000000'},
+    {id:'order-bottom',name:'红色底层',type:'rect',x:0,y:0,w:40,h:40,fill:'#ff0000'},
+    {id:'order-lower',name:'组下',type:'rect',x:5,y:5,w:30,h:30,fill:'#0000ff'},
+    {id:'order-upper',name:'组上',type:'rect',x:5,y:5,w:30,h:30,fill:'#00ff00'},
+    {id:'order-front',name:'白色前景',type:'rect',x:10,y:10,w:10,h:10,fill:'#ffffff'},
+  ], groups:[{id:'order-group',name:'分组',layerIds:['order-lower','order-upper']}] })
+  await evaluate(`document.querySelector('.nav-item').click()`)
+  await wait(`!document.querySelector('[data-testid="design-save"]')`, '先离开旧画板，避免卸载时覆盖排序夹具')
+  await evaluate(`localStorage.setItem('printpress-background-designer-draft-v1',${JSON.stringify(JSON.stringify({design:sorting,savedFingerprint:''}))})`)
+  await ui.loadFile(path.join(ROOT,'dist/index.html'))
+  await wait(`Boolean([...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')))`, '图层排序页')
+  await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')).click()`)
+  await wait(`Boolean(document.querySelector('[data-layer-id="order-bottom"]'))`, '排序图层已载入')
+  const layerRow = id => `[data-layer-id="order-${id}"]`
+  const order = () => evaluate(`(${draft}).layers.map(l=>l.id.replace('order-',''))`)
+  const originalOrder = ['locked','bottom','lower','upper','front']
+  const waitOrder = async expected => wait(`JSON.stringify((${draft})?.layers.map(l=>l.id.replace('order-','')))===${JSON.stringify(JSON.stringify(expected))}`, '图层顺序保存到草稿')
+  async function startSort(source, target, placement='above') {
+    await evaluate(`(() => {const source=document.querySelector(${JSON.stringify(source)}),target=document.querySelector(${JSON.stringify(target)});source.scrollIntoView({block:'nearest'});source.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0}));const dt=new DataTransfer();window.__sortTransfer=dt;window.__sortSource=source;source.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:dt}));target.scrollIntoView({block:'nearest'});const r=target.getBoundingClientRect();target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:dt,clientX:r.left+r.width/2,clientY:r.top+r.height*${placement==='above'?.25:.75}}));})()`)
+  }
+  async function finishSort(target, placement='above') {
+    await evaluate(`(() => {const el=document.querySelector(${JSON.stringify(target)}),r=el.getBoundingClientRect();el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:window.__sortTransfer,clientX:r.left+r.width/2,clientY:r.top+r.height*${placement==='above'?.25:.75}}));window.__sortSource.dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:window.__sortTransfer}));})()`)
+  }
+  const topBottom = ['locked','lower','upper','front','bottom']
+  await click(layerRow('bottom'))
+  await startSort(layerRow('bottom'),layerRow('front'))
+  assert.ok(await evaluate(`Boolean(document.querySelector('${layerRow('front')}.layer-drop-above'))`), '拖动显示目标上方插入线')
+  assert.deepEqual(await order(),originalOrder,'拖动预览不修改工程')
+  await finishSort(layerRow('front')); await waitOrder(topBottom)
+  assert.ok(await evaluate(`document.querySelector('${layerRow('bottom')}').classList.contains('selected')`),'排序后保持选择')
+  assert.deepEqual(await evaluate(`[...document.querySelectorAll('.layer-list [data-layer-id]')].map(el=>el.dataset.layerId.replace('order-',''))`),[...topBottom].reverse(),'列表从上到下与画布层级一致')
+  await undo(); await waitOrder(originalOrder)
+  await undo(true); await waitOrder(topBottom)
+  await undo(); await waitOrder(originalOrder)
+  await startSort(layerRow('bottom'),layerRow('front'))
+  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));window.__sortSource.dispatchEvent(new DragEvent('dragend',{bubbles:true}))`)
+  assert.deepEqual(await order(),originalOrder,'Esc 取消不改变层级')
+  assert.ok(await evaluate(`!document.querySelector('.layer-drop-above,.layer-drop-below,.layer-dragging')`),'取消后清除拖动提示')
+  assert.equal(await evaluate(`document.querySelector('${layerRow('locked')}').draggable`),false,'锁定层不允许拖动')
+  await click(layerRow('lower')); await startSort(layerRow('lower'),layerRow('upper')); await finishSort(layerRow('upper'))
+  await waitOrder(['locked','bottom','upper','lower','front'])
+  assert.deepEqual(await evaluate(`(${draft}).groups[0].layerIds`),['order-upper','order-lower'],'组内排序同步保存成员顺序')
+  await undo(); await waitOrder(originalOrder)
+  await click('[data-group-id="order-group"]'); await startSort('[data-group-id="order-group"]',layerRow('front')); await finishSort(layerRow('front'))
+  await waitOrder(['locked','bottom','front','lower','upper'])
+  await undo(); await waitOrder(originalOrder)
+  await click(layerRow('lower')); await startSort(layerRow('lower'),layerRow('bottom'),'below')
+  assert.ok(await evaluate(`!document.querySelector('.layer-drop-above,.layer-drop-below')`),'成员不能被投放到组外')
+  await finishSort(layerRow('bottom'),'below'); assert.deepEqual(await order(),originalOrder)
+  await click(layerRow('bottom'))
+  await evaluate(`document.querySelector('${layerRow('front')}').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}))`)
+  await startSort(layerRow('bottom'),layerRow('upper'))
+  assert.ok(await evaluate(`Boolean(document.querySelector('[data-group-id="order-group"].layer-drop-above'))`),'跨组投放的插入线位于整组边界')
+  await finishSort(layerRow('upper')); await waitOrder(['locked','lower','upper','bottom','front'])
+  assert.equal(await evaluate(`document.querySelectorAll('.layer-list [data-layer-id].selected').length`),2,'多选拖动保留选择和内部顺序')
+  await undo(); await waitOrder(originalOrder)
+  await click(layerRow('bottom')); await startSort(layerRow('bottom'),layerRow('front')); await finishSort(layerRow('front')); await waitOrder(topBottom)
+  await click('[data-testid="design-save"]')
+  await wait(`document.querySelector('.notice.success')?.textContent.includes('已保存')`, '保存拖动后的顺序')
+  const sortedDoc=designs.getDesign(sorting.id)
+  assert.deepEqual(sortedDoc.layers.map(l=>l.id.replace('order-','')),topBottom)
+  assert.deepEqual(sortedDoc.layers.map(({id,x,y,w,h})=>({id,x,y,w,h})).sort((a,b)=>a.id.localeCompare(b.id)),sorting.layers.map(({id,x,y,w,h})=>({id,x,y,w,h})).sort((a,b)=>a.id.localeCompare(b.id)),'排序不修改坐标和尺寸')
+  const sortedImage=nativeImage.createFromBuffer(await exporter.renderPng(exporter.prepareExport({design:sortedDoc,dpi:150,transparent:true})))
+  const sortedPixels=sortedImage.toBitmap(),sortPixelAt=(Math.round(15*150/25.4)*sortedImage.getSize().width+Math.round(15*150/25.4))*4
+  assert.ok(sortedPixels[sortPixelAt]<10&&sortedPixels[sortPixelAt+1]<10&&sortedPixels[sortPixelAt+2]>240,'导出遮挡关系同步更新为红色底层置顶')
+  await ui.loadFile(path.join(ROOT,'dist/index.html'))
+  await wait(`Boolean([...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')))`, '重开排序页')
+  await evaluate(`[...document.querySelectorAll('.nav-item')].find(el=>el.textContent.includes('底图')).click()`)
+  await wait(`Boolean(document.querySelector('[data-testid="designer-projects"] summary'))`, '工程库入口')
+  await click('[data-testid="designer-projects"] summary')
+  await wait(`Boolean([...document.querySelectorAll('.project-open b')].find(el=>el.textContent==='图层拖动验收'))`, '工程库已保存的排序工程')
+  await evaluate(`[...document.querySelectorAll('.project-open b')].find(el=>el.textContent==='图层拖动验收').click()`)
+  await wait(`document.querySelector('.layer-list [data-layer-id]')?.dataset.layerId==='order-bottom'`, '重开后保留排序')
+  console.log('ok - 图层拖动插入线、多选、整组与组内排序、锁定、取消、撤销重做、持久化和导出像素')
   assert.deepEqual(errors, [])
   ui.destroy(); clearTimeout(watchdog)
   console.log('IMAGE_EDIT_E2E_OK')

@@ -92,6 +92,33 @@ function removeSelection(input, ids, { expandGroups = true } = {}) {
   doc.groups = doc.groups.map(group => ({ ...group, layerIds: group.layerIds.filter(id => !removed.has(id)) })).filter(group => group.layerIds.length >= 2)
   return { design: normalizeDesign(doc), selectedIds: before.filter(id => !removed.has(id)) }
 }
+/** Place a selection above/below a target without splitting a group. */
+function moveSelection(input, ids, targetId, placement) {
+  const doc = normalizeDesign(input)
+  if (!['above', 'below'].includes(placement)) throw new Error('图层放置位置无效')
+  const selected = new Set(selectionIds(doc, ids, { expandGroups: false }))
+  const target = doc.layers.find(layer => layer.id === targetId)
+  if (!selected.size || !target || selected.has(targetId)) return doc
+  const allowed = new Set(editableSelection(doc, [...selected]))
+  if ([...selected].some(id => !allowed.has(id))) return doc
+  const partial = doc.groups.filter(group => group.layerIds.some(id => selected.has(id)) && !group.layerIds.every(id => selected.has(id)))
+  let targetIds = groupForLayer(doc, targetId)?.layerIds || [targetId]
+  if (partial.length) {
+    const group = partial[0]
+    if (partial.length !== 1 || ![...selected].every(id => group.layerIds.includes(id)) || !group.layerIds.includes(targetId)) {
+      throw new Error('组内成员只能在本组内排序；移动整组请拖动组名。')
+    }
+    targetIds = [targetId]
+  }
+  const moved = doc.layers.filter(layer => selected.has(layer.id))
+  const rest = doc.layers.filter(layer => !selected.has(layer.id))
+  const anchors = rest.map((layer, index) => targetIds.includes(layer.id) ? index : -1).filter(index => index >= 0)
+  if (!anchors.length) return doc
+  const at = placement === 'above' ? anchors.at(-1) + 1 : anchors[0]
+  doc.layers = [...rest.slice(0, at), ...moved, ...rest.slice(at)]
+  return normalizeDesign(doc)
+}
+
 function reorderSelection(input, ids, direction) {
   const doc = normalizeDesign(input)
   if (!['up', 'down', 'top', 'bottom'].includes(direction)) throw new Error('图层排序方向无效')
@@ -202,4 +229,4 @@ function transformGroup(input, groupId, { scale = 1, rotation = 0 } = {}) {
   return normalizeDesign(doc)
 }
 
-module.exports = { groupForLayer, selectionIds, expandSelection, editableSelection, selectLayer, createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection, copyLayerStyle, applyLayerStyle, transformGroup }
+module.exports = { groupForLayer, selectionIds, expandSelection, editableSelection, selectLayer, createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection, moveSelection, copyLayerStyle, applyLayerStyle, transformGroup }

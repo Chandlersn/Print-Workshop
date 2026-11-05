@@ -19,7 +19,7 @@ import { FORMATS, normalizeQuality, estimateOutputBytes } from '../../electron/e
 import { toUserMessage } from '../../electron/user-error.cjs'
 import {
   expandSelection, editableSelection, selectLayer as selectGroupedLayer, groupForLayer,
-  createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection,
+  createGroup, ungroupSelection, duplicateSelection, removeSelection, reorderSelection, moveSelection,
   copyLayerStyle, applyLayerStyle, transformGroup,
 } from '../../electron/design-editor.cjs'
 // 标尺刻度 / 布局网格 / 吸附目标的纯算术都在这里——DOM 测量留在本组件，见 I-45。
@@ -159,6 +159,72 @@ const groupRows = computed(() => {
   }
   return rows
 })
+const layerDrag = ref(null)
+const layerDrop = ref(null)
+let layerDragFromControl = false
+function canDragLayerRow(row) {
+  if (busy.value || modalOpen.value) return false
+  const ids = row.kind === 'group' ? row.group.layerIds : [row.id]
+  const allowed = editableSelection(design.value, ids)
+  return ids.every(id => allowed.includes(id))
+}
+function startLayerDrag(event, row) {
+  if (layerDragFromControl || !active || !canDragLayerRow(row)) { event.preventDefault(); return }
+  finishTextEdit(); endGesture(); finishKeyboardMove()
+  if (row.kind === 'group') {
+    if (!groupChosen(row.group)) selectGroup(row.group)
+  } else if (!selectedIds.value.includes(row.id)) selectLayer(row.layer, {}, true)
+  const allowed = editableSelection(design.value, selectedIds.value)
+  if (selectedIds.value.some(id => !allowed.includes(id))) { event.preventDefault(); return }
+  layerDrag.value = { ids: [...selectedIds.value], session: sessionToken.value }
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-printpress-layers', selectedIds.value.join(','))
+  }
+  layerDrop.value = null
+}
+function endLayerDrag() { layerDrag.value = null; layerDrop.value = null; layerDragFromControl = false }
+function previewLayerDrop(event, row) {
+  layerDrop.value = null
+  const drag = layerDrag.value
+  if (!drag || drag.session !== sessionToken.value || busy.value || modalOpen.value) return
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
+  const rect = event.currentTarget.getBoundingClientRect()
+  const placement = event.clientY < rect.top + rect.height / 2 ? 'above' : 'below'
+  const targetId = row.kind === 'group' ? row.group.layerIds.at(-1) : row.id
+  try {
+    const next = moveSelection(design.value, drag.ids, targetId, placement)
+    if (next.layers.every((layer, index) => layer.id === design.value.layers[index].id)) return
+    const partial = design.value.groups.some(group => group.layerIds.some(id => drag.ids.includes(id)) && !group.layerIds.every(id => drag.ids.includes(id)))
+    const group = row.group
+    let marker = { kind: row.kind, id: row.id }
+    if (group && !partial) {
+      marker = placement === 'above' ? { kind: 'group', id: group.id } : { kind: 'layer', id: group.layerIds[0] }
+    }
+    layerDrop.value = { ...marker, targetId, placement }
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  } catch { /* 保持分组连续；无效投放不改变工程，也不产生撤销记录。 */ }
+}
+function dropLayerRow(event, row) {
+  previewLayerDrop(event, row)
+  const drag = layerDrag.value, target = layerDrop.value
+  endLayerDrag()
+  if (!drag || !target) return
+  commit(doc => Object.assign(doc, moveSelection(doc, drag.ids, target.targetId, target.placement)))
+}
+function layerDropClass(row) {
+  const target = layerDrop.value
+  return target?.kind === row.kind && target.id === row.id ? `layer-drop-${target.placement}` : ''
+}
+function scrollLayerList(event) {
+  if (!layerDrag.value) return
+  const list = event.currentTarget, rect = list.getBoundingClientRect(), edge = 28
+  if (event.clientY < rect.top + edge) list.scrollTop -= Math.ceil((rect.top + edge - event.clientY) / 2)
+  else if (event.clientY > rect.bottom - edge) list.scrollTop += Math.ceil((event.clientY - rect.bottom + edge) / 2)
+}
+function leaveLayerList(event) {
+  if (!event.currentTarget.contains(event.relatedTarget)) layerDrop.value = null
+}
 const history = ref([])
 const future = ref([])
 const error = ref('')
@@ -1003,6 +1069,19 @@ async function cancelPackageExport() {
 const packageSummary = ref(null)
 const packageError = ref('')
 const fontChoices = ref({})
+const psdTextAsImage = ref(false)
+const psdWarningGroups = computed(() => {
+  const summary = packageSummary.value
+  if (!summary || summary.kind !== 'psd') return []
+  const rasterized = new Set(psdTextAsImage.value ? summary.textPreview?.layerIds || [] : [])
+  const groups = new Map()
+  for (const warning of summary.warnings || []) {
+    if (warning.category === 'editable-text' && rasterized.has(warning.layerId)) continue
+    if (!groups.has(warning.message)) groups.set(warning.message, [])
+    groups.get(warning.message).push(warning.layer)
+  }
+  return [...groups].map(([message, layers]) => ({ message, layers }))
+})
 async function importPackage() {
   if (busy.value || packageSummary.value) return
   busy.value = true
@@ -1011,6 +1090,7 @@ async function importPackage() {
     const result = await window.printpress.inspectDesignPackage({})
     if (result.canceled) return
     packageSummary.value = result
+    psdTextAsImage.value = false
     // 默认给「用默认字体栈」，用户可改成替代或提供文件——但不允许留空蒙混过关
     fontChoices.value = Object.fromEntries((result.unresolved || []).map((family) => [family, { action: 'default' }]))
   } catch (err) { fail(err) }
@@ -1019,6 +1099,7 @@ async function importPackage() {
 function closeImport(openIt = false) {
   const summary = packageSummary.value
   packageSummary.value = null
+  psdTextAsImage.value = false
   fontChoices.value = {}
   packageError.value = ''
   if (summary && !openIt) {
@@ -1038,8 +1119,9 @@ async function commitImport(openCopy) {
   packageError.value = ''
   try {
     // Vue 把对象包成 Proxy，Electron IPC structured clone 不接受 Proxy；传普通快照。
-    const ref = await window.printpress.commitDesignPackage({ token: summary.token, fontDecisions: clone(fontChoices.value) })
+    const ref = await window.printpress.commitDesignPackage({ token: summary.token, fontDecisions: clone(fontChoices.value), rasterizeText: summary.kind === 'psd' && psdTextAsImage.value })
     packageSummary.value = null
+    psdTextAsImage.value = false
     fontChoices.value = {}
     await refreshProjects()
     if (openCopy) {
@@ -1156,12 +1238,14 @@ function onPaste(event) {
 }
 
 function onDragEnter() {
+  if (layerDrag.value) return
   if (modalOpen.value) return
   dropDepth += 1
   dropActive.value = true
 }
 
 function onDragOver(event) {
+  if (layerDrag.value) return
   if (modalOpen.value) return
   event.preventDefault() // 不阻止默认行为的话，浏览器会直接把这个文件打开
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
@@ -1174,6 +1258,7 @@ function onDragLeave() {
 
 function onDrop(event) {
   event.preventDefault()
+  if (layerDrag.value) { endLayerDrag(); return }
   dropDepth = 0
   dropActive.value = false
   if (modalOpen.value) return
@@ -1876,6 +1961,10 @@ function finishKeyboardMove() {
 }
 function onKeyDown(event) {
   if (!active || modalOpen.value || event.isComposing) return
+  if (layerDrag.value) {
+    if (event.key === 'Escape') { event.preventDefault(); endLayerDrag() }
+    return
+  }
   if (imageMenu.value) {
     if (event.key === 'Escape') { event.preventDefault(); imageMenu.value = null }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -1937,6 +2026,7 @@ function activate() {
 }
 function deactivate() {
   active = false
+  endLayerDrag()
   imageEdit.value = null; imageMenu.value = null
   ++portraitListRequest
   ++portraitRequest
@@ -2095,14 +2185,15 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <button data-testid="design-group-delete" :disabled="!editable.length" :aria-label="selectedGroup ? '删除整组' : '删除所选'" :title="selectedGroup ? '删除整组' : '删除所选'" @click="removeSelected"><AppIcon name="trash" /></button>
         </div>
         <p v-if="!design.layers.length" class="muted">添加图片、文字或形状开始制作。</p>
-        <div class="layer-list">
+        <p v-if="design.layers.length" class="muted layer-order-hint">拖动图层调整上下顺序；拖动组名移动整组，组内成员可在组内排序。</p>
+        <div class="layer-list" @dragover.prevent="scrollLayerList" @dragleave="leaveLayerList" @drop.prevent="endLayerDrag">
           <template v-for="row in groupRows" :key="`${row.kind}-${row.id}`">
-            <div v-if="row.kind === 'group'" :data-group-id="row.id" class="layer-row group-row" :class="{ selected: groupChosen(row.group) }" @click="selectGroup(row.group, $event)">
+            <div v-if="row.kind === 'group'" :data-group-id="row.id" class="layer-row group-row" :class="[{ selected: groupChosen(row.group), 'layer-dragging': layerDrag && row.group.layerIds.every(id => layerDrag.ids.includes(id)) }, layerDropClass(row)]" :draggable="canDragLayerRow(row)" @pointerdown="layerDragFromControl = !!$event.target.closest('button')" @dragstart.stop="startLayerDrag($event, row)" @dragend.stop="endLayerDrag" @dragover.prevent.stop="previewLayerDrop($event, row); scrollLayerList({ currentTarget: $event.currentTarget.closest('.layer-list'), clientY: $event.clientY })" @drop.prevent.stop="dropLayerRow($event, row)" @click="selectGroup(row.group, $event)">
               <button class="icon-button" data-testid="design-group-visible" :aria-label="groupHas(row.group, 'visible') ? '隐藏分组' : '显示分组'" :title="groupHas(row.group, 'visible') ? '隐藏分组' : '显示分组'" @click.stop="toggleGroup(row.group, 'visible')"><AppIcon :name="groupHas(row.group, 'visible') ? 'eye' : 'eye-off'" :size="16" /></button>
               <span class="layer-name" :title="row.group.name"><AppIcon name="group" :size="14" /> {{ row.group.name }}</span>
               <button class="icon-button" data-testid="design-group-lock" :aria-label="groupHas(row.group, 'locked') ? '解锁分组' : '锁定分组'" :title="groupHas(row.group, 'locked') ? '解锁分组' : '锁定分组'" @click.stop="toggleGroup(row.group, 'locked')"><AppIcon :name="groupHas(row.group, 'locked') ? 'lock' : 'unlock'" :size="16" /></button>
             </div>
-            <div v-else :data-layer-id="row.id" class="layer-row" :class="{ selected: selectedIds.includes(row.id), hidden: !row.layer.visible, 'group-member': !!row.group }" @click="selectLayer(row.layer, $event, true)">
+            <div v-else :data-layer-id="row.id" class="layer-row" :class="[{ selected: selectedIds.includes(row.id), hidden: !row.layer.visible, 'group-member': !!row.group, 'layer-dragging': layerDrag && layerDrag.ids.includes(row.id) }, layerDropClass(row)]" :draggable="canDragLayerRow(row)" @pointerdown="layerDragFromControl = !!$event.target.closest('button')" @dragstart.stop="startLayerDrag($event, row)" @dragend.stop="endLayerDrag" @dragover.prevent.stop="previewLayerDrop($event, row); scrollLayerList({ currentTarget: $event.currentTarget.closest('.layer-list'), clientY: $event.clientY })" @drop.prevent.stop="dropLayerRow($event, row)" @click="selectLayer(row.layer, $event, true)">
               <button class="icon-button" :title="row.layer.visible ? '隐藏图层' : '显示图层'" :aria-label="row.layer.visible ? '隐藏图层' : '显示图层'" @click.stop="toggleLayer(row.layer, 'visible')"><AppIcon :name="row.layer.visible ? 'eye' : 'eye-off'" :size="16" /></button>
               <span class="layer-name" :title="row.layer.name">{{ row.layer.name }}</span>
               <span v-if="row.layer.editorOnly" class="layer-flag" title="仅编辑可见：打印、PDF 与导出的图片里都不会出现">仅编辑</span>
@@ -2451,9 +2542,19 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <p class="muted">导入会新建一份副本（新工程、第 1 版），不会覆盖现有工程，也不改动当前画板。</p>
         <div v-if="packageSummary.kind === 'psd'" class="psd-report" data-testid="design-psd-report">
           <h4>转换报告</h4>
-          <p class="muted">请检查以下差异；导入后可编辑的文字和形状仍可修改。</p>
-          <p v-if="!packageSummary.warnings?.length" class="muted">未发现需要提示的转换。</p>
-          <ul v-else><li v-for="(item, index) in packageSummary.warnings" :key="index"><b>{{ item.layer }}</b>：{{ item.message }}</li></ul>
+          <p class="muted">PSD 可能只记录字体名称；本机没有原字体时，可编辑文字的字形和排版可能变化。</p>
+          <label v-if="packageSummary.textPreview?.available" class="psd-text-option">
+            <input v-model="psdTextAsImage" type="checkbox" :disabled="busy" data-testid="psd-text-as-image">
+            使用 PSD 自带预览保留文字外观（{{ packageSummary.textPreview.available }} 个图层转为图片，不能编辑文字）
+          </label>
+          <p v-if="packageSummary.textPreview?.unavailable && (psdTextAsImage || !packageSummary.textPreview.available)" class="package-font-missing">{{ packageSummary.textPreview.unavailable }} 个文字图层没有可用预览，将保留为可编辑文字；请安装原字体或检查显示效果。</p>
+          <p v-if="psdTextAsImage" class="muted">预览保留 PSD 中的文字像素；图层蒙版、特效等仍可能不同，请检查画面。</p>
+          <p class="muted">请检查以下差异；相同提示已合并，可展开查看涉及的图层。</p>
+          <p v-if="!psdWarningGroups.length" class="muted">未发现需要提示的转换。</p>
+          <ul v-else><li v-for="item in psdWarningGroups" :key="item.message">
+            <template v-if="item.layers.length === 1"><b>{{ item.layers[0] }}</b>：{{ item.message }}</template>
+            <details v-else><summary>{{ item.layers.length }} 个图层：{{ item.message }}</summary><ul><li v-for="(layer, index) in item.layers" :key="index">{{ layer }}</li></ul></details>
+          </li></ul>
         </div>
         <div v-if="packageSummary.fonts?.length" class="package-fonts">
           <h4>字体</h4>
@@ -2598,6 +2699,12 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .layer-list { max-height: 290px; overflow: auto; margin-bottom: 8px; }
 .layer-row { display: flex; align-items: center; min-height: 32px; border: 1px solid transparent; border-bottom-color: var(--line); border-radius: 4px; cursor: pointer; position: relative; }
 .layer-row.selected { border-color: var(--cinnabar); background: var(--cinnabar-soft); } .layer-row.hidden .layer-name { opacity: .45; }
+.layer-row[draggable="true"] .layer-name { cursor: grab; }
+.layer-row.layer-dragging { opacity: .45; }
+.layer-row.layer-drop-above::before, .layer-row.layer-drop-below::after { content: ''; position: absolute; left: 0; right: 0; height: 3px; background: var(--cinnabar); border-radius: 2px; z-index: 2; pointer-events: none; }
+.layer-row.layer-drop-above::before { top: -2px; }
+.layer-row.layer-drop-below::after { bottom: -2px; }
+.layer-order-hint { margin-bottom: 6px; line-height: 1.6; }
 .group-row { margin-top: 6px; background: var(--paper); font-weight: 600; }
 .group-member { margin-left: 12px; border-left-color: var(--line-strong); }
 .layer-name { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
@@ -2722,6 +2829,8 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .psd-report { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
 .psd-report h4 { margin: 0; }
 .psd-report ul { max-height: 220px; overflow: auto; margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.7; color: var(--ink-2); }
+.psd-report .psd-text-option { display: flex; justify-content: flex-start; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.6; }
+.psd-text-option input { flex: none; margin-top: 3px; }
 .package-fonts { margin: 14px 0 0; }
 .package-fonts h4 { font-size: 12px; margin: 0 0 8px; color: var(--ink-2); }
 .package-font-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; padding: 6px 0; border-top: 1px solid var(--line); }

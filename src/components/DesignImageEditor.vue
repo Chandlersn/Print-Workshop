@@ -26,7 +26,7 @@ const pendingMarks = computed(() => {
 const draggingRect = ref(false)
 let disposed = false, repairRevision = 0, applyAfterPreview = false, refreshRequested = false, encoding = false
 const rect = ref({ x: props.layer.crop.x * props.asset.width, y: props.layer.crop.y * props.asset.height, w: props.layer.crop.w * props.asset.width, h: props.layer.crop.h * props.asset.height })
-const zoom = ref(1), size = ref(Math.min(20, Math.max(props.asset.width, props.asset.height)))
+const zoom = ref(1), size = ref(Math.min(8, Math.max(props.asset.width, props.asset.height)))
 const cursor = ref(null), error = ref(''), loaded = ref(false)
 const viewport = ref({ w: window.innerWidth, h: window.innerHeight })
 const fit = computed(() => Math.min(1, Math.max(1, viewport.value.w) / props.asset.width, Math.max(1, viewport.value.h) / props.asset.height))
@@ -297,8 +297,8 @@ onBeforeUnmount(() => { disposed = true; cancelDrag(); invalidatePreview(); obse
           <button data-testid="image-tool-rect" :aria-pressed="tool === 'rect'" title="框选矩形区域擦除" @click="changeTool('rect')"><AppIcon name="rect" /> 矩形</button>
         </div>
         <button v-if="tool === 'crop'" :aria-pressed="redraw" title="重新绘制裁剪框" @click="redraw = true"><AppIcon name="rect" /> 重画</button>
-        <label v-if="tool === 'brush'">画笔直径 px <input v-model="size" data-testid="image-brush-size" type="number" min="1" :max="Math.max(asset.width, asset.height)" @change="size = brushDiameter"></label>
-        <label>缩放 <select v-model.number="zoom" data-testid="image-edit-zoom"><option :value="1">适合窗口</option><option :value="2">放大 2 倍</option><option :value="4">放大 4 倍</option><option :value="8">放大 8 倍</option></select></label>
+        <label v-if="tool === 'brush'">画笔直径 px <input v-model="size" data-testid="image-brush-size" type="number" min="1" step="1" :max="Math.max(asset.width, asset.height)" @change="size = brushDiameter"></label>
+        <label>缩放 <select v-model.number="zoom" data-testid="image-edit-zoom"><option :value="1">适合窗口</option><option :value="2">放大 2 倍</option><option :value="4">放大 4 倍</option><option :value="8">放大 8 倍</option><option :value="16">放大 16 倍</option></select></label>
       </div>
       <p class="hint">原图 {{ asset.width }} × {{ asset.height }} px（按原图方向编辑） · {{ tool === 'crop' ? '拖动裁剪框，按 Enter 确认；Esc 取消。' : '拖动擦除，松开鼠标自动修复；Enter 应用，Esc 取消。' }}</p>
       <div ref="imageViewport" class="image-viewport">
