@@ -83,6 +83,12 @@ async function main() {
   const file = path.join(output, 'grid-cell-300.png')
   await printer.exportPng(html(grid, '.cell'), file, { widthMm: 210, heightMm: 297, dpi: 300, cropToCell: true })
   inspect(file, Math.ceil(85 / 25.4 * 300), Math.ceil(54 / 25.4 * 300))
+  for (const [format, ext] of [['jpeg', 'jpg'], ['webp', 'webp']]) {
+    const target = path.join(output, `grid-cell-300.${ext}`)
+    await printer.exportPng(html(grid, '.cell'), target, { widthMm: 210, heightMm: 297, dpi: 300, cropToCell: true, format, quality: 85 })
+    const bytes = fs.readFileSync(target), size = mod('images').imageSizeFromBuffer(bytes)
+    check(size?.width === Math.ceil(85 / 25.4 * 300) && size?.height === Math.ceil(54 / 25.4 * 300), `${format} grid exports the cell at exact requested dimensions`)
+  }
 
   const dataset = mod('dataset'), templates = mod('templates'), api = mod('api'), print = mod('print')
   const csv = path.join(temp, 'review.csv')
@@ -124,6 +130,8 @@ async function main() {
   check(dataset.listDatasets().find(d => d.id === ds.id).printCount === 1, 'partial PNG export does not mark the entire dataset printed')
   inspect(all.files[0], Math.ceil(210 / 25.4 * 150), Math.ceil(297 / 25.4 * 150), false)
   const firstBytes = fs.readFileSync(all.files[0])
+  const phys = firstBytes.indexOf(Buffer.from('pHYs'))
+  check(phys > 0 && firstBytes.readUInt32BE(phys + 4) === Math.round(150 / 0.0254), 'PNG records chosen physical DPI in pHYs')
   const collision = await api.call('print:exportImages', { datasetId: ds.id, templateId: tpl.id, rows: [0], field1: '编号', field2: '姓名', outputDpi: 150 },
     { allowWrite: true, printer, dialog: { openDirectory: async () => ({ filePaths: [path.dirname(all.files[0])] }) } })
   check(path.basename(collision.files[0]) === '1_Review1 (2).png' && fs.readFileSync(all.files[0]).equals(firstBytes), 'existing files get duplicate suffix and original bytes stay unchanged')
@@ -205,6 +213,7 @@ async function main() {
   check(await evaluate(`!document.querySelector('.history-modal')`), 'reprint closes history before opening validation')
   await evaluate(`Array.from(document.querySelectorAll('.modal-actions button')).find(el=>el.textContent==='返回补全').click()`)
   await waitFor(`!!document.querySelector('.preview-frame') && !!document.querySelector('.range-count')`, 'print preview')
+  dataset.updateCell(ds.id, 0, '姓名', 'Review1')
   const previewBefore = await evaluate(`document.querySelector('.preview-wrap').getBoundingClientRect().top`)
   await evaluate(`document.querySelector('.history-trigger').click()`)
   await waitFor(`!!document.querySelector('.history-modal')`, 'history over preview')
@@ -247,6 +256,60 @@ async function main() {
     const repeated = print.listJobs()[0]
     check(repeated.mode === 'images' && repeated.recordCount === 1 && repeated.outputDpi === 150 && repeated.imageNameFields.join(',') === '编号,姓名',
       'PNG history reprint preserves PNG format, naming fields, DPI and partial scope')
+  } finally { dialog.showOpenDialog = originalDialog }
+  try {
+    async function pickImageFormat(label) {
+      await evaluate(`document.querySelector('[data-testid="print-image-format"] .cs-trigger').click()`)
+      await waitFor(`!!document.querySelector('[data-testid="print-image-format"] .cs-option')`, 'image format menu')
+      await evaluate(`Array.from(document.querySelectorAll('[data-testid="print-image-format"] .cs-option')).find(el=>el.textContent.trim()===${JSON.stringify(label)}).click()`)
+    }
+    await pickImageFormat('JPG / JPEG')
+    await waitFor(`document.querySelector('.toolbar-actions button').textContent.includes('JPG')`, 'JPG selection reflected in export button')
+    await evaluate(`(() => {const el=document.querySelector('[data-testid="print-image-quality"]');el.value='73';el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));})()`)
+    const jpegDir = path.join(output, 'ui-jpeg')
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [jpegDir] })
+    await evaluate(`document.querySelector('.toolbar-actions button').click()`)
+    await waitFor(`document.querySelector('.toast')?.textContent.includes('已导出 1 张 JPG')`, 'UI exports JPG selected rows')
+    const jpegJob = print.listJobs()[0]
+    check(jpegJob.imageFormat === 'jpeg' && jpegJob.imageQuality === 73 && jpegJob.partial, 'JPG history retains format, quality and scope')
+    const jpegPath = path.join(jpegDir, fs.readdirSync(jpegDir).find(f => f.endsWith('.jpg')))
+    const jpegBytes = fs.readFileSync(jpegPath), jpegSize = mod('images').imageSizeFromBuffer(jpegBytes)
+    check(jpegBytes[0] === 0xff && jpegBytes[1] === 0xd8 && jpegSize.width === Math.ceil(210 / 25.4 * 150) && jpegSize.height === Math.ceil(297 / 25.4 * 150), 'JPG extension, real encoding and dimensions match')
+    const jpegPixel = pixel(nativeImage.createFromBuffer(jpegBytes), Math.floor(jpegSize.width * .05), Math.floor(jpegSize.height * .05))
+    check(jpegPixel[2] > 220 && jpegPixel[1] < 35 && jpegPixel[0] < 35 && jpegPixel[3] === 255, 'JPG preserves red artwork and opaque background')
+    check(jpegBytes.toString('latin1', 6, 11) === 'JFIF\0' && jpegBytes[13] === 1 && jpegBytes.readUInt16BE(14) === 150 && jpegBytes.readUInt16BE(16) === 150, 'JPG records chosen DPI in JFIF')
+    const collisionJpeg = await api.call('print:exportImages', { datasetId: ds.id, templateId: tpl.id, rows: [1], field1: '编号', field2: '姓名', outputDpi: 150, format: 'jpg', quality: 73, outputDir: jpegDir }, { allowWrite: true, printer, emit: () => {} })
+    check(collisionJpeg.files[0].endsWith(' (2).jpg') && fs.readFileSync(jpegPath).equals(jpegBytes), 'JPG collision never overwrites an existing image')
+    await pickImageFormat('PNG')
+    check(await evaluate(`!document.querySelector('[data-testid="print-image-quality"]')`), 'lossless PNG has no quality control')
+    await evaluate(`document.querySelector('.history-trigger').click()`)
+    await waitFor(`Array.from(document.querySelectorAll('.history-modal tbody tr')).some(row=>row.textContent.includes('导出 JPG'))`, 'JPG appears in history')
+    const jpegReprintDir = path.join(output, 'ui-jpeg-reprint')
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [jpegReprintDir] })
+    await evaluate(`(() => {const row=[...document.querySelectorAll('.history-modal tbody tr')].find(el=>el.textContent.includes('导出 JPG'));[...row.querySelectorAll('button')].find(el=>el.textContent==='重打').click()})()`)
+    await waitFor(`!document.querySelector('.history-modal') && document.querySelector('.toast')?.textContent.includes('已导出 1 张 JPG')`, 'JPG history reprint')
+    for (let i = 0; i < 200 && (!fs.existsSync(jpegReprintDir) || fs.readdirSync(jpegReprintDir).length === 0); i++) await new Promise(r => setTimeout(r, 50))
+    check(fs.existsSync(jpegReprintDir) && fs.readdirSync(jpegReprintDir).some(f => f.endsWith('.jpg')), 'JPG reprint writes a new JPG file')
+    check(print.listJobs()[0].imageFormat === 'jpeg' && print.listJobs()[0].imageQuality === 73, 'reprint restores JPG and original quality')
+    await pickImageFormat('WEBP')
+    check(await evaluate(`document.querySelector('.format-note')?.textContent.includes('不写入 DPI') && Number(document.querySelector('[data-testid="print-image-quality"]').value)===80`), 'WebP explains DPI metadata and uses its default quality')
+    const webpDir = path.join(output, 'ui-webp')
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [webpDir] })
+    await evaluate(`document.querySelector('.toolbar-actions button').click()`)
+    await waitFor(`document.querySelector('.toast')?.textContent.includes('已导出 1 张 WEBP')`, 'UI exports WebP selected rows')
+    const webpPath = path.join(webpDir, fs.readdirSync(webpDir).find(f => f.endsWith('.webp')))
+    const webpBytes = fs.readFileSync(webpPath), webpSize = mod('images').imageSizeFromBuffer(webpBytes)
+    check(webpBytes.toString('ascii', 0, 4) === 'RIFF' && webpBytes.toString('ascii', 8, 12) === 'WEBP' && webpSize.width === jpegSize.width && webpSize.height === jpegSize.height, 'WebP has real encoding and selected output dimensions')
+    const webpPixel = await evaluate(`new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=img.width;c.height=img.height;const ctx=c.getContext('2d');ctx.drawImage(img,0,0);resolve([...ctx.getImageData(Math.floor(img.width*.05),Math.floor(img.height*.05),1,1).data])};img.onerror=()=>reject(Error('WebP decode failed'));img.src=${JSON.stringify(`data:image/webp;base64,${webpBytes.toString('base64')}`)}})`)
+    check(webpPixel[0] > 220 && webpPixel[1] < 35 && webpPixel[2] < 35 && webpPixel[3] === 255, 'WebP decodes to the intended red artwork and opaque background')
+    check(print.listJobs()[0].imageFormat === 'webp' && print.listJobs()[0].imageQuality === 80, 'WebP history stores the selected format and quality')
+    await assert.rejects(api.call('print:exportImages', { datasetId: ds.id, templateId: tpl.id, rows: [1], field1: '编号', field2: '姓名', outputDir: webpDir, format: 'bmp' }, { allowWrite: true, printer }), /不支持的出图格式/)
+    await assert.rejects(api.call('print:exportImages', { datasetId: ds.id, templateId: tpl.id, rows: [1], field1: '编号', field2: '姓名', outputDir: webpDir, format: 'jpg', quality: 101 }, { allowWrite: true, printer }), /质量/)
+    await assert.rejects(api.call('print:exportImages', { datasetId: ds.id, templateId: tpl.id, rows: [1], field1: '编号', field2: '姓名', outputDir: path.join(output, 'wrong-format'), format: 'jpg' }, {
+      allowWrite: true, printer: { exportPng: async (_html, target) => { fs.writeFileSync(target, firstBytes); return { path: target } } }, emit: () => {},
+    }), /图片未成功写入磁盘/)
+    check(print.listJobs()[0].status === 'failed' && print.listJobs()[0].completedCount === 0, 'incorrect image signature records failure instead of success')
+    check(true, 'unsupported formats and invalid quality are rejected')
   } finally { dialog.showOpenDialog = originalDialog }
   await evaluate(`document.querySelectorAll('.nav-label')[3].click()`)
   await waitFor(`!!document.querySelector('.tpl-tabs')`, 'template page')

@@ -214,8 +214,11 @@ async function exportPdf(html, savePath, { partition } = {}) {
   return { ok: true, path: savePath, bytes: buf.length }
 }
 
-/** Render one print layout to a PNG at the requested physical resolution. */
-async function exportPng(html, savePath, { widthMm, heightMm, dpi = 300, cropToCell = false, partition } = {}) {
+/** Render one print layout to a raster image at the requested physical resolution. */
+async function exportPng(html, savePath, { widthMm, heightMm, dpi = 300, cropToCell = false, partition, format, quality } = {}) {
+  const { FORMATS, normalizeFormat, normalizeQuality } = require('./export-formats.cjs')
+  const kind = normalizeFormat(format)
+  const level = normalizeQuality(quality, kind)
   if (!Number.isFinite(widthMm) || !Number.isFinite(heightMm) || widthMm <= 0 || heightMm <= 0) {
     throw new Error('图片尺寸无效')
   }
@@ -265,24 +268,34 @@ async function exportPng(html, savePath, { widthMm, heightMm, dpi = 300, cropToC
     const rect = bounds.target
     const outputWidth = cropToCell ? Math.ceil(rect.width * scale) : width
     const outputHeight = cropToCell ? Math.ceil(rect.height * scale) : height
-    const screenshot = await debug.sendCommand('Page.captureScreenshot', {
-      format: 'png', fromSurface: true, captureBeyondViewport: true,
-      clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale },
-    })
+    const capture = { format: kind, fromSurface: true, captureBeyondViewport: true,
+      clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale } }
+    if (level !== null) capture.quality = level
+    const screenshot = await debug.sendCommand('Page.captureScreenshot', capture)
     let bytes = Buffer.from(screenshot.data, 'base64')
     let actual = require('./images.cjs').imageSizeFromBuffer(bytes)
-    if (!actual || actual.width <= 0 || actual.height <= 0) throw new Error('图片渲染失败：PNG 尺寸无效')
+    if (!actual || actual.width <= 0 || actual.height <= 0) throw new Error('图片渲染失败：图片尺寸无效')
     // Chromium rounds fractional CSS millimetres differently across versions.
     // Normalize the final bitmap so every exported page has the requested pixels.
     if (actual.width !== outputWidth || actual.height !== outputHeight) {
-      bytes = nativeImage.createFromBuffer(bytes).resize({
-        width: outputWidth, height: outputHeight, quality: 'best',
-      }).toPNG()
+      // Capture PNG for resizing, since nativeImage cannot reliably decode WebP.
+      const pngRequest = { format: 'png', fromSurface: true, captureBeyondViewport: true, clip: capture.clip }
+      const png = kind === 'png' ? bytes : Buffer.from((await debug.sendCommand('Page.captureScreenshot', pngRequest)).data, 'base64')
+      const resized = nativeImage.createFromBuffer(png).resize({ width: outputWidth, height: outputHeight, quality: 'best' })
+      if (kind === 'jpeg') bytes = resized.toJPEG(level)
+      else if (kind === 'png') bytes = resized.toPNG()
+      else {
+        const pngData = resized.toPNG().toString('base64')
+        const encoded = await win.webContents.executeJavaScript(`new Promise((resolve, reject) => { const image = new Image(); image.onload = () => { const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height; canvas.getContext('2d').drawImage(image, 0, 0); const result = canvas.toDataURL('image/webp', ${level / 100}); result.startsWith('data:image/webp;base64,') ? resolve(result.slice(result.indexOf(',') + 1)) : reject(new Error('WebP 编码失败')); }; image.onerror = () => reject(new Error('WebP 编码失败')); image.src = 'data:image/png;base64,${pngData}'; })`)
+        bytes = Buffer.from(encoded, 'base64')
+      }
       actual = require('./images.cjs').imageSizeFromBuffer(bytes)
     }
     if (!actual || actual.width !== outputWidth || actual.height !== outputHeight) throw new Error(`图片像素尺寸无法校正为 ${outputWidth}×${outputHeight}px`)
+    if (FORMATS[kind].dpi === 'phys') bytes = require('./design-export.cjs').pngWithDpi(bytes, dpi)
+    else if (FORMATS[kind].dpi === 'jfif') bytes = require('./design-export.cjs').jpegWithDpi(bytes, dpi)
     fs.writeFileSync(savePath, bytes)
-    return { path: savePath, bytes: bytes.length, width: actual.width, height: actual.height }
+    return { path: savePath, bytes: bytes.length, width: actual.width, height: actual.height, format: kind, quality: level }
   } finally {
     if (debuggerAttached && debug.isAttached()) debug.detach()
     win.destroy()

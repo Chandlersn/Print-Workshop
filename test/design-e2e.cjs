@@ -484,12 +484,16 @@ async function main() {
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(OUTPUT, 'source.jpg')] })
   try {
     await click('[data-testid="design-add-image"]')
-    await waitFor(`Boolean(document.querySelector('[data-testid="design-crop-w"]'))`, '导入图片并展示裁切属性')
+    await waitFor(`Boolean(document.querySelector('[data-testid="design-image-crop"]'))`, '导入图片并展示裁剪入口')
   } finally { dialog.showOpenDialog = originalDialog }
-  await fill('[data-testid="design-crop-w"]', 50)
-  await fill('[data-testid="design-crop-h"]', 50)
-  await fill('[data-testid="design-crop-x"]', 25)
-  await fill('[data-testid="design-crop-y"]', 25)
+  await click('[data-testid="design-image-crop"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="image-edit-apply"]:not(:disabled)'))`, '裁剪窗口加载原图')
+  await fill('[data-testid="image-selection-w"]', 512)
+  await fill('[data-testid="image-selection-h"]', 384)
+  await fill('[data-testid="image-selection-x"]', 256)
+  await fill('[data-testid="image-selection-y"]', 192)
+  await click('[data-testid="image-edit-apply"]')
+  await waitFor(`!document.querySelector('[data-testid="design-image-editor"]')`, '应用裁剪')
   await clickText('.inspector button', '水平翻转')
   const widthBeforeResize = await evaluate(`Number(document.querySelector('[data-testid="design-layer-w"]').value)`)
   await drag('.resize-handle', 24, 18)
@@ -508,7 +512,10 @@ async function main() {
   await click('.cd-btn.danger')
   await waitFor(`document.querySelector('[data-testid="design-name"]')?.value==='真实界面保存验收'`, '重开已保存工程')
   await click(`[data-layer-id="${croppedLayer.id}"]`)
-  ok(await evaluate(`document.querySelector('[data-testid="design-crop-x"]').value==='25' && document.querySelector('[data-testid="design-crop-w"]').value==='50'`), '重开工程恢复裁切属性')
+  await click('[data-testid="design-image-crop"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="image-edit-apply"]:not(:disabled)'))`, '重开裁剪窗口')
+  ok(await evaluate(`document.querySelector('[data-testid="image-selection-x"]').value==='256' && document.querySelector('[data-testid="image-selection-w"]').value==='512'`), '重开工程恢复裁切属性')
+  await click('[aria-label="关闭图片编辑"]')
 
   // I-43：「选 1 寸」必须是「改尺寸 + 改裁切」的同一个动作——只改尺寸，打印出来就是一张被拉长的脸。
   const sizePresetValues = await evaluate(`[...document.querySelectorAll('[data-testid="design-size-preset"] option')].map(o=>o.value)`)
@@ -534,8 +541,11 @@ async function main() {
   await pressUndo()
   // 撤销回退到保存态后草稿会被清掉（不再是「未保存」），所以这一条必须看 DOM 而不是草稿。
   await waitFor(`Number(document.querySelector('[data-testid="design-layer-w"]').value) === ${croppedLayer.w}`, '撤销可完整回退尺寸')
-  ok(await evaluate(`document.querySelector('[data-testid="design-crop-x"]').value==='25' && document.querySelector('[data-testid="design-crop-w"]').value==='50'`),
+  await click('[data-testid="design-image-crop"]')
+  await waitFor(`Boolean(document.querySelector('[data-testid="image-edit-apply"]:not(:disabled)'))`, '检查撤销后的裁剪')
+  ok(await evaluate(`document.querySelector('[data-testid="image-selection-x"]').value==='256' && document.querySelector('[data-testid="image-selection-w"]').value==='512'`),
     '撤销连带把裁切也回退（尺寸与裁切是同一个动作，撤销也必须是）')
+  await click('[aria-label="关闭图片编辑"]')
 
   // Phase 2 uses actual controls and pointer input, then reopens the persisted schema.
   const titleLayer = cropped.layers.find(layer => layer.type === 'text')
@@ -1021,6 +1031,7 @@ async function main() {
    */
   await click(`[data-layer-id="${croppedLayer.id}"]`)
   await waitFor(`Boolean(document.querySelector('[data-testid="design-adjust-grayscale"]'))`, '选中图片图层后显示颜色调整滑杆')
+  await click('[data-testid="design-color-adjust"] summary')
   const adjustSliders = await evaluate(`Object.fromEntries([...document.querySelectorAll('[data-testid^="design-adjust-"]')].filter(el=>el.type==='range').map(el=>[el.dataset.testid,{max:el.max,value:el.value}]))`)
   ok(adjustSliders['design-adjust-grayscale']?.max === '100' && adjustSliders['design-adjust-invert']?.max === '100'
     && adjustSliders['design-adjust-brightness']?.max === '300' && adjustSliders['design-adjust-saturate']?.max === '300',
@@ -1058,6 +1069,11 @@ async function main() {
   ok(true, `颜色调整以 schema 口径落盘（${JSON.stringify(adjustLayer.adjust)}）`)
   ok(adjustSaved.schemaVersion === 7, `颜色调整不会把已经是 7 的工程降回 6（版本号 Math.max 语义，实得 ${adjustSaved.schemaVersion}）`)
 
+  await click('[aria-label="重置亮度"]')
+  await waitFor(`(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust?.brightness === 1`, '单项复位亮度')
+  ok(await evaluate(`(${draftDesign}).layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)}).adjust.grayscale === 0.5`), '单项复位保留其他颜色调整')
+  await pressUndo()
+  await waitFor(`document.querySelector('[data-testid="design-adjust-brightness"]').value === '120'`, '撤销单项复位')
   await click('[data-testid="design-adjust-reset"]')
   await waitFor(`!(${draftDesign})?.layers.find(l=>l.id===${JSON.stringify(croppedLayer.id)})?.adjust`, '恢复原始颜色')
   ok(true, '「恢复原始颜色」把整块 adjust 删掉，而不是把各项写回默认值（渲染侧少一个 filter）')

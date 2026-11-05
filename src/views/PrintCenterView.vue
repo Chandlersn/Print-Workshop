@@ -7,11 +7,13 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import PageHeader from '../components/PageHeader.vue'
+import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { resolveReprintScope, layoutFallbackText, filterRowIndexes } from '../lib/print-scope.cjs'
 import { formatBytes } from '../lib/format-bytes.cjs'
 import { toUserMessage } from '../../electron/user-error.cjs'
+import { FORMATS } from '../../electron/export-formats.cjs'
 
 const datasets = ref([])
 const templates = ref([])
@@ -144,6 +146,11 @@ const selRowsMeta = ref(null) // { dsId, rowCount }：行数漂移守卫比对�
 const dsDetail = ref(null)    // 当前数据集完整数据（行选择面板用）
 const imageNameField1 = ref('')
 const imageNameField2 = ref('')
+const imageFormat = ref('png')
+const imageQuality = ref(90)
+const imageFormatOptions = Object.keys(FORMATS).map(value => ({ value, label: value === 'jpeg' ? 'JPG / JPEG' : value.toUpperCase() }))
+const imageFormatLabel = computed(() => imageFormat.value === 'jpeg' ? 'JPG' : imageFormat.value.toUpperCase())
+watch(imageFormat, value => { imageQuality.value = FORMATS[value]?.quality ?? 90 }, { flush: 'sync' })
 const imageNameFieldOptions = computed(() => (dsDetail.value?.columns || []).map(column => ({
   value: column.key, label: column.label || column.name || column.key,
 })))
@@ -597,10 +604,11 @@ async function exportIndividualImages() {
     const r = await window.printpress.printExportImages({
       ...buildPayload(), field1: imageNameField1.value, field2: imageNameField2.value,
       outputDpi: outputDpi.value === 'original' ? 300 : Number(outputDpi.value),
+      format: imageFormat.value, quality: FORMATS[imageFormat.value].quality === null ? undefined : imageQuality.value,
       preflightFingerprint: photo.fingerprint, jobKey,
     })
     if (r.canceled) say('已取消选择保存文件夹')
-    else say(`已导出 ${r.count} 张 PNG 图片（${r.dpi} dpi），保存到：${r.directory}`)
+    else say(`已导出 ${r.count} 张 ${r.format === 'jpeg' ? 'JPG' : String(r.format || 'png').toUpperCase()} 图片（${r.dpi} dpi），保存到：${r.directory}`)
   } catch (err) {
     say(`图片导出失败：${toUserMessage(err)}`)
   } finally {
@@ -836,6 +844,8 @@ async function reprint(job) {
       imageNameField2.value = job.imageNameFields[1]
     }
     outputDpi.value = String(job.outputDpi || 300)
+    imageFormat.value = Object.hasOwn(FORMATS, job.imageFormat) ? job.imageFormat : 'png'
+    if (FORMATS[imageFormat.value].quality !== null && Number.isInteger(job.imageQuality) && job.imageQuality >= 1 && job.imageQuality <= 100) imageQuality.value = job.imageQuality
     await nextTick()
     await exportIndividualImages()
     return
@@ -847,7 +857,7 @@ function fmtTime(iso) {
   return String(iso || '').replace('T', ' ').slice(0, 19)
 }
 
-const modeLabel = { pdf: '导出 PDF', print: '打印', images: '导出 PNG', grouped: '分组导出（已下线）' }
+const modeLabel = { pdf: '导出 PDF', print: '打印', images: '导出图片', grouped: '分组导出（已下线）' }
 const statusLabel = { ok: '完成', failed: '失败', canceled: '取消' }
 
 onMounted(refreshAll)
@@ -855,9 +865,9 @@ onMounted(refreshAll)
 
 <template>
   <section class="page">
-    <PageHeader title="打印中心" description="选模板 → 预览确认 → 导出 PDF、逐条保存 PNG 或直接送打印机。">
+    <PageHeader title="打印中心" description="选模板 → 预览确认 → 导出 PDF、逐条保存图片或直接送打印机。">
       <template #actions>
-        <button class="btn btn-mini history-trigger" @click="historyOpen = true">打印历史<span>{{ jobs.length }}</span></button>
+        <button class="btn btn-mini history-trigger" @click="historyOpen = true"><AppIcon name="history" /> 打印历史<span>{{ jobs.length }}</span></button>
       </template>
     </PageHeader>
 
@@ -886,6 +896,11 @@ onMounted(refreshAll)
           <span class="tb-label">出片分辨率</span>
           <CustomSelect v-model="outputDpi" :disabled="busy" :options="outputDpiOptions" width="170px" />
         </div>
+        <div class="toolbar-control" data-testid="print-image-format">
+          <span class="tb-label">图片格式</span>
+          <CustomSelect v-model="imageFormat" :disabled="busy" :options="imageFormatOptions" width="130px" />
+        </div>
+        <label v-if="FORMATS[imageFormat].quality !== null" class="toolbar-control image-quality">图片质量 <input v-model.number="imageQuality" data-testid="print-image-quality" :disabled="busy" type="number" min="1" max="100" step="1" aria-label="图片质量（1到100）"></label>
         <div class="toolbar-control toolbar-name-control">
           <span class="tb-label">图片名称</span>
           <div class="toolbar-name-fields">
@@ -895,11 +910,12 @@ onMounted(refreshAll)
           </div>
         </div>
         <div class="toolbar-actions" aria-label="出片操作">
-          <button class="btn" :disabled="!ready || busy || mismatched || imageNameFieldOptions.length < 2" @click="exportIndividualImages">{{ busy && activeJobKey.startsWith('images-') ? '正在导出图片…' : '逐条导出 PNG' }}</button>
-          <button class="btn" :disabled="!ready || busy || mismatched" @click="runAction('print')">直接打印</button>
-          <button class="btn btn-primary" :disabled="!ready || busy || mismatched" @click="runAction('pdf')">导出 PDF</button>
+          <button class="btn" :disabled="!ready || busy || mismatched || imageNameFieldOptions.length < 2" @click="exportIndividualImages"><AppIcon name="image" /> {{ busy && activeJobKey.startsWith('images-') ? '正在导出图片…' : `逐条导出 ${imageFormatLabel}` }}</button>
+          <button class="btn" :disabled="!ready || busy || mismatched" @click="runAction('print')"><AppIcon name="print" /> 直接打印</button>
+          <button class="btn btn-primary" :disabled="!ready || busy || mismatched" @click="runAction('pdf')"><AppIcon name="download" /> 导出 PDF</button>
         </div>
       </div>
+      <p v-if="imageFormat === 'webp' || outputDpi === 'original'" class="format-note"><span v-if="outputDpi === 'original'">逐条图片按 300 DPI 出图；原图选项用于 PDF 和打印。 </span><span v-if="imageFormat === 'webp'">WebP 文件不写入 DPI 元数据，像素尺寸仍按出图分辨率计算。</span></p>
     </div>
 
     <!-- 模板绑定的数据集已被删除：结构断链，给可读出路而非让预览静默失败 -->
@@ -1090,7 +1106,7 @@ onMounted(refreshAll)
                 <td>{{ j.templateName }}</td>
                 <td>{{ j.datasetName }}</td>
                 <td>
-                  {{ modeLabel[j.mode] || j.mode }}
+                  {{ j.mode === 'images' ? `导出 ${j.imageFormat === 'jpeg' ? 'JPG' : String(j.imageFormat || 'png').toUpperCase()}` : (modeLabel[j.mode] || j.mode) }}
                   <span v-if="j.partial" class="partial-tag" :title="`仅出片 ${j.recordCount} 行，数据集共 ${j.totalRows} 行；不影响「已打」状态`">部分 {{ j.recordCount }}/{{ j.totalRows }}</span>
                 </td>
                 <td :title="j.mode === 'images' && j.status === 'failed' ? `已保存 ${j.completedCount || 0} 张，计划 ${j.recordCount} 张` : ''">
@@ -1314,6 +1330,9 @@ onMounted(refreshAll)
 
 .toolbar-name-plus { color: var(--stone); font-size: 13px; }
 .toolbar-actions { margin-left: auto; }
+.image-quality { font-size: 13px; color: var(--stone); }
+.image-quality input { width: 60px; box-sizing: border-box; padding: 6px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--ink); background: var(--paper-card); }
+.format-note { margin: 0; color: var(--stone); font-size: 12px; }
 
 .tb-label {
   font-size: 13px;

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
+import AppIcon from '../components/AppIcon.vue'
 import PhotoImportPanel from '../components/PhotoImportPanel.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { activeDataset, rememberDataset } from '../lib/active-dataset.js'
@@ -39,7 +40,7 @@ onMounted(async () => {
   <section class="photo-library-view">
     <PageHeader title="变量照片库" description="自动跟随数据页的配图选择，在这里选择照片文件夹即可。">
       <template #actions>
-        <button class="btn-ghost" @click="emit('navigate', 'designer')">前往底图制作 → 添加变量图</button>
+        <button class="btn-ghost" @click="emit('navigate', 'designer')"><AppIcon name="portrait" /> 前往底图制作 → 添加变量图</button>
       </template>
     </PageHeader>
     <p v-if="loading" role="status">正在读取当前配图名单…</p>

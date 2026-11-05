@@ -961,18 +961,19 @@ const OPS = {
   'design:packageInspect': {
     write: true,
     gui: 'dialog',
-    params: { filePath: { required: false, desc: '.ppdesign 绝对路径；省略则显示打开对话框' } },
+    params: { filePath: { required: false, desc: '.ppdesign、.psd 或 .psb 绝对路径；省略则显示打开对话框' } },
     run: async (p, ctx) => {
       let filePath = p.filePath
       if (!filePath) {
         if (!ctx.dialog) throw guiRequired('design:packageInspect', '打开对话框（请用 filePath 指定包路径）')
         const result = await ctx.dialog.openFile({
           title: '导入工程包', properties: ['openFile'],
-          filters: [{ name: '批印坊工程包', extensions: ['ppdesign'] }],
+          filters: [{ name: '工程与 Photoshop 文件', extensions: ['ppdesign', 'psd', 'psb'] }, { name: '批印坊工程包', extensions: ['ppdesign'] }, { name: 'Photoshop 文件', extensions: ['psd', 'psb'] }],
         })
         if (result.canceled || !result.filePaths || !result.filePaths.length) return { canceled: true }
         filePath = result.filePaths[0]
       }
+      if (/\.(psd|psb)$/i.test(filePath)) return require('./psd-import.cjs').inspect(filePath)
       designPackage.purgeStaging()
       designPackage.recoverPendingTransactions()
       const summary = await designPackage.inspectPackage(filePath)
@@ -987,13 +988,13 @@ const OPS = {
       fontDecisions: { required: false, desc: '{ 原字体名: { action: substitute|default|file, family?, filePath? } }' },
       name: { required: false, desc: '导入后的工程名；默认用包里的名字' },
     },
-    run: (p) => designPackage.commitPackage(p.token, { fontDecisions: p.fontDecisions, name: p.name }),
+    run: (p) => String(p.token || '').startsWith('psd_') ? require('./psd-import.cjs').commit(p.token) : designPackage.commitPackage(p.token, { fontDecisions: p.fontDecisions, name: p.name }),
   },
 
   'design:packageCancel': {
     write: true,
     params: { token: { required: true, desc: '检查令牌' } },
-    run: (p) => designPackage.cancelPackage(p.token),
+    run: (p) => String(p.token || '').startsWith('psd_') ? require('./psd-import.cjs').cancel(p.token) : designPackage.cancelPackage(p.token),
   },
 
   /** 缺失字体时让用户挑一个字体文件补上（走同一套冲突规则，绝不覆盖本机已有字体） */
@@ -1412,11 +1413,18 @@ const OPS = {
       field1: { required: true, desc: '图片文件名字段一' },
       field2: { required: true, desc: '图片文件名字段二' },
       outputDpi: { required: false, desc: '图片分辨率 150/300/600；缺省 300' },
+      format: { required: false, desc: '图片格式 png、jpg/jpeg 或 webp；缺省 png' },
+      quality: { required: false, desc: 'JPEG/WebP 质量 1~100；缺省使用格式默认值' },
       allowIncomplete: { required: false, desc: 'true 时跳过「关键字段为空即拒出」的校验；缺省 false（默认拦截）' },
       preflightFingerprint: { required: false, desc: '页面照片预检快照' },
       jobKey: { required: false, desc: '进度关联任务键' },
     },
     run: async (p, ctx) => {
+      const { FORMATS, normalizeFormat, normalizeQuality } = require('./export-formats.cjs')
+      const format = normalizeFormat(p.format)
+      const quality = normalizeQuality(p.quality, format)
+      const extension = FORMATS[format].exts[0]
+      const formatLabel = format === 'jpeg' ? 'JPG' : format.toUpperCase()
       let dir
       if (p.outputDir !== undefined && p.outputDir !== null && String(p.outputDir).trim()) {
         dir = path.resolve(String(p.outputDir))
@@ -1458,7 +1466,7 @@ const OPS = {
         recordCount: whole.recordCount, totalRows: whole.scope.total, partial: whole.scope.partial,
         selection: whole.selection, selectionIds: whole.selectionIds,
         snapshotHtml: whole.snapshotHtml, photoAssets: whole.photoAssets,
-        imageNameFields: [field1, field2], outputDpi: dpi,
+        imageNameFields: [field1, field2], outputDpi: dpi, imageFormat: format, imageQuality: quality,
       }
       try {
         for (let i = 0; i < scope.rows.length; i++) {
@@ -1466,22 +1474,25 @@ const OPS = {
           const stem = `${safePart(row[field1])}_${safePart(row[field2])}`
           let name = stem
           let suffix = 2
-          while (used.has(name.toLocaleLowerCase()) || fs.existsSync(path.join(dir, `${name}.png`))) name = `${stem} (${suffix++})`
+          while (used.has(name.toLocaleLowerCase()) || fs.existsSync(path.join(dir, `${name}.${extension}`))) name = `${stem} (${suffix++})`
           used.add(name.toLocaleLowerCase())
           const rowIndex = scope.rowIndexes ? scope.rowIndexes[i] : i
-          const savePath = path.join(dir, `${name}.png`)
+          const savePath = path.join(dir, `${name}.${extension}`)
           const built = guardedDomain.buildBatchHtml(dsId, tplId, [rowIndex], { outputDpi: dpi })
           const result = await ctx.printer.exportPng(built.html, savePath, {
-            widthMm: spec.w, heightMm: spec.h, dpi,
+            widthMm: spec.w, heightMm: spec.h, dpi, format, quality,
             cropToCell: Boolean(built.layout?.enabled && !built.layout?.fold),
           })
           const stat = fs.existsSync(savePath) ? fs.statSync(savePath) : null
-          const signature = stat && stat.size >= 8 ? Buffer.alloc(8) : null
+          const signature = stat && stat.size >= 12 ? Buffer.alloc(12) : null
           if (signature) {
             const fd = fs.openSync(savePath, 'r')
-            try { fs.readSync(fd, signature, 0, 8, 0) } finally { fs.closeSync(fd) }
+            try { fs.readSync(fd, signature, 0, 12, 0) } finally { fs.closeSync(fd) }
           }
-          if (!result || path.resolve(result.path || '') !== path.resolve(savePath) || !stat || stat.size < 8 || !signature || !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+          const validSignature = signature && (format === 'png' ? signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+            : format === 'jpeg' ? signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff
+              : signature.toString('ascii', 0, 4) === 'RIFF' && signature.toString('ascii', 8, 12) === 'WEBP')
+          if (!result || path.resolve(result.path || '') !== path.resolve(savePath) || !stat || !validSignature) {
             throw new Error(`图片未成功写入磁盘：${savePath}`)
           }
           files.push(savePath)
@@ -1495,13 +1506,13 @@ const OPS = {
         if (printInputFingerprint(dsId, tplId) !== fingerprint) throw new Error('出片期间名单、模板或照片发生变化，请重新预览后出片')
       } catch (err) {
         printDomain.createJob({ ...jobBase, status: 'failed', completedCount: count,
-          detail: `已保存 ${count}/${whole.recordCount} 张 PNG：${String(err.message || err)}` })
+          detail: `已保存 ${count}/${whole.recordCount} 张 ${formatLabel}：${String(err.message || err)}` })
         throw err
       }
       const job = printDomain.createJob({ ...jobBase, status: 'ok', completedCount: count,
-        detail: `${count} 张 PNG（${dpi} dpi）→ ${dir}` })
+        detail: `${count} 张 ${formatLabel}（${dpi} dpi）→ ${dir}` })
       if (printDomain.shouldMarkPrinted(whole.scope)) dataset.markPrinted(dsId, 'images')
-      return { canceled: false, count, directory: dir, files, dpi, jobId: job.id, scope: whole.scope }
+      return { canceled: false, count, directory: dir, files, dpi, format, quality, jobId: job.id, scope: whole.scope }
     },
   },
 

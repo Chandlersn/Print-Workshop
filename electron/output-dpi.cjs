@@ -467,7 +467,7 @@ function bakeTargets(design) {
   const { filterOf } = require('./design-layout.cjs')
   return (design?.layers || []).filter(layer =>
     layer.type === 'image' && !layer.variable && layer.visible && !layer.editorOnly
-    && (filterOf(layer.adjust) !== '' || !!layer.shadow))
+    && (filterOf(layer.adjust) !== '' || !!layer.shadow || !!layer.erasures?.length))
 }
 
 /**
@@ -558,6 +558,7 @@ function bakeName(layer, geom, asset, dpi) {
     adj.brightness, adj.contrast, adj.saturate, adj.grayscale, adj.invert,
     sh.dxMm, sh.dyMm, sh.blurMm, sh.color, sh.opacity,
     layer.strokeWidth || 0, layer.stroke || '',
+    JSON.stringify(layer.erasures || []),
   ].join('|')
   return `bake_${crypto.createHash('sha256').update(key).digest('hex').slice(0, 40)}.png`
 }

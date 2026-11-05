@@ -10,6 +10,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import PageHeader from '../components/PageHeader.vue'
+import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import { designerNav, openDesigner } from '../lib/designer-nav.js'
@@ -1426,7 +1427,7 @@ onBeforeUnmount(() => {
   <section class="page">
     <PageHeader title="模板工坊">
       <template #actions>
-        <button class="btn-primary" @click="newTemplate">新建模板</button>
+        <button class="btn-primary" @click="newTemplate"><AppIcon name="add" /> 新建模板</button>
       </template>
     </PageHeader>
 

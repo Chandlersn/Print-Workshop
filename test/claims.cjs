@@ -164,7 +164,7 @@ console.log('\n== 2. 当前口径文档里的数字必须等于实测 ==')
 
 check('README 声明了操作数，且等于注册表实测值', () => {
   const measured = measureOps().names.length
-  const claims = claimsIn('README.md').filter((c) => c.kind === '操作数')
+  const claims = claimsIn('README.md').filter((c) => !c.dated && c.kind === '操作数')
   assert.ok(claims.length > 0, 'README 必须声明操作数（这是它的核心卖点之一，不许悄悄删掉）')
   const bad = claims.filter((c) => c.value !== measured)
   assert.deepEqual(bad.map((c) => `README.md:${c.line} 写 ${c.value}，实测 ${measured}`), [], 'README 的操作数与注册表不一致')
@@ -172,7 +172,7 @@ check('README 声明了操作数，且等于注册表实测值', () => {
 
 check('README 声明了测试套件数，且等于 npm test 链段数', () => {
   const measured = measureSuites()
-  const claims = claimsIn('README.md').filter((c) => c.kind === '套件数')
+  const claims = claimsIn('README.md').filter((c) => !c.dated && c.kind === '套件数')
   assert.ok(claims.length > 0, 'README 必须声明套件数')
   const bad = claims.filter((c) => c.value !== measured)
   assert.deepEqual(bad.map((c) => `README.md:${c.line} 写 ${c.value}，实测 ${measured}`), [], 'README 的套件数与 npm test 实际链段数不一致')
@@ -180,7 +180,7 @@ check('README 声明了测试套件数，且等于 npm test 链段数', () => {
 
 check('两份使用说明里的数字型宣称同样必须等于实测', () => {
   const measured = { 操作数: measureOps().names.length, 套件数: measureSuites(), 不变量条数: measureInvariants() }
-  const bad = CURRENT_DOCS.flatMap((doc) => claimsIn(doc).filter((c) => c.value !== measured[c.kind]))
+  const bad = CURRENT_DOCS.flatMap((doc) => claimsIn(doc).filter((c) => !c.dated && c.value !== measured[c.kind]))
   assert.deepEqual(bad.map((c) => `${c.doc}:${c.line} 写 ${c.value}，实测 ${measured[c.kind]}`), [], '使用说明与实现不一致')
 })
 

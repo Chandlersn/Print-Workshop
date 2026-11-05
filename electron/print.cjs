@@ -20,6 +20,7 @@ const templates = require('./templates.cjs')
 const renderEngine = require('./render-engine.cjs')
 const { estimatePdfBytes } = require('./output-dpi.cjs')
 const { isPlaceholder } = require('./placeholder.cjs')
+const { normalizeFormat, normalizeQuality } = require('./export-formats.cjs')
 
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
 const ARCHIVE_ROOT = path.join(DATA_DIR, 'archive')
@@ -493,7 +494,9 @@ function removeArchiveDirectory(job) {
  * 范围字段：partial 标记部分出片（供 UI 标注「部分 N/总」并与全量区分），
  * selection 仅在部分出片时落盘（全量为 null，避免冗余）。
  */
-function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, selectionIds, snapshotHtml, photoAssets = [], status, detail, imageNameFields, outputDpi, completedCount }) {
+function createJob({ templateId, templateName, datasetId, datasetName, mode, recordCount, totalRows, partial, selection, selectionIds, snapshotHtml, photoAssets = [], status, detail, imageNameFields, outputDpi, imageFormat, imageQuality, completedCount }) {
+  const imageKind = mode === 'images' ? normalizeFormat(imageFormat) : null
+  const quality = imageKind ? normalizeQuality(imageQuality, imageKind) : null
   const now = new Date()
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const jobId = `job_${now.getTime().toString(36)}${crypto.randomBytes(3).toString('hex')}`
@@ -529,6 +532,8 @@ function createJob({ templateId, templateName, datasetId, datasetName, mode, rec
     ...(mode === 'images' ? {
       imageNameFields: Array.isArray(imageNameFields) ? imageNameFields.slice(0, 2) : [],
       outputDpi: Number(outputDpi) || 300,
+      imageFormat: imageKind,
+      imageQuality: quality,
       completedCount: Number(completedCount) || 0,
     } : {}),
   }

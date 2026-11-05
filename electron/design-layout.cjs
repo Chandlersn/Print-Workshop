@@ -1,4 +1,5 @@
 /** Shared by Vue and Node. Physical units are mm; text size and tracking are pt. */
+const { normalizeErasures, erasureMask } = require('./design-image-edit.cjs')
 const TYPES = new Set(['image', 'text', 'rect', 'ellipse', 'line'])
 const LIMITS = Object.freeze({ layers: 300, assets: 300, artboard: 2000, text: 20000, groups: 150, guides: 100 })
 
@@ -18,7 +19,7 @@ const BLEND_MODES = Object.freeze(['normal', 'multiply', 'screen', 'overlay', 'd
  * 测试要验「更高版本被拒」时必须用 `Math.max(...SCHEMA_VERSIONS) + 1`，不要写死数字：
  * 写死会在下次抬版本时变成假失败（v6 落地时 design-editor/design-effects 就各中过一次）。
  */
-const SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7])
+const SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8])
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label}必须是对象`)
@@ -301,6 +302,11 @@ function normalizeDesign(input) {
         if (out.crop.x + out.crop.w > 1.00000001 || out.crop.y + out.crop.h > 1.00000001) throw new Error('裁切区域超出原图')
         out.flipX = bool(l.flipX, false, '水平翻转')
         out.flipY = bool(l.flipY, false, '垂直翻转')
+        if (l.erasures !== undefined) {
+          const asset = assets[out.assetId]
+          const erasures = normalizeErasures(l.erasures, asset.width, asset.height)
+          if (erasures.length) out.erasures = erasures
+        }
         if (l.adjust !== undefined) out.adjust = imageAdjust(l.adjust)
         Object.assign(out, imageEffects(l))
       } else if (l.type === 'text') {
@@ -379,6 +385,8 @@ function normalizeDesign(input) {
   if (result.layers.some(layer => layer.variable)) version = Math.max(version, 5)
   if (result.layers.some(layer => layer.blend !== 'normal' || layer.adjust !== undefined) || result.groups.some(group => group.opacity !== 1)) version = Math.max(version, 6)
   if (result.layers.some(layer => layer.type === 'image' && (layer.shadow !== undefined || layer.strokeWidth !== undefined))) version = Math.max(version, 7)
+  // Version 8 preserves source-space erasures; older apps must not silently restore erased pixels.
+  if (result.layers.some(layer => layer.erasures?.length)) version = Math.max(version, 8)
   result.schemaVersion = version
   // Record uploaded fonts so a missing file cannot silently become a system fallback.
   const fontAssets = object(doc.fontAssets === undefined ? {} : doc.fontAssets, '字体素材表')
@@ -535,7 +543,10 @@ function renderDesign(input, options = {}) {
         }
         const c = l.crop
         const filter = filterOf(l.adjust)
-        body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%${filter ? `;${filter}` : ''}"></div></div>`
+        const asset = doc.assets[l.assetId]
+        const mask = erasureMask(l.erasures, asset.width, asset.height)
+        const imageStyle = `left:${-c.x / c.w * 100}%;top:${-c.y / c.h * 100}%;width:${100 / c.w}%;height:${100 / c.h}%${filter ? `;${filter}` : ''}${mask ? `;-webkit-mask-image:${mask};mask-image:${mask};-webkit-mask-size:100% 100%;mask-size:100% 100%` : ''}`
+        body = `<div style="position:absolute;inset:0;overflow:hidden;transform:scale(${l.flipX ? -1 : 1},${l.flipY ? -1 : 1})"><div class="${prefix}-image ${cls}" data-design-asset="${escapeHtml(l.assetId)}" style="${escapeHtml(imageStyle)}"></div></div>`
       }
     } else if (l.type === 'text') {
       const fam = family(l.fontFamily)

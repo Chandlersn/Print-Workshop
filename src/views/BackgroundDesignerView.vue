@@ -2,11 +2,14 @@
 import { ref, reactive, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import DesignSurface from '../components/DesignSurface.vue'
+import DesignImageEditor from '../components/DesignImageEditor.vue'
+import AppIcon from '../components/AppIcon.vue'
+import { cropImageLayer } from '../../electron/design-image-edit.cjs'
 import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
 import { activeDataset } from '../lib/active-dataset.js'
-import { normalizeDesign, imageDpi, normalizeFamily, DEFAULT_FONT_STACK, BLEND_MODES, CROP_RATIOS, fitCropToRatio } from '../../electron/design-layout.cjs'
+import { normalizeDesign, normalizeFamily, DEFAULT_FONT_STACK, BLEND_MODES, CROP_RATIOS, fitCropToRatio } from '../../electron/design-layout.cjs'
 // 体积显示只有一份实现（含 GB 档），出片体积提示与本页导出结果共用
 import { formatBytes } from '../lib/format-bytes.cjs'
 // 格式表与体积估算在纯模块里——出图实现读的是同一份，界面不抄第二遍（见 I-41）。
@@ -130,6 +133,9 @@ const dirty = computed(() => fingerprint(design.value) !== savedFingerprint.valu
 const projects = ref([])
 const presets = ref([])
 const selectedIds = ref([])
+const inspectorPanel = ref(null)
+// Selecting a different layer should put its controls back at the top of the inspector.
+watch(() => selectedIds.value.join('\0'), () => nextTick(() => { if (inspectorPanel.value) inspectorPanel.value.scrollTop = 0 }))
 const selected = computed(() => design.value.layers.filter((layer) => selectedIds.value.includes(layer.id)))
 const single = computed(() => selected.value.length === 1 ? selected.value[0] : null)
 const editable = computed(() => {
@@ -158,6 +164,47 @@ const future = ref([])
 const error = ref('')
 const message = ref('')
 const busy = ref(false)
+const imageMenu = ref(null)
+const imageEdit = ref(null)
+function openImageMenu(event, layer) {
+  if (layer.type !== 'image' || layer.variable || busy.value || modalOpen.value) return
+  event.preventDefault(); event.stopPropagation()
+  finishTextEdit(); endGesture(); finishKeyboardMove()
+  selectedIds.value = [layer.id]
+  imageMenu.value = { id: layer.id, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 120)) }
+  nextTick(() => document.querySelector('[data-testid="design-image-menu"] button:not(:disabled)')?.focus())
+}
+function openImageEdit(mode) {
+  imageMenu.value = null
+  if (busy.value || !single.value || singleBlocked.value || single.value.type !== 'image' || single.value.variable) return
+  finishTextEdit(); endGesture(); finishKeyboardMove()
+  clearFeedback()
+  imageEdit.value = { layer: clone(single.value), asset: clone(design.value.assets[single.value.assetId]), mode, session: sessionToken.value }
+}
+async function applyImageEdit(result) {
+  const edit = imageEdit.value
+  if (!edit || edit.session !== sessionToken.value) { imageEdit.value = null; return }
+  const id = edit.layer.id
+  if (!editableSelection(design.value, [id]).includes(id)) { fail('请先解锁图片图层。'); return }
+  if (busy.value) return
+  busy.value = true
+  try {
+    let repaired = null
+    if (result.base64) repaired = await window.printpress.uploadDesignImageBytes({ base64: result.base64, name: `${edit.asset.name.slice(0, 180)} 修复.png` })
+    if (!active || imageEdit.value !== edit || edit.session !== sessionToken.value) return
+    if (!editableSelection(design.value, [id]).includes(id)) throw new Error('图片图层已锁定，请先解锁。')
+    if (commit(doc => {
+      const index = doc.layers.findIndex(layer => layer.id === id)
+      if (index < 0 || doc.layers[index].assetId !== edit.layer.assetId) throw new Error('图片图层已变更，请重新打开图片编辑。')
+      const layer = cropImageLayer(doc.layers[index], result.crop)
+      if (repaired) { doc.assets[repaired.id] = repaired; layer.assetId = repaired.id }
+      if (result.erasures.length) layer.erasures = result.erasures
+      else delete layer.erasures
+      doc.layers[index] = layer
+    })) { imageEdit.value = null; message.value = '图片修改已应用，可撤销；原图保持完整。' }
+  } catch (err) { fail(err) }
+  finally { busy.value = false }
+}
 // 素材库侧栏显隐 + 插入会话保护：每次切换/新建/另存工程都换令牌，
 // 异步拉取素材期间若切换了工程，插入请求作废，绝不写进新画板（计划 §3.3）。
 const showAssets = ref(false)
@@ -381,17 +428,6 @@ const dimensionMismatch = computed(() => context.value && (
   Math.abs(context.value.artboard.w - design.value.artboard.w) > 0.01 ||
   Math.abs(context.value.artboard.h - design.value.artboard.h) > 0.01
 ))
-const dpi = computed(() => {
-  if (single.value?.type !== 'image') return null
-  return imageDpi(single.value, design.value.assets[single.value.assetId])
-})
-const dpiText = computed(() => {
-  const value = dpi.value
-  if (typeof value === 'number') return Math.round(value)
-  if (value && Number.isFinite(value.min)) return Math.round(value.min)
-  if (value && Number.isFinite(value.x)) return Math.round(Math.min(value.x, value.y))
-  return '—'
-})
 let initialized = false
 let active = false
 let draftTimer = null
@@ -466,6 +502,7 @@ function restoreHistory(snapshot) {
 }
 function replaceDesign(value, source = null, saved = true) {
   endGesture(); finishKeyboardMove()
+  imageEdit.value = null; imageMenu.value = null
   sessionToken.value++ // 切换工程：作废进行中的素材插入
   design.value = normalizeDesign(value)
   savedFingerprint.value = saved ? fingerprint(design.value) : ''
@@ -897,7 +934,7 @@ const openExportedFile = () => runExportAction(() => window.printpress.openDesig
  * 单独收成一个 computed 而不是到处补条件：每加一个浮层就要改五处判断，
  * 迟早漏一个——漏了的表现是「弹窗开着按 Ctrl+Z 却把画布改了」这种难复现的毛病。
  */
-const modalOpen = computed(() => Boolean(pending.value || showExport.value || showPackageExport.value || packageSummary.value))
+const modalOpen = computed(() => Boolean(pending.value || showExport.value || showPackageExport.value || packageSummary.value || imageEdit.value))
 /**
  * 导出的是「**已保存的那一版**」，不是当前草稿：版本文件不可变，所以导出期间
  * 继续编辑不会影响包的内容。有未保存修改时让用户二选一（保存后导出 / 直接导出已保存版本），
@@ -1300,11 +1337,11 @@ const blendOptions = BLEND_MODES.map((mode) => ({ value: mode, label: BLEND_LABE
  * 改这张表时务必连着 `adjustPercent` / `adjustInput` 一起看。
  */
 const ADJUST_FIELDS = Object.freeze([
-  ['brightness', '亮度 %', 300, 100],
-  ['contrast', '对比度 %', 300, 100],
-  ['saturate', '饱和度 %', 300, 100],
-  ['grayscale', '去色 %', 100, 0],
-  ['invert', '反相 %', 100, 0],
+  ['brightness', '亮度', 300, 100],
+  ['contrast', '对比度', 300, 100],
+  ['saturate', '饱和度', 300, 100],
+  ['grayscale', '去色', 100, 0],
+  ['invert', '反相', 100, 0],
 ])
 /** 界面百分比 → schema 值：所有字段一律 ÷100（见上面字段表的说明） */
 const ADJUST_PERCENT = 100
@@ -1341,6 +1378,10 @@ function adjustChange() {
     inputEpoch.value++
     fail(err)
   }
+}
+function resetAdjustField(key, identity, max) {
+  adjustInput(key, identity, max)
+  adjustChange()
 }
 /** 恢复原始颜色：整块 adjust 删掉，渲染侧少一个 filter，与从没调过逐字节一致 */
 function resetAdjust() {
@@ -1393,32 +1434,6 @@ function openColorPicker(event) {
     try { input.showPicker(); return } catch (err) { /* 不支持/不允许则退回 click() */ }
   }
   input.click()
-}
-function setCrop(key, percent) {
-  if (!single.value || singleBlocked.value) return
-  const id = single.value.id
-  commit((doc) => {
-    const layer = doc.layers.find((item) => item.id === id)
-    const crop = { ...layer.crop, [key]: Number(percent) / 100 }
-    if (!Number.isFinite(crop[key]) || crop.x < 0 || crop.y < 0 || crop.w <= 0 || crop.h <= 0 || crop.x + crop.w > 1.000001 || crop.y + crop.h > 1.000001) throw new Error('裁切范围必须在原图内：起点 + 宽高不得超过 100%。')
-    if (keepRatio.value) {
-      const asset = doc.assets[layer.assetId]
-      layer.h = round(layer.w * asset.height * crop.h / (asset.width * crop.w))
-    }
-    layer.crop = crop
-  })
-}
-function resetCrop() {
-  if (!single.value || singleBlocked.value) return
-  const id = single.value.id
-  commit((doc) => {
-    const layer = doc.layers.find((item) => item.id === id)
-    layer.crop = { x: 0, y: 0, w: 1, h: 1 }
-    if (keepRatio.value) {
-      const asset = doc.assets[layer.assetId]
-      layer.h = round(layer.w * asset.height / asset.width)
-    }
-  })
 }
 /**
  * 套用「成品尺寸 / 比例」预设。
@@ -1710,7 +1725,8 @@ let toolsResizeStart = null
 function startToolsResize(event) {
   if (event.button !== 0 || pending.value) return
   event.preventDefault()
-  toolsResizeStart = { x: event.clientX, w: toolsWidth.value }
+  // The visible width can be capped in a narrow window; start from the actual edge.
+  toolsResizeStart = { x: event.clientX, w: event.currentTarget.parentElement?.querySelector('.tools-panel')?.getBoundingClientRect().width || toolsWidth.value }
   resizingTools.value = true
   event.target.setPointerCapture?.(event.pointerId)
   window.addEventListener('pointermove', onToolsResizeMove)
@@ -1860,6 +1876,16 @@ function finishKeyboardMove() {
 }
 function onKeyDown(event) {
   if (!active || modalOpen.value || event.isComposing) return
+  if (imageMenu.value) {
+    if (event.key === 'Escape') { event.preventDefault(); imageMenu.value = null }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const buttons = [...document.querySelectorAll('[data-testid="design-image-menu"] button:not(:disabled)')]
+      const index = buttons.indexOf(document.activeElement)
+      buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus()
+    }
+    return
+  }
   const input = event.target?.closest?.('input,textarea,select,[contenteditable="true"]')
   const modifier = event.ctrlKey || event.metaKey
   // 就地编辑要先落定再存盘，否则「改完字按 Ctrl+S」会把旧文字存下去
@@ -1911,6 +1937,7 @@ function activate() {
 }
 function deactivate() {
   active = false
+  imageEdit.value = null; imageMenu.value = null
   ++portraitListRequest
   ++portraitRequest
   portraitChecking.value = true
@@ -1931,6 +1958,7 @@ function deactivate() {
 }
 /** 素材库抽屉点外部收起：开关按钮与抽屉内部除外（开关自己 toggle，别打架） */
 function onDocPointerDown(event) {
+  if (!event.target?.closest?.('[data-testid="design-image-menu"]')) imageMenu.value = null
   if (!showAssets.value) return
   const t = event.target
   if (t && (t.closest?.('.asset-library') || t.closest?.('[data-testid="design-toggle-assets"]'))) return
@@ -1990,7 +2018,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
     </div>
     <PageHeader title="底图制作" description="图片、固定文字与形状分别编辑，保存后用于打印模板。">
       <template #actions>
-        <button data-testid="design-new" class="primary" :disabled="busy" @click="newDesign">新建底图</button>
+        <button data-testid="design-new" class="primary" :disabled="busy" @click="newDesign"><AppIcon name="add" /> 新建底图</button>
         <label class="preset-picker" title="内置版面与常用工程：选「内置模板」是「已有就打开、没有才新建」——不会每点一次就多一个同名工程；「常用」里只列你自己保存过的工程，选中直接打开那份（也不会复制）">
           <span>常用模板</span>
           <select data-testid="design-preset" :disabled="busy || (!presets.length && !recentDesigns.length)" @change="pickPreset">
@@ -2003,12 +2031,17 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
             </optgroup>
           </select>
         </label>
-        <button data-testid="design-copy" :disabled="busy" @click="save(true)">另存副本</button>
-        <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets">素材库</button>
-        <button data-testid="design-export-png" :disabled="busy" title="导出 PNG / JPEG / WebP 图片" @click="openExport">导出图片</button>
-        <button data-testid="design-export-package" :disabled="busy" title="把已保存的这一版连图带字体打包成 .ppdesign，可在另一台电脑上继续编辑（导出的是已保存版本，不是当前未保存的修改）" @click="openPackageExport">导出工程包</button>
-        <button data-testid="design-import-package" :disabled="busy" title="从 .ppdesign 导入一份可编辑副本；同名工程不会被覆盖" @click="importPackage">导入工程包</button>
-        <button data-testid="design-save" class="primary" :disabled="busy" @click="save()">{{ busy ? '处理中…' : '保存工程' }}</button>
+        <button data-testid="design-toggle-assets" :class="{ on: showAssets }" :disabled="busy" :title="showAssets ? '隐藏素材库侧栏' : '显示素材库侧栏（v0.5 本地素材库）'" @click="showAssets = !showAssets"><AppIcon name="library" /> 素材库</button>
+        <button data-testid="design-export-png" :disabled="busy" title="导出 PNG / JPEG / WebP 图片" @click="openExport"><AppIcon name="download" /> 导出图片</button>
+        <details class="designer-more">
+          <summary title="更多工程操作"><AppIcon name="more" /> 更多</summary>
+          <div class="designer-more-menu">
+            <button data-testid="design-copy" :disabled="busy" @click="save(true); $event.currentTarget.closest('details').open = false"><AppIcon name="copy" /> 另存副本</button>
+            <button data-testid="design-export-package" :disabled="busy" title="导出已保存版本的工程包" @click="openPackageExport(); $event.currentTarget.closest('details').open = false"><AppIcon name="download" /> 导出工程包</button>
+            <button data-testid="design-import-package" :disabled="busy" title="导入批印坊工程包或 Photoshop 文件" @click="importPackage(); $event.currentTarget.closest('details').open = false"><AppIcon name="upload" /> 导入工程 / PSD</button>
+          </div>
+        </details>
+        <button data-testid="design-save" class="primary" :disabled="busy" @click="save()"><AppIcon name="save" /> {{ busy ? '处理中…' : '保存工程' }}</button>
         <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
       </template>
     </PageHeader>
@@ -2034,58 +2067,58 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
     <div class="designer-workspace" :class="{ 'tools-resizing': resizingTools, 'focus-canvas': focusCanvas }" :style="{ '--tools-w': `${toolsWidth}px` }">
       <aside class="designer-panel tools-panel">
         <h3>添加内容</h3>
-        <div class="tool-grid">
-          <button data-testid="design-add-image" :disabled="busy" title="也可以 Ctrl+V 粘贴截图，或把图片文件拖进画布" @click="addImage">＋ 图片</button>
-          <button data-testid="design-add-portrait" :disabled="busy || !canAddPortrait" @click="openPortraitPicker">＋ 变量图</button>
-          <button data-testid="design-add-text" @click="add('text')">＋ 文字</button>
-          <button data-testid="design-add-rect" @click="add('rect')">＋ 矩形</button>
-          <button @click="add('ellipse')">＋ 椭圆</button>
-          <button @click="add('line')">＋ 直线</button>
+        <div class="tool-grid add-tools" aria-label="添加图层">
+          <button data-testid="design-add-image" :disabled="busy" title="也可以 Ctrl+V 粘贴截图，或把图片文件拖进画布" @click="addImage"><AppIcon name="image" /> 图片</button>
+          <button data-testid="design-add-portrait" :disabled="busy || !canAddPortrait" :title="canAddPortrait ? '添加随名单变化的图片' : '请先在数据页开启配图列'" @click="openPortraitPicker"><AppIcon name="portrait" /> 变量图</button>
+          <button data-testid="design-add-text" @click="add('text')"><AppIcon name="text" /> 文字</button>
+          <button data-testid="design-add-rect" @click="add('rect')"><AppIcon name="rect" /> 矩形</button>
+          <button @click="add('ellipse')"><AppIcon name="ellipse" /> 椭圆</button>
+          <button @click="add('line')"><AppIcon name="line" /> 直线</button>
         </div>
-        <p class="muted">图片也可以直接 <b>Ctrl+V</b> 粘贴截图，或把图片文件拖进画布。</p>
-        <h3>工程库 <span>{{ projects.length }}</span></h3>
+        <details class="projects-panel" data-testid="designer-projects">
+        <summary><span><AppIcon name="folder" :size="16" /> 工程库</span><span class="panel-count">{{ projects.length }}</span></summary>
         <p v-if="!projects.length" class="muted">保存后可在这里重新打开。</p>
         <div class="project-list">
           <div v-for="project in projects" :key="project.id" class="project-row" :class="{ current: project.id === design.id }">
             <button class="project-open" :disabled="busy" :title="project.name" @click="loadProject(project)">
               <b>{{ project.name }}</b><small>{{ project.artboard?.w }} × {{ project.artboard?.h }} mm · v{{ project.revision }}</small>
             </button>
-            <button class="icon-button" :disabled="busy" :aria-label="`删除工程 ${project.name}`" @click="deleteProject(project)">×</button>
+            <button class="icon-button" :disabled="busy" :aria-label="`删除工程 ${project.name}`" :title="`删除工程 ${project.name}`" @click="deleteProject(project)"><AppIcon name="trash" :size="15" /></button>
           </div>
         </div>
+        </details>
         <h3>图层 <span>{{ design.layers.length }} · 上方在前</span></h3>
-        <div class="tool-grid group-actions">
-          <button data-testid="design-group" :disabled="selected.length < 2 || editable.length < selected.length" title="Ctrl+G；合并已有组时会展开其全部成员" @click="makeGroup">组合所选</button>
-          <button data-testid="design-ungroup" :disabled="!hasSelectedGroup" title="Ctrl+Shift+G" @click="ungroup">解除分组</button>
+        <div class="layer-actions" role="toolbar" aria-label="图层操作">
+          <button data-testid="design-group" :disabled="selected.length < 2 || editable.length < selected.length" aria-label="组合所选" title="组合所选（Ctrl+G）；合并已有组时会展开其全部成员" @click="makeGroup"><AppIcon name="group" /></button>
+          <button data-testid="design-ungroup" :disabled="!hasSelectedGroup" aria-label="解除分组" title="解除分组（Ctrl+Shift+G）" @click="ungroup"><AppIcon name="ungroup" /></button>
+          <button data-testid="design-group-copy" :disabled="!selected.length" :aria-label="selectedGroup ? '复制整组' : '复制所选'" :title="selectedGroup ? '复制整组' : '复制所选'" @click="duplicate"><AppIcon name="copy" /></button>
+          <button data-testid="design-group-delete" :disabled="!editable.length" :aria-label="selectedGroup ? '删除整组' : '删除所选'" :title="selectedGroup ? '删除整组' : '删除所选'" @click="removeSelected"><AppIcon name="trash" /></button>
         </div>
         <p v-if="!design.layers.length" class="muted">添加图片、文字或形状开始制作。</p>
         <div class="layer-list">
           <template v-for="row in groupRows" :key="`${row.kind}-${row.id}`">
             <div v-if="row.kind === 'group'" :data-group-id="row.id" class="layer-row group-row" :class="{ selected: groupChosen(row.group) }" @click="selectGroup(row.group, $event)">
-              <button class="icon-button" data-testid="design-group-visible" :aria-label="groupHas(row.group, 'visible') ? '隐藏分组' : '显示分组'" :title="groupHas(row.group, 'visible') ? '隐藏分组' : '显示分组'" @click.stop="toggleGroup(row.group, 'visible')">{{ groupHas(row.group, 'visible') ? '◉' : '○' }}</button>
-              <span class="layer-name" :title="row.group.name">▣ {{ row.group.name }}</span>
-              <button class="icon-button" data-testid="design-group-lock" :aria-label="groupHas(row.group, 'locked') ? '解锁分组' : '锁定分组'" :title="groupHas(row.group, 'locked') ? '解锁分组' : '锁定分组'" @click.stop="toggleGroup(row.group, 'locked')">{{ groupHas(row.group, 'locked') ? '锁' : '开' }}</button>
+              <button class="icon-button" data-testid="design-group-visible" :aria-label="groupHas(row.group, 'visible') ? '隐藏分组' : '显示分组'" :title="groupHas(row.group, 'visible') ? '隐藏分组' : '显示分组'" @click.stop="toggleGroup(row.group, 'visible')"><AppIcon :name="groupHas(row.group, 'visible') ? 'eye' : 'eye-off'" :size="16" /></button>
+              <span class="layer-name" :title="row.group.name"><AppIcon name="group" :size="14" /> {{ row.group.name }}</span>
+              <button class="icon-button" data-testid="design-group-lock" :aria-label="groupHas(row.group, 'locked') ? '解锁分组' : '锁定分组'" :title="groupHas(row.group, 'locked') ? '解锁分组' : '锁定分组'" @click.stop="toggleGroup(row.group, 'locked')"><AppIcon :name="groupHas(row.group, 'locked') ? 'lock' : 'unlock'" :size="16" /></button>
             </div>
             <div v-else :data-layer-id="row.id" class="layer-row" :class="{ selected: selectedIds.includes(row.id), hidden: !row.layer.visible, 'group-member': !!row.group }" @click="selectLayer(row.layer, $event, true)">
-              <button class="icon-button" :title="row.layer.visible ? '隐藏图层' : '显示图层'" :aria-label="row.layer.visible ? '隐藏图层' : '显示图层'" @click.stop="toggleLayer(row.layer, 'visible')">{{ row.layer.visible ? '◉' : '○' }}</button>
+              <button class="icon-button" :title="row.layer.visible ? '隐藏图层' : '显示图层'" :aria-label="row.layer.visible ? '隐藏图层' : '显示图层'" @click.stop="toggleLayer(row.layer, 'visible')"><AppIcon :name="row.layer.visible ? 'eye' : 'eye-off'" :size="16" /></button>
               <span class="layer-name" :title="row.layer.name">{{ row.layer.name }}</span>
               <span v-if="row.layer.editorOnly" class="layer-flag" title="仅编辑可见：打印、PDF 与导出的图片里都不会出现">仅编辑</span>
               <span class="layer-row-actions" @click.stop>
                 <template v-if="row.layer.type === 'image' && row.layer.assetId">
-                  <button v-if="!adoptedIds.has(row.layer.assetId)" class="icon-button" title="加入素材库：收藏这张原图，之后删除图层不会清理它" @click.stop="adoptLayerAsset(row.layer)">＋</button>
+                  <button v-if="!adoptedIds.has(row.layer.assetId)" class="icon-button" aria-label="加入素材库" title="加入素材库：收藏这张原图，之后删除图层不会清理它" @click.stop="adoptLayerAsset(row.layer)"><AppIcon name="add" :size="16" /></button>
                   <span v-else class="adopted-flag" title="已在素材库（受管理，删除图层不会清理）">★</span>
                 </template>
               </span>
-              <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '解锁图层' : '锁定图层'" @click.stop="toggleLayer(row.layer, 'locked')">{{ row.layer.locked ? '锁' : '开' }}</button>
+              <button class="icon-button" :title="row.layer.locked ? '解锁图层' : '锁定图层'" :aria-label="row.layer.locked ? '解锁图层' : '锁定图层'" @click.stop="toggleLayer(row.layer, 'locked')"><AppIcon :name="row.layer.locked ? 'lock' : 'unlock'" :size="16" /></button>
             </div>
           </template>
         </div>
-        <div class="tool-grid">
-          <button data-testid="design-group-copy" :disabled="!selected.length" @click="duplicate">{{ selectedGroup ? '复制整组' : '复制所选' }}</button><button data-testid="design-group-delete" :disabled="!editable.length" @click="removeSelected">{{ selectedGroup ? '删除整组' : '删除所选' }}</button>
-        </div>
-        <div class="tool-grid">
-          <button data-testid="design-copy-style" :disabled="!single" @click="copyStyle">复制样式</button>
-          <button data-testid="design-paste-style" :disabled="!styleTargets" :title="copiedStyle ? `可应用到 ${styleTargets} 个同类图层` : '先选中一个图层并复制样式'" @click="pasteStyle">应用样式{{ styleTargets ? ` (${styleTargets})` : '' }}</button>
+        <div class="tool-grid style-actions">
+          <button data-testid="design-copy-style" :disabled="!single" title="复制选中图层的样式" @click="copyStyle">复制样式</button>
+          <button data-testid="design-paste-style" :disabled="!styleTargets" :title="copiedStyle ? `可应用到 ${styleTargets} 个同类图层` : '先选中一个图层并复制样式'" @click="pasteStyle">应用样式</button>
         </div>
         <p v-if="design.groups?.length" class="muted">点组名或画布选择整组；点列表中的成员可单独编辑属性。</p>
       </aside>
@@ -2095,10 +2128,10 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <div class="canvas-toolbar">
           <!-- 撤销/重做只有快捷键（Ctrl+Z / Ctrl+Shift+Z 或 Ctrl+Y），工具栏不放按钮：
                画布工具栏已经很长，而这两个操作的发现路径本来就是键盘而不是工具栏。 -->
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层上移一层'" @click="reorder('up')">上移 ↑</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" @click="reorder('down')">下移 ↓</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" @click="reorder('top')">置顶 ⤒</button>
-          <button :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置底'" @click="reorder('bottom')">置底 ⤓</button>
+          <button class="order-button" aria-label="图层上移" :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层上移一层'" @click="reorder('up')"><AppIcon name="move-up" :size="16" /><span>上移</span></button>
+          <button class="order-button" aria-label="图层下移" :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层下移一层'" @click="reorder('down')"><AppIcon name="move-down" :size="16" /><span>下移</span></button>
+          <button class="order-button" aria-label="图层置顶" :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置顶'" @click="reorder('top')"><AppIcon name="move-top" :size="16" /><span>置顶</span></button>
+          <button class="order-button" aria-label="图层置底" :disabled="!editable.length || hasPartialGroup" :title="hasPartialGroup ? '先点击组名选中完整分组再调整层级' : '选中图层置底'" @click="reorder('bottom')"><AppIcon name="move-bottom" :size="16" /><span>置底</span></button>
           <label class="inline"><input v-model="snap" data-testid="design-snap" type="checkbox"> 吸附</label>
           <label class="inline"><input v-model="rulers" data-testid="design-rulers" type="checkbox"> 标尺</label>
           <label class="inline"><input v-model="gridVisible" data-testid="design-grid" type="checkbox"> 网格</label>
@@ -2127,7 +2160,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
                 @blur="finishTextEdit"
               ></textarea>
             </div>
-            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)">
+            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)" @contextmenu="openImageMenu($event, layer)">
               <template v-if="single?.id === layer.id && editable.some(item => item.id === layer.id)">
                 <button v-if="layer.type === 'line'" class="resize-handle line-resize-handle" :aria-label="'调整直线长度'" :title="'拖动线段末端调整长度'" @pointerdown.stop="pointerDown($event, layer, 'se')"></button>
                 <template v-else>
@@ -2168,8 +2201,9 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
         <p class="shortcut-note">Ctrl+V 粘贴截图 / 拖入图片即加图层 · 双击文字直接改字 · Shift / Ctrl 点击多选 · 方向键移动 0.1 mm，Shift 加速 · Alt 拖动暂停吸附 · Ctrl+S 保存</p>
       </div>
-      <aside v-if="!focusCanvas" class="designer-panel inspector">
-        <h3>工程与画布</h3>
+      <aside v-if="!focusCanvas" ref="inspectorPanel" class="designer-panel inspector">
+        <details class="board-settings" data-testid="designer-board-settings" :open="!selected.length">
+        <summary><span><AppIcon name="layout" :size="16" /> 工程与画布</span></summary>
         <label>工程名称<input data-testid="design-name" :value="design.name" maxlength="120" @change="setDoc('name', $event.target.value)"></label>
         <div class="property-grid">
           <label>宽度 mm<input type="number" min="1" step="0.1" :value="design.artboard.w" :disabled="!!context" @change="setArtboard('w', $event.target.value)"></label>
@@ -2177,14 +2211,14 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         </div>
         <label class="color-field" @click="openColorPicker"><span>画布背景</span><span class="color-control"><input type="color" :value="design.artboard.background === 'transparent' ? '#ffffff' : design.artboard.background" aria-label="选择画布背景颜色" @input="colorInput('background', $event.target.value, 'artboard')" @change="colorChange('background', $event.target.value, 'artboard')"><code class="color-value">{{ formatColor(design.artboard.background) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
         <label class="inline"><input data-testid="design-board-gradient" type="checkbox" :checked="!!design.artboard.backgroundPaint" @change="setPaint('artboard', 'enabled', $event.target.checked)"> 使用线性渐变</label>
-        <div v-if="design.artboard.backgroundPaint" class="property-grid">
+        <div v-if="design.artboard.backgroundPaint" class="gradient-editor">
           <label>方向 °<input data-testid="design-board-gradient-angle" type="number" min="-360" max="360" :value="design.artboard.backgroundPaint.angle" @change="setPaint('artboard', 'angle', $event.target.value)"></label>
-          <label v-for="(stop, index) in design.artboard.backgroundPaint.stops" :key="`board-stop-${index}`">色标 {{ index + 1 }}
-            <span class="property-grid"><input type="color" :value="stop.color" @change="setPaint('artboard', `color:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.01" aria-label="色标位置" :disabled="index===0 || index===design.artboard.backgroundPaint.stops.length-1" :value="stop.offset" @change="setPaint('artboard', `offset:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.05" aria-label="色标透明度" :value="stop.opacity" @change="setPaint('artboard', `opacity:${index}`, $event.target.value)"></span>
-          </label>
-          <button :disabled="design.artboard.backgroundPaint.stops.length>=8" @click="changePaintStops('artboard','add')">添加色标</button><button :disabled="design.artboard.backgroundPaint.stops.length<=2" @click="changePaintStops('artboard','remove')">移除中间色标</button>
+          <div v-for="(stop, index) in design.artboard.backgroundPaint.stops" :key="`board-stop-${index}`" class="gradient-stop">
+            <span>色标 {{ index + 1 }}</span><input type="color" :aria-label="`色标 ${index + 1} 颜色`" :value="stop.color" @change="setPaint('artboard', `color:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.01" :aria-label="`色标 ${index + 1} 位置`" title="位置（0～1）" :disabled="index===0 || index===design.artboard.backgroundPaint.stops.length-1" :value="stop.offset" @change="setPaint('artboard', `offset:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.05" :aria-label="`色标 ${index + 1} 不透明度`" title="不透明度（0～1）" :value="stop.opacity" @change="setPaint('artboard', `opacity:${index}`, $event.target.value)">
+          </div>
+          <div class="gradient-actions"><button :disabled="design.artboard.backgroundPaint.stops.length>=8" @click="changePaintStops('artboard','add')">添加色标</button><button :disabled="design.artboard.backgroundPaint.stops.length<=2" @click="changePaintStops('artboard','remove')">移除中间色标</button></div>
         </div>
-        <details class="guide-panel" open>
+        <details class="guide-panel">
           <summary>标尺 / 网格 / 参考线 <span>{{ design.guides?.length || 0 }}</span></summary>
           <label class="inline"><input v-model="rulers" data-testid="design-rulers-panel" type="checkbox"> 显示标尺（可从标尺拖出参考线）</label>
           <label class="inline"><input v-model="gridVisible" data-testid="design-grid-panel" type="checkbox"> 显示布局网格</label>
@@ -2215,13 +2249,18 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
               <span :title="guide.axis === 'x' ? '距左侧的毫米数' : '距顶部的毫米数'">{{ guide.axis.toUpperCase() }}</span>
               <input data-testid="design-guide-edit-position" type="number" min="-10000" max="10000" step="0.1" :aria-label="`${guide.axis.toUpperCase()}参考线位置，毫米`" :value="guide.position" @change="editGuide(guide.id, $event.target.value)">
               <small v-if="guideOutside(guide)" class="guide-outside">画布外</small>
-              <button class="icon-button" data-testid="design-guide-delete" aria-label="删除参考线" @click="removeGuide(guide.id)">×</button>
+              <button class="icon-button" data-testid="design-guide-delete" aria-label="删除参考线" title="删除参考线" @click="removeGuide(guide.id)"><AppIcon name="trash" :size="15" /></button>
             </div>
           </div>
           <p class="muted">随工程保存；参考线不会出现在打印或 PNG 中。</p>
         </details>
+        </details>
         <template v-if="selected.length">
         <h3>{{ selectedGroup ? '分组属性' : selected.length > 1 ? `多选 ${selected.length} 个图层` : single ? '图层属性' : '排版属性' }}</h3>
+        <div v-if="single?.type === 'image' && !single.variable" class="image-quick-actions" role="toolbar" aria-label="图片编辑">
+          <button data-testid="design-image-crop" :disabled="singleBlocked" @click="openImageEdit('crop')"><AppIcon name="crop" /> 裁剪…</button>
+          <button data-testid="design-image-erase" :disabled="singleBlocked" @click="openImageEdit('erase')"><AppIcon name="brush" /> 魔法擦除…</button>
+        </div>
         <template v-if="selectedGroup">
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
           <label>组透明度 %<input data-testid="design-group-opacity" type="number" min="0" max="100" step="1" :value="Math.round((selectedGroup.opacity ?? 1) * 100)" @input="groupOpacityInput($event.target.value)" @change="groupOpacityChange()"></label>
@@ -2231,8 +2270,8 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <p class="muted">以整组中心为基准，按比例缩放并旋转；成员间距、文字字号和边框效果一同调整。一次应用可整体撤销。</p>
           <p v-if="groupHas(selectedGroup, 'locked')" class="locked-note">组内存在锁定图层，整组无法移动、排序或删除。</p>
         </template>
-        <div class="align-grid">
-          <button v-for="item in [['left','靠左'],['center','水平居中'],['right','靠右'],['top','靠上'],['middle','垂直居中'],['bottom','靠下']]" :key="item[0]" :disabled="!editable.length" @click="align(item[0])">{{ item[1] }}</button>
+        <div class="align-grid" role="toolbar" aria-label="对齐图层">
+          <button v-for="item in [['left','靠左'],['center','水平居中'],['right','靠右'],['top','靠上'],['middle','垂直居中'],['bottom','靠下']]" :key="item[0]" :disabled="!editable.length" :title="item[1]" @click="align(item[0])"><AppIcon :name="`align-${item[0]}`" :size="14" /> {{ item[1] }}</button>
         </div>
         <p v-if="!single && !selectedGroup" class="muted">{{ selected.length > 1 ? '按选中且未锁定的图层或整组外框对齐。' : '选中图层后编辑属性。单个图层或单组按画布对齐。' }}</p>
         <template v-if="single">
@@ -2249,14 +2288,19 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
             </div>
             <label>混合模式<select data-testid="design-layer-blend" :value="single.blend || 'normal'" @change="setLayer('blend', $event.target.value)"><option v-for="opt in blendOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></label>
             <p v-if="(single.blend || 'normal') !== 'normal'" class="muted">混合模式决定这个图层如何与下方内容叠色，画布、打印与 PDF 同源；不确定就选「正常」。</p>
-            <div v-if="single.type === 'image'">
-              <h4>颜色调整</h4>
-              <p class="muted">拖动即时预览，松手只记一步撤销；打印、PDF 与导出的图片同效。</p>
-              <div class="property-grid">
-                <label v-for="[key, label, max, identity] in ADJUST_FIELDS" :key="key">{{ label }}<input type="range" min="0" :max="max" step="1" :value="adjustPercent(key, identity)" :data-testid="`design-adjust-${key}`" @input="adjustInput(key, $event.target.value, max)" @change="adjustChange()"><output :data-testid="`design-adjust-${key}-value`">{{ adjustPercent(key, identity) }}%</output></label>
+            <details v-if="single.type === 'image'" class="color-adjust" data-testid="design-color-adjust">
+              <summary>颜色调整 <span v-if="ADJUST_FIELDS.some(([key, , , identity]) => adjustPercent(key, identity) !== identity)">已调整</span></summary>
+              <p class="muted">拖动即时预览，效果同时用于打印和导出。</p>
+              <div class="adjust-list">
+                <div v-for="[key, label, max, identity] in ADJUST_FIELDS" :key="key" class="adjust-row">
+                  <label :for="`adjust-${key}`">{{ label }}</label>
+                  <input :id="`adjust-${key}`" type="range" min="0" :max="max" step="1" :value="adjustPercent(key, identity)" :data-testid="`design-adjust-${key}`" :disabled="singleBlocked" @input="adjustInput(key, $event.target.value, max)" @change="adjustChange()">
+                  <output :data-testid="`design-adjust-${key}-value`">{{ adjustPercent(key, identity) }}%</output>
+                  <button class="adjust-reset-field" :aria-label="`重置${label}`" :title="`重置${label}`" :disabled="singleBlocked || adjustPercent(key, identity) === identity" @click="resetAdjustField(key, identity, max)">↺</button>
+                </div>
               </div>
-              <button data-testid="design-adjust-reset" :disabled="!single.adjust" @click="resetAdjust">恢复原始颜色</button>
-            </div>
+              <button data-testid="design-adjust-reset" :disabled="singleBlocked || !single.adjust" @click="resetAdjust">恢复原始颜色</button>
+            </details>
             <template v-if="single.type === 'text'">
               <label>固定文字<textarea data-testid="design-text" rows="4" :value="single.text" @change="setLayer('text', $event.target.value)"></textarea></label>
               <label>字体<select :value="single.fontFamily" @change="setLayer('fontFamily', $event.target.value)"><option value="">默认字体</option><option v-for="name in fontNames" :key="name" :value="name">{{ name }}</option><option v-if="single.fontFamily && !fontNames.includes(single.fontFamily)" :value="single.fontFamily">{{ single.fontFamily }}（当前未找到）</option></select></label>
@@ -2304,21 +2348,17 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
               </label>
               <p class="muted">选尺寸会把图层设成该毫米成品（如 1 寸 = 25×35 mm），并同时把裁切调成同一长宽比——只改尺寸不改裁切会把照片拉长。</p>
               <div class="tool-grid"><button @click="setLayer('flipX', !single.flipX)">{{ single.flipX ? '取消水平翻转' : '水平翻转' }}</button><button @click="setLayer('flipY', !single.flipY)">{{ single.flipY ? '取消垂直翻转' : '垂直翻转' }}</button></div>
-              <h4>裁切范围（原图百分比）</h4>
-              <div class="property-grid"><label v-for="[key, label] in [['x','左侧 %'],['y','顶部 %'],['w','宽度 %'],['h','高度 %']]" :key="key">{{ label }}<input :data-testid="`design-crop-${key}`" type="number" min="0" max="100" step="1" :value="round(single.crop[key] * 100)" @change="setCrop(key, $event.target.value)"></label></div>
-              <button @click="resetCrop">恢复完整图片范围</button>
-              <p class="muted">原图 {{ design.assets[single.assetId]?.width }} × {{ design.assets[single.assetId]?.height }} px · 当前约 {{ dpiText }} DPI</p>
             </template>
             <template v-else>
               <label v-if="single.type !== 'line'" class="color-field" @click="openColorPicker"><span>填充颜色</span><span class="color-control"><input type="color" :value="single.fill === 'transparent' ? '#ffffff' : single.fill" aria-label="选择填充颜色" @input="colorInput('fill', $event.target.value)" @change="colorChange('fill', $event.target.value)"><code class="color-value">{{ formatColor(single.fill) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
               <label v-if="single.type !== 'line'" class="inline"><input type="checkbox" :checked="single.fill === 'transparent'" @change="setLayer('fill', $event.target.checked ? 'transparent' : '#ead9bf')"> 无填充</label>
               <label v-if="['rect','ellipse'].includes(single.type)" class="inline"><input data-testid="design-layer-gradient" type="checkbox" :checked="!!single.fillPaint" @change="setPaint('layer', 'enabled', $event.target.checked)"> 使用线性渐变</label>
-              <div v-if="single.fillPaint" class="property-grid">
+              <div v-if="single.fillPaint" class="gradient-editor">
                 <label>方向 °<input data-testid="design-layer-gradient-angle" type="number" min="-360" max="360" :value="single.fillPaint.angle" @change="setPaint('layer', 'angle', $event.target.value)"></label>
-                <label v-for="(stop, index) in single.fillPaint.stops" :key="`layer-stop-${index}`">色标 {{ index + 1 }}
-                  <span class="property-grid"><input type="color" :value="stop.color" @change="setPaint('layer', `color:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.01" aria-label="色标位置" :disabled="index===0 || index===single.fillPaint.stops.length-1" :value="stop.offset" @change="setPaint('layer', `offset:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.05" aria-label="色标透明度" :value="stop.opacity" @change="setPaint('layer', `opacity:${index}`, $event.target.value)"></span>
-                </label>
-                <button :disabled="single.fillPaint.stops.length>=8" @click="changePaintStops('layer','add')">添加色标</button><button :disabled="single.fillPaint.stops.length<=2" @click="changePaintStops('layer','remove')">移除中间色标</button>
+                <div v-for="(stop, index) in single.fillPaint.stops" :key="`layer-stop-${index}`" class="gradient-stop">
+                  <span>色标 {{ index + 1 }}</span><input type="color" :aria-label="`色标 ${index + 1} 颜色`" :value="stop.color" @change="setPaint('layer', `color:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.01" :aria-label="`色标 ${index + 1} 位置`" title="位置（0～1）" :disabled="index===0 || index===single.fillPaint.stops.length-1" :value="stop.offset" @change="setPaint('layer', `offset:${index}`, $event.target.value)"><input type="number" min="0" max="1" step="0.05" :aria-label="`色标 ${index + 1} 不透明度`" title="不透明度（0～1）" :value="stop.opacity" @change="setPaint('layer', `opacity:${index}`, $event.target.value)">
+                </div>
+                <div class="gradient-actions"><button :disabled="single.fillPaint.stops.length>=8" @click="changePaintStops('layer','add')">添加色标</button><button :disabled="single.fillPaint.stops.length<=2" @click="changePaintStops('layer','remove')">移除中间色标</button></div>
               </div>
               <label v-if="['rect','ellipse'].includes(single.type)" class="inline"><input data-testid="design-layer-shadow" type="checkbox" :checked="!!single.shadow" @change="setShadow('enabled', $event.target.checked)"> 使用外阴影</label>
               <div v-if="single.shadow" class="property-grid">
@@ -2403,12 +2443,18 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
     -->
     <div v-if="packageSummary" class="export-mask" @click.self="!busy && closeImport()">
       <section data-testid="design-package-import-dialog" class="export-dialog package-import" role="dialog" aria-modal="true" aria-labelledby="package-import-heading">
-        <h3 id="package-import-heading">导入工程包</h3>
+        <h3 id="package-import-heading">{{ packageSummary.kind === 'psd' ? '导入 Photoshop 文件' : '导入工程包' }}</h3>
         <p><b>{{ packageSummary.name }}</b> · {{ packageSummary.artboard?.w }} × {{ packageSummary.artboard?.h }} mm</p>
         <p class="export-dimensions" data-testid="design-package-stats">
-          {{ packageSummary.stats?.layerCount }} 个图层 · {{ packageSummary.stats?.imageCount }} 张图片 · {{ packageSummary.stats?.fontCount }} 种字体 · 解压 {{ (packageSummary.totalBytes / 1024 / 1024).toFixed(1) }} MB
+          {{ packageSummary.stats?.layerCount }} 个图层 · {{ packageSummary.stats?.imageCount }} 张图片 <template v-if="packageSummary.kind === 'psd'">· {{ packageSummary.width }} × {{ packageSummary.height }} px · {{ packageSummary.dpi }} DPI</template><template v-else>· {{ packageSummary.stats?.fontCount }} 种字体 · 解压 {{ (packageSummary.totalBytes / 1024 / 1024).toFixed(1) }} MB</template>
         </p>
         <p class="muted">导入会新建一份副本（新工程、第 1 版），不会覆盖现有工程，也不改动当前画板。</p>
+        <div v-if="packageSummary.kind === 'psd'" class="psd-report" data-testid="design-psd-report">
+          <h4>转换报告</h4>
+          <p class="muted">请检查以下差异；导入后可编辑的文字和形状仍可修改。</p>
+          <p v-if="!packageSummary.warnings?.length" class="muted">未发现需要提示的转换。</p>
+          <ul v-else><li v-for="(item, index) in packageSummary.warnings" :key="index"><b>{{ item.layer }}</b>：{{ item.message }}</li></ul>
+        </div>
         <div v-if="packageSummary.fonts?.length" class="package-fonts">
           <h4>字体</h4>
           <div v-for="font in packageSummary.fonts" :key="font.family" class="package-font-row" :data-font="font.family">
@@ -2437,13 +2483,31 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         </div>
       </section>
     </div>
+    <Teleport to="body">
+      <div v-if="imageMenu" class="design-image-menu" data-testid="design-image-menu" role="menu" aria-label="图片编辑" :style="{ left: `${imageMenu.x}px`, top: `${imageMenu.y}px` }" @contextmenu.prevent>
+        <button role="menuitem" data-testid="design-menu-crop" :disabled="singleBlocked" @click="openImageEdit('crop')"><AppIcon name="crop" /> 剪切（裁剪）…</button>
+        <button role="menuitem" data-testid="design-menu-erase" :disabled="singleBlocked" @click="openImageEdit('erase')"><AppIcon name="brush" /> 魔法擦除…</button>
+        <span v-if="singleBlocked">请先解锁图层</span>
+      </div>
+      <DesignImageEditor v-if="imageEdit" :layer="imageEdit.layer" :asset="imageEdit.asset" :mode="imageEdit.mode" :apply-error="error" :busy="busy" @apply="applyImageEdit" @cancel="!busy && (imageEdit = null)" />
+    </Teleport>
     <ConfirmDialog v-if="pending" :title="pending.title" :message="pending.message" :confirm-text="pending.confirmText" @confirm="confirmPending" @cancel="cancelPending" />
   </section>
 </template>
 
 <style scoped>
+.design-image-menu { position: fixed; z-index: 2100; min-width: 190px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--paper-card); color: var(--ink); box-shadow: 0 6px 24px #0003; }
+.design-image-menu button { display: block; width: 100%; border: 0; text-align: left; padding: 10px 14px; }
+.design-image-menu button:hover:not(:disabled), .design-image-menu button:focus-visible { background: #b03a2e12; }
+.design-image-menu span { display: block; padding: 6px 14px; font-size: 12px; }
+.designer-more { position: relative; }
+.designer-more summary { list-style: none; cursor: pointer; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--paper-card); font-size: 12px; color: var(--ink); }
+.designer-more summary::-webkit-details-marker { display: none; }
+.designer-more summary:hover, .designer-more[open] summary { color: var(--cinnabar); border-color: var(--cinnabar); }
+.designer-more-menu { position: absolute; z-index: 50; right: 0; top: calc(100% + 5px); min-width: 152px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--paper-card); box-shadow: 0 6px 24px #0003; }
+.designer-more-menu button { display: block; width: 100%; border: 0; text-align: left; padding: 9px 10px; white-space: nowrap; }
 .portrait-mask{position:fixed;inset:0;z-index:2000;background:rgba(30,26,20,.45);display:grid;place-items:center}.portrait-picker{width:440px;padding:24px;background:var(--paper-card);color:var(--ink);border-radius:14px;box-shadow:0 20px 60px #0003}.portrait-picker label{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:16px 0}.portrait-picker select{max-width:280px}.portrait-picker p{color:var(--stone);line-height:1.7}
-.designer-view { min-width: 960px; }
+.designer-view { min-width: 0; }
 button { border: 1px solid var(--line-strong); background: var(--paper-card); color: var(--ink); border-radius: 5px; padding: 6px 9px; font-size: 12px; }
 button:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--cinnabar); }
 button:disabled { opacity: .42; cursor: default; }
@@ -2466,7 +2530,7 @@ button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: v
 .export-done-path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; color: var(--ink-2); background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; margin-left: 6px; overflow-wrap: anywhere; }
 .export-done button { margin-left: 0; }
 .export-done button:first-of-type { margin-left: auto; }
-.designer-workspace { display: grid; grid-template-columns: var(--tools-w, 176px) minmax(450px, 1fr); gap: 12px; align-items: start; position: relative; }
+.designer-workspace { --actual-tools-w: var(--tools-w, 176px); display: grid; grid-template-columns: var(--actual-tools-w) minmax(0, 1fr); gap: 12px; align-items: start; position: relative; }
 .designer-workspace.focus-canvas { grid-template-columns: minmax(0, 1fr); }
 .designer-workspace.focus-canvas .tools-panel,
 .designer-workspace.focus-canvas .workspace-resizer { display: none; }
@@ -2474,7 +2538,7 @@ button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: v
 .designer-workspace.focus-canvas .canvas-toolbar,
 .designer-workspace.focus-canvas .canvas-status { padding-right: 8px; }
 /* 左栏宽度拖拽柄：骑在两列之间的 gap 上（11px 热区），拖动时全局禁选中防拖出选区 */
-.workspace-resizer { position: absolute; top: 0; bottom: 0; left: calc(var(--tools-w, 176px) + 1px); width: 10px; z-index: 30; cursor: col-resize; touch-action: none; }
+.workspace-resizer { position: absolute; top: 0; bottom: 0; left: calc(var(--actual-tools-w) + 1px); width: 10px; z-index: 30; cursor: col-resize; touch-action: none; }
 .workspace-resizer::after { content: ''; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px; border-radius: 1px; background: transparent; transition: background .15s; }
 .workspace-resizer:hover::after, .designer-workspace.tools-resizing .workspace-resizer::after { background: var(--cinnabar-soft); }
 .designer-workspace.tools-resizing { user-select: none; cursor: col-resize; }
@@ -2482,9 +2546,9 @@ button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: v
 /* 素材库浮层顶部让开画布工具栏那一行（撤销 / 重做 / 上移 / 下移 / 置顶 / 置底）：
    它原本 top: 0，从工作区顶部铺下来，会把工具栏左半整排盖住。工具栏高 48px，再留 8px 间隙
    （2026-10-11 用户要求：别遮挡那一排按钮）。 */
-.designer-panel.asset-library { position: absolute; top: 56px; bottom: 0; left: calc(var(--tools-w, 176px) + 12px); width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
-/* 属性面板抽屉：浮在画布右侧；选中图层自动弹出、点空白画布取消选中自动收起（无手动开关）；
-   打开时工具条与状态栏让出其宽度（缩放/保存状态不被盖住） */
+.designer-panel.asset-library { position: absolute; top: 56px; bottom: 0; left: calc(var(--actual-tools-w) + 12px); width: 256px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
+/* 属性面板常驻画布右侧；选中图层时收起画布设置，让选中项的操作优先可见。
+   工具条与状态栏让出面板宽度，避免缩放和保存状态被遮挡。 */
 .designer-panel.inspector { position: absolute; top: 0; bottom: 0; right: 0; width: 264px; z-index: 40; box-shadow: 0 6px 24px rgba(43, 38, 34, 0.22); }
 .canvas-column.inspector-open .canvas-toolbar,
 .canvas-column.inspector-open .canvas-status { padding-right: 276px; }
@@ -2493,8 +2557,32 @@ h3 { font-size: 13px; margin: 4px 0 10px; display: flex; align-items: center; ju
 h3:not(:first-child) { margin-top: 20px; padding-top: 13px; border-top: 1px solid var(--line); }
 h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-size: 12px; margin: 14px 0 8px; }
 .tool-grid, .property-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.add-tools button { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-width: 0; min-height: 34px; padding: 6px 3px; white-space: nowrap; }
+.add-tools button :deep(.app-icon) { width: 16px; height: 16px; }
+.style-actions button { min-width: 0; padding: 6px 3px; white-space: nowrap; font-size: 11px; }
+.projects-panel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.projects-panel summary, .board-settings > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--ink); font-size: 13px; font-weight: 600; list-style: none; }
+.projects-panel summary::-webkit-details-marker, .board-settings > summary::-webkit-details-marker { display: none; }
+.projects-panel summary::after, .board-settings > summary::after { content: '›'; margin-left: auto; color: var(--stone); font-size: 18px; line-height: 1; transition: transform .15s; }
+.projects-panel[open] summary::after, .board-settings[open] > summary::after { transform: rotate(90deg); }
+.panel-count { margin-left: auto; color: var(--stone); font-size: 11px; font-weight: 400; }
+.projects-panel summary::after { margin-left: 0; }
+.projects-panel .panel-count + * { margin-left: 0; }
+.projects-panel[open] .project-list { margin-top: 8px; }
+.board-settings > summary { min-height: 28px; margin-bottom: 10px; }
+.board-settings:not([open]) > summary { margin-bottom: 0; }
+.board-settings > summary:focus-visible, .projects-panel summary:focus-visible, .layer-actions button:focus-visible, .icon-button:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 2px; }
+.gradient-editor { display: grid; gap: 7px; margin: 8px 0; }
+.gradient-editor > label { margin-bottom: 0; }
+.gradient-stop { display: grid; grid-template-columns: minmax(42px, auto) 34px minmax(40px, 1fr) minmax(40px, 1fr); align-items: center; gap: 5px; color: var(--ink-2); font-size: 11px; }
+.gradient-stop input[type="color"] { height: 30px; padding: 2px; }
+.gradient-stop input[type="number"] { padding: 6px 3px; }
+.gradient-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.gradient-actions button { min-width: 0; padding: 6px 3px; white-space: nowrap; font-size: 11px; }
+.image-quick-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+.image-quick-actions button { min-width: 0; padding: 7px 3px; white-space: nowrap; }
 .align-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
-.align-grid button { font-size: 11px; padding: 6px 2px; }
+.align-grid button { display: flex; align-items: center; justify-content: center; gap: 2px; min-width: 0; padding: 7px 2px; font-size: 10px; white-space: nowrap; }
 .muted, .locked-note { font-size: 11px; color: var(--stone); line-height: 1.7; margin: 8px 0; }
 .locked-note { color: var(--warn); }
 .project-list { max-height: 190px; overflow: auto; }
@@ -2503,8 +2591,10 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .project-open { flex: 1; min-width: 0; text-align: left; border: 0; background: transparent; padding: 7px; }
 .project-open b, .project-open small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-open b { font-weight: 500; } .project-open small { font-size: 10px; color: var(--stone); margin-top: 4px; }
-.icon-button { padding: 4px 5px; border: 0; background: transparent; font-size: 12px; }
-.group-actions { margin-bottom: 8px; }
+.icon-button { display: inline-grid; place-items: center; flex: none; min-width: 28px; min-height: 28px; padding: 4px; border: 0; background: transparent; font-size: 12px; }
+.layer-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-bottom: 8px; }
+.layer-actions button { display: grid; place-items: center; min-width: 0; min-height: 32px; padding: 5px 2px; }
+.layer-actions button:last-child:hover:not(:disabled) { color: var(--warn); border-color: var(--warn); }
 .layer-list { max-height: 290px; overflow: auto; margin-bottom: 8px; }
 .layer-row { display: flex; align-items: center; min-height: 32px; border: 1px solid transparent; border-bottom-color: var(--line); border-radius: 4px; cursor: pointer; position: relative; }
 .layer-row.selected { border-color: var(--cinnabar); background: var(--cinnabar-soft); } .layer-row.hidden .layer-name { opacity: .45; }
@@ -2512,17 +2602,21 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .group-member { margin-left: 12px; border-left-color: var(--line-strong); }
 .layer-name { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; }
 /* 行内操作层：hover 覆盖在名称上方（实底、不挤压布局），锁/开仍常显在行尾 */
-.layer-row-actions { position: absolute; right: 24px; top: 0; bottom: 0; display: none; align-items: center; gap: 1px; padding: 0 2px; background: var(--paper-card); border-radius: 4px; }
+.layer-row-actions { position: absolute; right: 28px; top: 0; bottom: 0; display: none; align-items: center; gap: 1px; padding: 0 2px; background: var(--paper-card); border-radius: 4px; }
 .layer-row.group-member .layer-row-actions, .layer-row.selected .layer-row-actions { background: var(--paper); }
 .layer-row:hover .layer-row-actions, .layer-row:focus-within .layer-row-actions { display: inline-flex; }
-.layer-row-actions .icon-button { font-size: 11px; padding: 2px 3px; min-width: 17px; }
+.layer-row-actions .icon-button { font-size: 11px; padding: 2px; min-width: 24px; min-height: 24px; }
 .adopted-flag { font-size: 11px; color: var(--warn); line-height: 1; }
 /* 徽标一律 nowrap + inline-block：表格/弹性布局按 min-content 分列宽，中文徽标可断字，
    窄窗口下「仅编辑」会被拆成两行（同 I-14 的 .det-flag）。 */
 .layer-flag { flex: none; display: inline-block; white-space: nowrap; font-size: 11px; line-height: 1.4; padding: 0 5px; border-radius: 999px; color: var(--cinnabar); background: var(--cinnabar-soft); border: 1px solid currentColor; }
 .canvas-column { min-width: 0; position: relative; --inspector-reserve: 276px; }
 .canvas-column:not(.inspector-open) { --inspector-reserve: 0px; }
-.canvas-toolbar { display: flex; align-items: center; gap: 7px; background: var(--paper-card); border: 1px solid var(--line); padding: 8px; border-radius: 8px 8px 0 0; }
+.canvas-toolbar { display: flex; align-items: center; gap: 7px; overflow-x: auto; scrollbar-width: thin; background: var(--paper-card); border: 1px solid var(--line); padding: 8px; border-radius: 8px 8px 0 0; }
+.canvas-toolbar > button, .canvas-toolbar > label { flex: 0 0 auto; white-space: nowrap; }
+.canvas-toolbar::-webkit-scrollbar { height: 6px; }
+.canvas-toolbar::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 6px; }
+.order-button { display: inline-flex; align-items: center; justify-content: center; gap: 3px; }
 .toolbar-spacer { flex: 1; }
 .canvas-scroll { overflow-x: hidden; overflow-y: auto; min-height: 410px; height: calc(100vh - 315px); max-height: 860px; padding: 30px; padding-right: calc(30px + var(--inspector-reserve)); background-color: var(--line); background-image: radial-gradient(var(--stone) .6px, transparent .6px); background-size: 12px 12px; }
 .canvas-horizontal-scroll { height: 20px; margin-right: var(--inspector-reserve); overflow-x: scroll; overflow-y: hidden; background: var(--paper-card); border: 1px solid var(--line); box-sizing: border-box; scrollbar-color: var(--stone) var(--paper-card); }
@@ -2583,6 +2677,20 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .canvas-status { display: flex; justify-content: space-between; gap: 12px; padding: 9px; background: var(--paper-card); border: 1px solid var(--line); border-radius: 0 0 8px 8px; font-size: 11px; color: var(--ink-2); }
 .unsaved { color: var(--cinnabar); } .shortcut-note { font-size: 11px; color: var(--stone); line-height: 1.7; margin: 8px 0; }
 .inspector label, .tools-panel label { display: flex; flex-direction: column; gap: 5px; color: var(--ink-2); font-size: 11px; margin-bottom: 9px; }
+.inspector .property-grid > label { margin-bottom: 2px; }
+.color-adjust { margin: 14px 0; padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.color-adjust summary { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; font-weight: 600; list-style: none; }
+.color-adjust summary::-webkit-details-marker { display: none; }
+.color-adjust summary::after { content: '›'; margin-left: auto; color: var(--stone); font-size: 18px; line-height: 1; transition: transform .15s; }
+.color-adjust[open] summary::after { transform: rotate(90deg); }
+.color-adjust summary span { color: var(--cinnabar); font-size: 11px; font-weight: 400; }
+.color-adjust summary:focus-visible, .adjust-reset-field:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 2px; }
+.adjust-list { display: grid; gap: 8px; margin: 10px 0; }
+.adjust-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) 38px 26px; gap: 4px; align-items: center; font-size: 11px; }
+.inspector .adjust-row label { margin: 0; white-space: nowrap; }
+.adjust-row input[type="range"] { width: 100%; min-width: 0; margin: 0; }
+.adjust-row output { text-align: right; font-variant-numeric: tabular-nums; }
+.adjust-reset-field { width: 26px; height: 26px; padding: 0; font-size: 16px; line-height: 1; }
 .inspector input, .inspector select, .inspector textarea, .tools-panel input, .tools-panel select, .tools-panel textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--ink); border-radius: 4px; padding: 6px; font: inherit; font-size: 12px; }
 .inspector .color-field, .tools-panel .color-field { gap: 6px; }
 .inspector .color-control, .tools-panel .color-control { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 4px 10px 4px 5px; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--input-bg); transition: border-color .15s, box-shadow .15s; }
@@ -2611,10 +2719,13 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
 /* 导入检查页：字体冲突要逐条给处理方式，比导出对话框宽一些，内容多了自己滚 */
 .package-import { width: 520px; max-height: 84vh; overflow: auto; }
+.psd-report { margin: 14px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.psd-report h4 { margin: 0; }
+.psd-report ul { max-height: 220px; overflow: auto; margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.7; color: var(--ink-2); }
 .package-fonts { margin: 14px 0 0; }
 .package-fonts h4 { font-size: 12px; margin: 0 0 8px; color: var(--ink-2); }
 .package-font-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; padding: 6px 0; border-top: 1px solid var(--line); }
 .package-font-name { font-weight: 600; }
 .package-font-missing { color: var(--warn); }
-@media (max-width: 1180px) { .designer-workspace { grid-template-columns: min(160px, var(--tools-w, 176px)) minmax(400px, 1fr); gap: 8px; } .designer-panel.asset-library { width: 230px; } .designer-panel.inspector { width: 236px; } .canvas-column { --inspector-reserve: 248px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .page-header { align-items: flex-start; } }
+@media (max-width: 1180px) { .designer-workspace { --actual-tools-w: min(260px, var(--tools-w, 176px)); grid-template-columns: var(--actual-tools-w) minmax(0, 1fr); gap: 8px; } .designer-panel.asset-library { width: 230px; left: calc(var(--actual-tools-w) + 8px); } .designer-panel.inspector { width: 236px; } .canvas-column { --inspector-reserve: 248px; } .canvas-column.inspector-open .canvas-toolbar, .canvas-column.inspector-open .canvas-status { padding-right: 248px; } .designer-panel { padding: 9px; } .order-button span { display: none; } .page-header { align-items: flex-start; } }
 </style>

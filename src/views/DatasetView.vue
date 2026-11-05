@@ -11,6 +11,7 @@ import {
 } from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import PageHeader from '../components/PageHeader.vue'
+import AppIcon from '../components/AppIcon.vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
@@ -734,7 +735,7 @@ watch(() => cellNav.req, async (req) => {
       <template #actions>
         <span v-if="errorMsg" class="error-text">{{ errorMsg }}</span>
         <button class="btn-primary" :disabled="importing" @click="startImport">
-          {{ importing ? '导入中…' : '导入数据文件' }}
+          <AppIcon name="upload" /> {{ importing ? '导入中…' : '导入数据文件' }}
         </button>
       </template>
     </PageHeader>

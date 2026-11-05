@@ -10,6 +10,7 @@ import TemplateView from './views/TemplateView.vue'
 import PrintCenterView from './views/PrintCenterView.vue'
 import BackgroundDesignerView from './views/BackgroundDesignerView.vue'
 import GuideDialog from './components/GuideDialog.vue'
+import AppIcon from './components/AppIcon.vue'
 import { toUserMessage } from '../electron/user-error.cjs'
 import { cellNav } from './lib/cell-nav.js'
 import { designerNav } from './lib/designer-nav.js'
@@ -342,7 +343,7 @@ onMounted(async () => {
           :class="{ active: activeTab === tab.id }"
           @click="activeTab = tab.id"
         >
-          <span class="nav-label">{{ tab.label }}</span>
+          <span class="nav-label"><AppIcon :name="{ dataset: 'table', photos: 'portrait', designer: 'brush', template: 'layout', print: 'print' }[tab.id]" :size="16" /> {{ tab.label }}</span>
           <span class="nav-hint">{{ tab.hint }}</span>
         </button>
       </nav>
@@ -640,6 +641,8 @@ onMounted(async () => {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  flex: none;
+  white-space: nowrap;
 }
 
 .brand-seal {
@@ -664,11 +667,13 @@ onMounted(async () => {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  padding: 6px 16px;
+  padding: 6px 12px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: var(--ink-2);
+  flex: none;
+  white-space: nowrap;
 }
 
 .nav-item:hover {
@@ -694,6 +699,14 @@ onMounted(async () => {
 .nav-hint {
   font-size: 11px;
   color: var(--stone);
+}
+
+@media (max-width: 1180px) {
+  .app-header { gap: 10px; padding: 10px 18px; }
+  .brand-sub, .nav-hint { display: none; }
+  .app-nav { min-width: 0; gap: 4px; overflow-x: auto; }
+  .nav-item { padding: 7px 8px; }
+  .theme-toggle { flex: none; padding: 5px 8px; white-space: nowrap; }
 }
 
 .app-main {
