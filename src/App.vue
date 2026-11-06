@@ -11,6 +11,7 @@ import PrintCenterView from './views/PrintCenterView.vue'
 import BackgroundDesignerView from './views/BackgroundDesignerView.vue'
 import GuideDialog from './components/GuideDialog.vue'
 import AppIcon from './components/AppIcon.vue'
+import brandLogo from '../electron/brand/printpress-logo-v2.png'
 import { toUserMessage } from '../electron/user-error.cjs'
 import { cellNav } from './lib/cell-nav.js'
 import { designerNav } from './lib/designer-nav.js'
@@ -348,8 +349,9 @@ onMounted(async () => {
   <div class="app-shell">
     <header class="app-header">
       <div class="brand">
+        <img class="brand-logo" :src="brandLogo" alt="批印坊 Logo" width="34" height="34">
         <span class="brand-seal">批印坊</span>
-        <span class="brand-sub">本地离线批量打印</span>
+        <span class="brand-sub">本地智能批量制作</span>
       </div>
       <nav class="app-nav">
         <button
@@ -656,11 +658,12 @@ onMounted(async () => {
 
 .brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   flex: none;
   white-space: nowrap;
 }
+.brand-logo { width: 34px; height: 34px; flex: none; object-fit: contain; }
 
 .brand-seal {
   font-size: 20px;

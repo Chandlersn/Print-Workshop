@@ -407,7 +407,7 @@ console.log('== 7. 种子幂等 + 文案口径 ==')
   ok(/templateNames\(\)/.test(seed), '模板去重仍在')
 
   ok(/7 套示例模板/.test(src('src/App.vue')), '首启文案改为 7 套（实际种子是 7 套）')
-  ok(/7 套示例模板/.test(src('src/components/GuideDialog.vue')), '引导弹窗同步')
+  ok(/docs\/使用说明\.md\?raw/.test(src('src/components/GuideDialog.vue')), '引导弹窗直接使用同一份说明文档')
   ok(!/4 套示例模板|4 套模板/.test(src('src/App.vue') + src('src/components/GuideDialog.vue')),
     '不再有「4 套」残留')
 
@@ -725,28 +725,16 @@ console.log('== 11. 应用内说明与 docs/使用说明.md 的章节骨架必�
   // 应用内弹窗（GuideDialog.vue）停在 v0.2 时代（说「三步打出第一批」
   // 「自带 7 套示例模板」「应用不会自动下载更新」，全反了）。
   //
-  // 这条守卫钉「章节骨架」这一层：两处的二级标题必须逐条相同、顺序一致。
-  // 正文允许按弹窗阅读压缩（这是设计），但**章节的增减必须同步**——
-  // 改功能时漏改一处就会红，逼着两处一起动。
+  // 应用内现在直接渲染同一份 Markdown。守住原始文件导入，避免再次拆成两份手工文案。
   const mdSrc = src('docs/使用说明.md')
   const vueSrc = src('src/components/GuideDialog.vue')
 
   // md 的二级标题（`### ` 不算：`^##\s` 要求第三个字符是空白，故 `###` 不匹配）
   const mdTitles = [...mdSrc.matchAll(/^##\s+(.+?)\s*$/gm)].map((m) => m[1])
-  // vue 的 SECTIONS 标题（`title: '...'`，只此一处形态）
-  const vueTitles = [...vueSrc.matchAll(/^\s*title:\s*'([^']+)'/gm)].map((m) => m[1])
-
   ok(mdTitles.length > 0, `docs/使用说明.md 解析到 ${mdTitles.length} 个章节`)
-  ok(vueTitles.length > 0, `GuideDialog.vue 解析到 ${vueTitles.length} 个章节`)
-  ok(mdTitles.length === vueTitles.length,
-    '两处章节数量一致', { md: mdTitles.length, vue: vueTitles.length })
-
-  const diff = []
-  const n = Math.max(mdTitles.length, vueTitles.length)
-  for (let i = 0; i < n; i++) {
-    if (mdTitles[i] !== vueTitles[i]) diff.push({ i, md: mdTitles[i], vue: vueTitles[i] })
-  }
-  ok(diff.length === 0, '两处章节标题逐条一致（顺序也要一致）', diff)
+  ok(/import guideMarkdown from '\.\.\/\.\.\/docs\/使用说明\.md\?raw'/.test(vueSrc), '应用内说明在构建时导入同一份完整文档，章节无法单独漂移')
+  ok(/import designerMarkdown from '\.\.\/\.\.\/docs\/底图制作使用说明\.md\?raw'/.test(vueSrc), '底图指南也直接使用仓库文档')
+  ok(/marked\.parse/.test(vueSrc) && /v-html="content"/.test(vueSrc) && !/const SECTIONS\s*=/.test(vueSrc), '说明通过 Markdown 渲染，不再维护第二份章节和正文')
 }
 
 rmDeep(TMP)

@@ -356,10 +356,9 @@ check('界面把派生件体积算进「能收回多少」，并如实报出清�
   assert.ok(/d\.skipped/.test(app), '主进程跳过清理时要把原因照原话报出来')
 })
 check('应用内说明与使用说明同步写了这一条（两份都不许漏）', () => {
-  for (const f of ['src/components/GuideDialog.vue', 'docs/使用说明.md']) {
-    assert.ok(/一键做三件事/.test(read(f)), `${f} 要同步说明派生件回收`)
-    assert.ok(/派生件/.test(read(f)), `${f} 要提到派生件`)
-  }
+  assert.ok(/docs\/使用说明\.md\?raw/.test(read('src/components/GuideDialog.vue')), '应用内说明直接读取同一份文档')
+  const guide = read('docs/使用说明.md')
+  for (const term of ['浏览器缓存', '工程残留', '派生件', '原件']) assert.ok(guide.includes(term), `使用说明要解释 ${term}`)
 })
 // 结果文案可能很长（「…被系统占用，将在下次启动时清理；清理了 3 个出片派生件（2.0 MB）」），
 // 标签列一旦允许收缩，中文会退化成逐字换行的竖排。这里钉住样式；

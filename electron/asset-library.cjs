@@ -390,6 +390,17 @@ function referencedAssetIds(options = {}) {
   for (const override of loadJson('photo-overrides', { expect: 'array' }) || []) {
     if (override.assetId) refs.add(override.assetId)
   }
+  for (const processed of loadJson('photo-processing-cache', { expect: 'array' }) || []) {
+    if (processed.assetId) refs.add(processed.assetId)
+    if (processed.sourceAssetId) refs.add(processed.sourceAssetId)
+    if (processed.restoreAssetId) refs.add(processed.restoreAssetId)
+  }
+  for (const entry of loadJson('photo-processing-singles', { expect: 'array' }) || []) {
+    for (const id of [entry.sourceAssetId, entry.assetId, entry.restoreAssetId]) if (ASSET_ID.test(id)) refs.add(id)
+  }
+  for (const state of loadJson('photo-processing', { expect: 'array' }) || []) {
+    for (const id of Object.values(state.items || {})) if (ASSET_ID.test(id)) refs.add(id)
+  }
   const staging = resolveInsideDataDir('photo-import-staging')
   if (fs.existsSync(staging)) {
     const stat = fs.lstatSync(staging)

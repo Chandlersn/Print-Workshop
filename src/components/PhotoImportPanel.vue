@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const props = defineProps({ datasetId: { type: String, required: true }, columns: { type: Array, required: true }, matchColumn: { type: String, default: '' }, embedded: Boolean })
-const emit = defineEmits(['close', 'edit-cell'])
+const emit = defineEmits(['close', 'edit-cell', 'report'])
 const column = computed(() => props.matchColumn || '')
 const result = ref(null)
 const busy = ref(false)
@@ -39,9 +39,10 @@ watch(search, value => {
 watch([filter, search, page, lastIssueRow, identifierKey], saveTableState)
 // Thumbnails are optional caches; fall back to the managed original once on load failure.
 const photoStates = ref({})
-const photoUrl = row => `pp://media/${row.assetId}`
+const photoUrl = row => `pp://media/${row.processedAssetId || row.assetId}`
 const fileByAsset = computed(() => new Map((result.value?.files || []).filter(f => !f.error).map(f => [f.assetId, f])))
 const rowPhotoUrl = row => {
+  if (row.processedAssetId && row.processedAssetId !== row.assetId) return photoUrl(row)
   const file = fileByAsset.value.get(row.assetId)
   return file?.thumbFile && !photoStates.value[row.assetId] ? `pp://media/${file.thumbFile}` : photoUrl(row)
 }
@@ -107,7 +108,7 @@ async function refresh() {
       window.printpress.photoImportTasks(props.datasetId),
       window.printpress.getDataset(props.datasetId),
     ])
-    if (alive && token === generation) { result.value = report; taskHistory.value = tasks; dsDetail.value = detail }
+    if (alive && token === generation) { result.value = report; taskHistory.value = tasks; dsDetail.value = detail; emit('report', report) }
   } catch (err) {
     if (alive && token === generation) error.value = toUserMessage(err)
   } finally {
@@ -115,6 +116,7 @@ async function refresh() {
   }
 }
 
+defineExpose({ refresh })
 async function importFolder(mode = 'append') {
   const token = ++generation
   if (pendingSelection.value?.token) window.printpress.cancelPhotoSelection(pendingSelection.value.token).catch(() => {})

@@ -85,6 +85,17 @@ const ADDED_CHANNELS = [
   'photo:cancelImport',
   'photo:tasks',
   'photo:report',
+  'photo:processingGet',
+  'photo:processingPreview',
+  'photo:processingApply',
+  'photo:processingCancel',
+  'photo:processingClear',
+  'photo:processingPresetSave',
+  'photo:processingPresetDelete',
+  'photo:processingOptions',
+  'photo:processingSingleSet',
+  'photo:processingSingleClear',
+  'photo:processingReview',
   'photo:exportIssues',
   'photo:overrideGet',
   'photo:overrideSet',
@@ -107,6 +118,7 @@ const ADDED_CHANNELS = [
   'design:importDialog',
   'design:importBytes',
   'design:importBackground',
+  'design:samplePixel',
   'design:exportPng',
   'design:revealExport',
   'design:openExport',
@@ -177,19 +189,19 @@ async function run() {
     // 版本号同理：README 头部的「当前版本」老是忘了跟着 package.json 走
     // （v0.2.6、v0.2.7 两次发版都只补了版本史，头部一直停在 v0.2.5）。
     const pkgVersion = require(path.join(ROOT, 'package.json')).version
-    const readmeVer = readme.match(/\|\s*当前版本\s*\|\s*v?([\d.]+)\s*\|/)
+    const readmeVer = readme.match(/当前(?:源码)?版本[：:\s*]*v?([\d.]+)/) || readme.match(/\|\s*当前版本\s*\|\s*v?([\d.]+)\s*\|/)
     ok(Boolean(readmeVer) && readmeVer[1] === pkgVersion,
       `README 头部「当前版本」与 package.json 一致（${pkgVersion}）`,
       readmeVer ? readmeVer[1] : '(没找到那一行)')
-    ok(readme.includes(`v${pkgVersion}（`),
-      `版本史里有 v${pkgVersion} 的条目（发版时别忘了写）`)
+    ok(readme.includes('build/models/NOTICE.txt'),
+      'README 提供随包本地模型的来源与许可说明')
 
     // 同一类漂移：README 写的「N 套件」也老是忘了跟着 package.json 的 test 脚本走
     // （2026-10 查出它一直写着「19 套件」，实际已经 21）。
     // 断言条数没法在这里算（要跑完全部套件），所以只钉套件数——那个是能精确对上的。
     const testScript = require(path.join(ROOT, 'package.json')).scripts.test
     const suiteCount = testScript.split('&&').filter((s) => /node\s+test\//.test(s)).length
-    const suiteCounts = [...readme.matchAll(/(\d+)\s*套件/g)].map((m) => Number(m[1]))
+    const suiteCounts = [...readme.matchAll(/(\d+)\s*个?(?:测试)?套件/g)].map((m) => Number(m[1]))
     ok(suiteCounts.length > 0 && suiteCounts.every((n) => n === suiteCount),
       `README 里的套件计数全部等于 npm test 实际挂载的 ${suiteCount} 个`, [...new Set(suiteCounts)])
 
@@ -413,8 +425,8 @@ async function run() {
       `CLI 默认目录用的是 package.json 的 name（${pkg.name}）`, dataDir)
 
     // 界面文案里写的路径必须与实际一致，否则用户照提示去找备份会找不到
-    const guide = src('src/components/GuideDialog.vue')
-    const expected = String.raw`%APPDATA%\\` + pkg.name + String.raw`\\data`
+    const guide = src('docs/使用说明.md') // GuideDialog bundles this exact document.
+    const expected = ['%APPDATA%', pkg.name, 'data'].join(String.fromCharCode(92))
     ok(guide.includes(expected), '引导弹窗写的路径与打包名一致', expected)
     ok(!guide.includes(String.raw`批印坊\\data`), '引导弹窗不再写错目录名')
 

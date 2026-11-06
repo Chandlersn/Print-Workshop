@@ -1,0 +1,19 @@
+MODNet: Trimap-Free Portrait Matting in Real Time
+Original authors: Zhanghan Ke, Jiayu Sun, Kaican Li, Qiong Yan, Rynson W. H. Lau.
+Copyright (c) 2020 ZHKKKe. Licensed under Apache License 2.0 (see LICENSE-MODNet.txt).
+Original project: https://github.com/ZHKKKe/MODNet
+ONNX conversion: https://huggingface.co/Xenova/modnet
+Model revision: c97c8724f40a66f0890931d9273a9e2872fff434
+File: onnx/model.onnx (unmodified)
+SHA-256: 07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9
+
+The application resizes and normalizes local images before inference; input photos
+are not uploaded. ONNX Runtime is provided under its own MIT license in the
+onnxruntime-node package.
+
+YuNet face detector: Copyright (c) 2020 Shiqi Yu. MIT (LICENSE-YuNet.txt).
+Official model: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+File: face_detection_yunet_2023mar.onnx (unmodified)
+SHA-256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+The face decoder follows the stride-based output contract documented by OpenCV
+FaceDetectorYN. Face detection is local and is used only for photo positioning.

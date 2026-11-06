@@ -19,7 +19,7 @@ const BLEND_MODES = Object.freeze(['normal', 'multiply', 'screen', 'overlay', 'd
  * 测试要验「更高版本被拒」时必须用 `Math.max(...SCHEMA_VERSIONS) + 1`，不要写死数字：
  * 写死会在下次抬版本时变成假失败（v6 落地时 design-editor/design-effects 就各中过一次）。
  */
-const SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8])
+const SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9])
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label}必须是对象`)
@@ -283,6 +283,14 @@ function normalizeDesign(input) {
         editorOnly: bool(l.editorOnly, false, '仅编辑可见'),
       }
       if (!BLEND_MODES.includes(out.blend)) throw new Error('不支持的混合模式')
+      // A reference photo is an ordinary editable image, permanently excluded from output.
+      // Its link only replaces the variable photo on the editor canvas.
+      if (l.referenceFor !== undefined) {
+        if (l.type !== 'image' || l.variable === true) throw new Error('参考样图必须为普通图片图层')
+        out.referenceFor = token(l.referenceFor, '参考样图关联图层')
+        if (out.referenceFor === id) throw new Error('参考样图不能关联自身')
+        out.editorOnly = true
+      }
       if (l.type === 'image' && l.variable === true) {
         out.variable = true
         out.bindColumn = string(l.bindColumn, '', 200, '照片绑定列').trim()
@@ -387,6 +395,7 @@ function normalizeDesign(input) {
   if (result.layers.some(layer => layer.type === 'image' && (layer.shadow !== undefined || layer.strokeWidth !== undefined))) version = Math.max(version, 7)
   // Version 8 preserves source-space erasures; older apps must not silently restore erased pixels.
   if (result.layers.some(layer => layer.erasures?.length)) version = Math.max(version, 8)
+  if (result.layers.some(layer => layer.referenceFor)) version = Math.max(version, 9)
   result.schemaVersion = version
   // Record uploaded fonts so a missing file cannot silently become a system fallback.
   const fontAssets = object(doc.fontAssets === undefined ? {} : doc.fontAssets, '字体素材表')
@@ -475,7 +484,8 @@ function renderDesign(input, options = {}) {
   const groupOpacity = new Map()
   for (const g of doc.groups || []) for (const id of g.layerIds) groupOpacity.set(id, g.opacity)
   const assetClasses = new Map()
-  const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly)).map(l => {
+  const referenced = new Set(includeEditorOnly ? doc.layers.filter(l => l.visible && l.referenceFor).map(l => l.referenceFor) : [])
+  const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly) && !(l.variable && referenced.has(l.id))).map(l => {
     let body = ''
     const effectiveOpacity = Math.min(1, Math.max(0, l.opacity * (groupOpacity.get(l.id) ?? 1)))
     /*

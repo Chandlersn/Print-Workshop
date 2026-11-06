@@ -42,4 +42,23 @@ function cropImageLayer(layer, crop) {
   const round = n => Math.round(n * 1e6) / 1e6
   return { ...layer, crop, w: round(w), h: round(h), x: round(layer.x + layer.w / 2 + dx * Math.cos(a) - dy * Math.sin(a) - w / 2), y: round(layer.y + layer.h / 2 + dx * Math.sin(a) + dy * Math.cos(a) - h / 2) }
 }
-module.exports = { EDIT_LIMITS, normalizeErasures, erasureMask, cropImageLayer }
+/** Snapshot the variable frame as a normal editor-only image, preserving its current fit. */
+function referenceImageLayer(layer, asset, id) {
+  if (!layer?.variable || layer.type !== 'image' || !asset?.width || !asset?.height) throw new Error('请先选择有照片的变量图')
+  const sample = { ...layer, id, name: `参考样图 · ${layer.name}`.slice(0, 120), assetId: asset.id, referenceFor: layer.id, editorOnly: true, locked: false, crop: { x: 0, y: 0, w: 1, h: 1 }, flipX: false, flipY: false }
+  delete sample.variable; delete sample.bindColumn; delete sample.fit; delete sample.focal; delete sample.radius
+  const ratio = asset.width / asset.height, frameRatio = layer.w / layer.h
+  const focal = layer.focal || { x: 0.5, y: 0.5 }
+  if (layer.fit === 'contain') {
+    sample.w = Math.min(layer.w, layer.h * ratio); sample.h = sample.w / ratio
+    const dx = (layer.w - sample.w) * (focal.x - 0.5), dy = (layer.h - sample.h) * (focal.y - 0.5)
+    const angle = (layer.rotation || 0) * Math.PI / 180
+    sample.x = layer.x + layer.w / 2 + dx * Math.cos(angle) - dy * Math.sin(angle) - sample.w / 2
+    sample.y = layer.y + layer.h / 2 + dx * Math.sin(angle) + dy * Math.cos(angle) - sample.h / 2
+  } else {
+    sample.crop.w = Math.min(1, frameRatio / ratio); sample.crop.h = Math.min(1, ratio / frameRatio)
+    sample.crop.x = (1 - sample.crop.w) * focal.x; sample.crop.y = (1 - sample.crop.h) * focal.y
+  }
+  return sample
+}
+module.exports = { EDIT_LIMITS, normalizeErasures, erasureMask, cropImageLayer, referenceImageLayer }

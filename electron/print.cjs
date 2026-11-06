@@ -138,11 +138,23 @@ async function photoPreflight(datasetId, templateId, rows) {
   const issues = photo.results.filter(item => !['matched', 'empty'].includes(item.status))
     .map(item => ({ ...item, rowId: ds.recordIds?.[item.rowIndex] || null,
       ...(item.reason ? { reason: toUserMessage(item.reason) } : {}) }))
+  const warnings = [], processingDetails = require('./photo-processing.cjs').details(ds), geometry = new Map()
+  const processed = require('./photo-processing.cjs').resolver(ds)
+  for (const item of photo.results) if (item.status === 'matched') {
+    const meta = processingDetails(item.assetId, ds.recordIds[item.rowIndex]), reasons = []
+    for (const code of meta.analysis.issues || []) reasons.push(({ 'no-face': '未识别人脸，请检查取景', 'multiple-faces': '检测到多人，请检查取景', 'face-clipped': '人脸可能被裁切', 'subject-clipped': '人物可能超出画面', upscaled: '照片放大较多，请检查清晰度' })[code] || code)
+    if (meta.stale) reasons.push('照片更换后旧单张修改已停用')
+    const id = processed(item.assetId, ds.recordIds[item.rowIndex])
+    if (!geometry.has(id)) geometry.set(id, require('./designs.cjs').assetGeometry(id))
+    const size = geometry.get(id)
+    if (photoLayers.some(layer => Math.min(size.width / layer.w, size.height / layer.h) * 25.4 < 150)) reasons.push('输出不足 150 dpi，建议检查清晰度')
+    if (reasons.length) warnings.push({ rowIndex: item.rowIndex, rowId: ds.recordIds[item.rowIndex], name: item.name, reasons })
+  }
   return {
     selectionFingerprint, templateRevision, bindingRevision: photo.bindingRevision, overrideRevision, fingerprint,
     recordCount: indexes.length, pageCount: Math.ceil(indexes.length / (layout.enabled ? layout.perPage : 1)),
     photoLayerCount: photoLayers.length, photoFrameCount: photoLayers.length * indexes.length,
-    photoEnabled: photo.enabled, photoColumn: photo.column, counts: photo.counts, issues,
+    photoEnabled: photo.enabled, photoColumn: photo.column, counts: photo.counts, issues, warnings,
     canOutput: !issues.some(item => ['ambiguous', 'invalid', 'broken'].includes(item.status)),
   }
 }

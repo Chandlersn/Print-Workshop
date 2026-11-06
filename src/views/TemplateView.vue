@@ -14,6 +14,7 @@ import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import { designerNav, openDesigner } from '../lib/designer-nav.js'
+import { photoProcessingRevision } from '../lib/photo-processing.js'
 import { anchorRatio } from '../lib/field-layout.cjs'
 import {
   MIN_CANVAS_ZOOM, MAX_CANVAS_ZOOM, clampCanvasZoom, stepCanvasZoom, fitCanvasZoom,
@@ -206,7 +207,7 @@ const dragState = ref(null)
 const canvasEl = ref(null)
 const designs = ref([])
 const activeDesign = ref(null)
-watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value, activeTpl.value?.id], async () => {
+watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value, activeTpl.value?.id, photoProcessingRevision.value], async () => {
   const token = ++photoReadToken
   samplePhotos.value = {}
   samplePhotoStyles.value = {}
@@ -216,7 +217,8 @@ watch(() => [activeDatasetId.value, sampleRow.value, activeDesign.value, activeT
     try {
       const report = await window.printpress.photoReport({ datasetId: activeDatasetId.value, column, rows: [sampleRowIndex.value] })
       const row = report.results[0]
-      return [column, row?.status === 'matched' ? `pp://media/${row.assetId}` : '']
+      if (row?.processingError) { errorMsg.value = row.processingError; return [column, ''] }
+      return [column, row?.status === 'matched' ? `pp://media/${row.processedAssetId || row.assetId}` : '']
     } catch { return [column, ''] }
   }))
   if (token === photoReadToken) samplePhotos.value = Object.fromEntries(entries)

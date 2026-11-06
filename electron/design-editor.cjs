@@ -77,6 +77,7 @@ function duplicateSelection(input, ids, { makeId, dx = 3, dy = 3, expandGroups =
     newIds.set(layer.id, id)
     return { ...layer, id, name: `${layer.name.slice(0, 117)} 副本`, x: Math.round((layer.x + dx) * 1000) / 1000, y: Math.round((layer.y + dy) * 1000) / 1000, locked: false }
   })
+  for (const copy of copies) if (newIds.has(copy.referenceFor)) copy.referenceFor = newIds.get(copy.referenceFor)
   const copiedGroups = doc.groups.filter(group => group.layerIds.every(id => selected.has(id))).map(group => ({ id: fresh('group'), name: `${group.name.slice(0, 117)} 副本`, layerIds: group.layerIds.map(id => newIds.get(id)) }))
   doc.layers.push(...copies)
   doc.groups.push(...copiedGroups)

@@ -301,47 +301,45 @@ async function main() {
   await pressRedo()
   await waitFor(draftTextOf('失焦提交的字'), '重做恢复 Esc 前的内容')
   await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
-  /*
-   * ---- 颜色控件 ----
-   * 过去只绑 @change，而原生 <input type="color"> 只保证发 input（拖动过程中连续发），
-   * change 要等取色器关掉才发、且不同环境行为并不一致——一旦 change 不来，用户看到的
-   * 就是「点了色块、选了颜色，画布上的字一点没变」，属于看不见的失败。
-   * 另外色块本体只有 34px 宽，用户点的往往是整块控件盒子，光靠 <label> 转发不可靠。
-   * 下面三条分别钉住：整块盒子能唤起取色器 / input 即时生效 / change 只记一条撤销。
-   */
-  const colorInput = `document.querySelector('[aria-label="选择文字颜色"]')`
+  // The text color entry must use our panel and pipette, including live preview,
+  // one-step undo, cancellation, and sampling a real pixel through Electron IPC.
   const draftTextColor = `(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.type==='text')?.color`
-  await evaluate(`(() => { const el=${colorInput}; window.__pickerCalls=0; el.showPicker=()=>{window.__pickerCalls++} })()`)
-  await realClickPoint(`(() => { const box=${colorInput}.closest('.color-control'); box.scrollIntoView({block:'center'}); const r=box.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)} })()`)
-  ok(await evaluate(`window.__pickerCalls`) >= 1, '真实点击颜色控件整块盒子即可唤起取色器（不依赖 label 转发）')
-  await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('input',{bubbles:true})) })()`)
-  await waitFor(`${draftTextColor}==='#0f7a3d'`, '取色器拖动过程中颜色即时生效')
-  ok(await evaluate(`document.querySelector('[data-design-layer="${firstTextId}"]')?.getAttribute('style')?.includes('color:#0f7a3d')`), '只发 input 事件时画布上的文字颜色也跟着变')
-  await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('change',{bubbles:true})) })()`)
-  await waitFor(`${draftTextColor}==='#0f7a3d'`, 'change 收尾后颜色保持最终值')
-  ok(true, 'change 收尾后颜色保持最终值')
+  ok(await evaluate(`!document.querySelector('input[type="color"][aria-label="\u9009\u62e9\u6587\u5b57\u989c\u8272"]')`), 'Text color entry does not expose the native color picker')
+  await realClickPoint(`(() => { const box=document.querySelector('[data-testid="text-color-toggle"]'); box.scrollIntoView({block:'center'}); const r=box.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)} })()`)
+  await waitFor(`Boolean(document.querySelector('[data-testid="text-color-panel"]'))`, 'custom text color panel')
+  await fill('[data-testid="text-color-hue"]', '120')
+  const beforeColorGesture = await evaluate(`document.querySelector('[data-testid="text-color-toggle"] code').textContent.toLowerCase()`)
+  await waitFor(`${draftTextColor} === ${JSON.stringify(beforeColorGesture)}`, 'hue change is persisted before dragging')
+  await evaluate(`(() => { const el=document.querySelector('[data-testid="text-color-square"]');el.scrollIntoView({block:'center'});window.__colorRect=el.getBoundingClientRect().toJSON() })()`)
+  const colorRect = await evaluate('window.__colorRect')
+  const colorStart = {x: Math.round(colorRect.x + colorRect.width * .5), y: Math.round(colorRect.y + colorRect.height * .5)}
+  const colorEnd = {x: Math.round(colorRect.x + colorRect.width * .8), y: Math.round(colorRect.y + colorRect.height * .3)}
+  ui.webContents.sendInputEvent({type:'mouseMove', ...colorStart})
+  ui.webContents.sendInputEvent({type:'mouseDown', button:'left', clickCount:1, ...colorStart})
+  ui.webContents.sendInputEvent({type:'mouseMove', modifiers:['leftButtonDown'], ...colorEnd})
+  await waitFor(`${draftTextColor} !== ${JSON.stringify(beforeColorGesture)}`, 'color changes during square drag')
+  const liveColor = await evaluate(draftTextColor)
+  ok(await evaluate(`document.querySelector('[data-design-layer="${firstTextId}"]')?.getAttribute('style')?.includes('color:${liveColor}')`), 'Dragging custom picker immediately updates visible text')
+  ui.webContents.sendInputEvent({type:'mouseUp', button:'left', clickCount:1, ...colorEnd})
+  await new Promise(resolve => setTimeout(resolve, 150))
   await pressUndo()
-  await waitFor(`${draftTextColor}==='#2b2622'`, '撤销回到取色前的颜色')
-  ok(true, '撤销一步即回到取色前的颜色（一次取色只记一条历史）')
+  await waitFor(`${draftTextColor} === ${JSON.stringify(beforeColorGesture)}`, 'one undo restores color before drag')
   await pressRedo()
-  await waitFor(`${draftTextColor}==='#0f7a3d'`, '重做恢复取色结果')
-  ok(true, '重做恢复取色结果')
-  /*
-   * 取色快照必须被别的编辑打断：input（实时生效）→ 一次普通编辑 → change。
-   * 若快照没被打断，撤销取色会把中间那次普通编辑一起回滚掉。
-   */
-  const draftTextValue = `(JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1')||'null')?.design)?.layers.find(l=>l.type==='text')?.text`
-  await evaluate(`(() => { const el=${colorInput}; el.value='#123456'; el.dispatchEvent(new Event('input',{bubbles:true})) })()`)
-  await fill('[data-testid="design-text"]', '取色打断测试')
-  await evaluate(`(() => { const el=${colorInput}; el.value='#0f7a3d'; el.dispatchEvent(new Event('change',{bubbles:true})) })()`)
-  await waitFor(`${draftTextColor}==='#0f7a3d'`, '打断后取色仍生效')
-  ok(true, '打断后取色仍生效')
+  await waitFor(`${draftTextColor} === ${JSON.stringify(liveColor)}`, 'redo restores dragged color')
+  await fill('[data-testid="text-color-hex"]', '#0f7a3d')
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, 'hex color is committed')
+  await click('[data-testid="text-pixel-pick"]')
+  ok(await evaluate(`!document.querySelector('[data-testid="text-color-panel"]') && document.querySelector('.design-stage').classList.contains('pixel-picking')`), 'Pipette uses the custom canvas cursor and closes the panel')
+  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+  ok(await evaluate(`!document.querySelector('.pixel-picking') && ${draftTextColor}==='#0f7a3d'`), 'Escape cancels pixel picking without changing color')
+  await evaluate(`(() => {const stage=document.querySelector('[data-testid="design-stage"]'), scroll=document.querySelector('.canvas-scroll').getBoundingClientRect();const el=document.createElement('div');el.id='pixel-sample-fixture';el.style.cssText='position:fixed;width:32px;height:32px;background:#e04b71;z-index:1000;left:'+(scroll.left+30)+'px;top:'+(scroll.top+30)+'px';stage.append(el)})()`)
+  await click('[data-testid="text-pixel-pick"]')
+  await realClickPoint(`(() => {const r=document.querySelector('#pixel-sample-fixture').getBoundingClientRect();return {x:Math.round(r.left+16),y:Math.round(r.top+16)}})()`)
+  await waitFor(`${draftTextColor}==='#e04b71'`, 'actual captured pixel updates text color')
+  ok(await evaluate(`!document.querySelector('.pixel-picking') && Boolean(document.querySelector('[data-testid="text-color-toggle"]'))`), 'Sampling exits pick mode and preserves the selected text layer')
+  await evaluate(`document.querySelector('#pixel-sample-fixture').remove()`)
   await pressUndo()
-  await waitFor(`${draftTextColor}==='#123456'`, '撤销只回退取色')
-  ok(await evaluate(`${draftTextValue}==='取色打断测试'`), '撤销取色不连带回滚中间那次普通编辑')
-  await pressRedo()
-  await fill('[data-testid="design-text"]', '图层编辑测试 TEST')
-  await waitFor(`${draftTextColor}==='#0f7a3d'`, '颜色收尾')
+  await waitFor(`${draftTextColor}==='#0f7a3d'`, 'pixel sampling is undone in one step')
   await click('[data-testid="design-add-rect"]')
   await pressUndo()
   await pressRedo()

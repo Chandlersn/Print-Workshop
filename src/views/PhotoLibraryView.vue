@@ -3,6 +3,8 @@ import { onMounted, onBeforeUnmount, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import AppIcon from '../components/AppIcon.vue'
 import PhotoImportPanel from '../components/PhotoImportPanel.vue'
+import PhotoProcessingPanel from '../components/PhotoProcessingPanel.vue'
+import PhotoReviewPanel from '../components/PhotoReviewPanel.vue'
 import { gotoCell } from '../lib/cell-nav.js'
 import { activeDataset, rememberDataset } from '../lib/active-dataset.js'
 import { toUserMessage } from '../../electron/user-error.cjs'
@@ -11,6 +13,7 @@ const detail = ref(null)
 const error = ref('')
 const loading = ref(true)
 const guidance = ref('')
+const importPanel = ref(null), processingRefresh = ref(0)
 let alive = true
 onBeforeUnmount(() => { alive = false })
 onMounted(async () => {
@@ -47,7 +50,9 @@ onMounted(async () => {
     <p v-if="error" role="alert">{{ error }}</p>
     <div v-if="!loading && !detail && !error" class="empty-library"><h2>先在数据页确定配图名单</h2><p>{{ guidance }}</p><button class="btn-primary" @click="emit('navigate', 'dataset')">前往数据页</button></div>
     <div v-if="detail" class="matching-context" data-testid="photo-auto-context"><span>当前配图：<strong>{{ detail.name }}</strong> · {{ detail.columns.find(c => c.key === detail.photoMatchColumn)?.alias || detail.photoMatchColumn }}</span><button class="btn-ghost" @click="emit('navigate', 'dataset')">返回数据页</button></div>
-    <PhotoImportPanel v-if="detail" :key="detail.id" embedded :dataset-id="detail.id" :columns="detail.columns" :match-column="detail.photoMatchColumn || ''" @edit-cell="({ rowIndex, key }) => gotoCell(detail.id, rowIndex, key)" />
+    <PhotoProcessingPanel v-if="detail" :key="`processing-${detail.id}`" :dataset-id="detail.id" :refresh-key="processingRefresh" @applied="importPanel?.refresh()" @navigate="page => emit('navigate', page)" />
+    <PhotoReviewPanel v-if="detail" :key="`review-${detail.id}`" :dataset-id="detail.id" :column="detail.photoMatchColumn" :refresh-key="processingRefresh" @applied="importPanel?.refresh()" />
+    <PhotoImportPanel v-if="detail" ref="importPanel" :key="detail.id" embedded :dataset-id="detail.id" :columns="detail.columns" :match-column="detail.photoMatchColumn || ''" @report="processingRefresh++" @edit-cell="({ rowIndex, key }) => gotoCell(detail.id, rowIndex, key)" />
   </section>
 </template>
 

@@ -42,7 +42,7 @@ const content = computed(() => {
       fontFamily: normalizeFamily,
       includeEditorOnly: props.showEditorOnly,
       showPhotoPlaceholder: true,
-      photoUrl: layer => props.showEditorOnly ? undefined : (props.photos[layer.bindColumn] || null),
+      photoUrl: layer => props.showEditorOnly ? (props.photos[layer.bindColumn] || undefined) : (props.photos[layer.bindColumn] || null),
       photoStyle: layer => props.showEditorOnly ? null : (props.photoStyles[layer.id] || null),
     })
   } catch (err) {

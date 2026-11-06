@@ -182,6 +182,9 @@ function saveTemplate(template, options = {}) {
       '请在画布上把这些字段拖回纸面内')
   }
   const ds = dataset.getDataset(String(template.datasetId)) // 不存在则抛错
+  const processing = require('./photo-processing.cjs').current(ds.id)
+  if (processing?.enabled && processing.column === ds.photoMatchColumn) template.photoProcessingRecipe = require('./photo-processing-pixels.cjs').normalizeRecipe(processing.recipe)
+  else if (template.photoProcessingRecipe) template.photoProcessingRecipe = require('./photo-processing-pixels.cjs').normalizeRecipe(template.photoProcessingRecipe)
   // 出口把关：画布上每个字段都必须对上数据集已激活打印的列——
   // 总数对不上（换数据集残留的失效字段 / 数据页事后取消「印」）不允许保存通过
   const m = matchFields(template, ds)

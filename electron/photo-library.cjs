@@ -599,8 +599,17 @@ async function report({ datasetId, column, rows } = {}) {
     try { thumbFile = library.getEntry(file.assetId).thumbFile } catch { /* optional cache */ }
     files.push(typeof info === 'string' ? { ...file, error: info } : { ...file, width: info.width, height: info.height, thumbFile })
   }
+  const matched = matchPhotos(ds.rows, column, ds.photoMatchColumn ? files : [], rows)
+  const processedPhoto = require('./photo-processing.cjs').resolver(ds)
+  const processingDetails = require('./photo-processing.cjs').details(ds)
+  for (const row of matched.results) if (row.status === 'matched') {
+    row.rowId = ds.recordIds[row.rowIndex]
+    row.processing = processingDetails(row.assetId, row.rowId)
+    try { row.processedAssetId = processedPhoto(row.assetId, row.rowId) }
+    catch (error) { row.processingError = error.message }
+  }
   return {
-    ...matchPhotos(ds.rows, column, ds.photoMatchColumn ? files : [], rows),
+    ...matched, datasetId: ds.id,
     imported: Boolean(binding), folderName: binding?.folderName || '', importedAt: binding?.importedAt || null,
     files: files.map(({ name, assetId, width, height, thumbFile, error }) => ({ name, assetId, width, height, thumbFile, ...(error ? { error } : {}) })),
     ignored: binding?.ignored || [],
@@ -620,14 +629,16 @@ async function preflightRows(ds, rowIndexes) {
   const binding = bindings().slice().reverse().find(item => item.datasetId === ds.id) || null
   const result = matchPhotos(ds.rows, column, binding?.files || [], selected)
   const verified = new Map()
+  const processedPhoto = require('./photo-processing.cjs').resolver(ds)
   for (const item of result.results) {
     if (item.status !== 'matched') continue
-    if (!verified.has(item.assetId)) {
-      try { designs.assetInfo(item.assetId); verified.set(item.assetId, null) }
-      catch (err) { verified.set(item.assetId, err.message) }
+    const verificationKey = `${item.assetId}:${ds.recordIds[item.rowIndex]}`
+    if (!verified.has(verificationKey)) {
+      try { designs.assetInfo(item.assetId); designs.assetInfo(processedPhoto(item.assetId, ds.recordIds[item.rowIndex])); verified.set(verificationKey, null) }
+      catch (err) { verified.set(verificationKey, err.message) }
       await new Promise(resolve => setImmediate(resolve))
     }
-    const error = verified.get(item.assetId)
+    const error = verified.get(verificationKey)
     if (error) {
       item.status = 'broken'
       item.reason = error
@@ -638,7 +649,7 @@ async function preflightRows(ds, rowIndexes) {
   }
   return {
     column, enabled: true, total: result.total, counts: result.counts, results: result.results,
-    bindingRevision: crypto.createHash('sha256').update(JSON.stringify(binding)).digest('hex'),
+    bindingRevision: crypto.createHash('sha256').update(JSON.stringify({ binding, processing: require('./photo-processing.cjs').revision(ds.id) })).digest('hex'),
   }
 }
 
@@ -710,25 +721,29 @@ function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateO
   const binding = all.slice().reverse().find(b => b.datasetId === datasetId)
   const result = matchPhotos(records, column, binding?.files || [])
   const overrides = templateId ? require('./photo-overrides.cjs').forRecords(ds, templateId, records, rowIndexes, result) : new Map()
+  const processedPhoto = require('./photo-processing.cjs').resolver(ds)
     for (const item of result.results) {
       if (item.status === 'missing' || item.status === 'empty') continue
       if (item.status !== 'matched') {
         if (estimateOnly) { unresolved++; continue }
         throw new Error(`照片出片检查：第 ${(rowIndexes?.[item.rowIndex] ?? item.rowIndex) + 1} 行「${item.name || '空值'}」未匹配，请到变量照片库处理`)
       }
-      if (!assets.has(item.assetId)) {
+      let renderAssetId
+      try { renderAssetId = processedPhoto(item.assetId, ds.recordIds[rowIndexes?.[item.rowIndex] ?? item.rowIndex]) }
+      catch (err) { if (estimateOnly) { unresolved++; continue }; throw err }
+      if (!assets.has(renderAssetId)) {
         try {
           const a = estimateOnly
-            ? knownGeometry?.get(item.assetId) || designs.assetGeometry(item.assetId)
-            : designs.assetInfo(item.assetId)
-          geometry.set(item.assetId, { width: a.width, height: a.height, orientation: a.orientation, mime: a.mime })
+            ? knownGeometry?.get(renderAssetId) || designs.assetGeometry(renderAssetId)
+            : designs.assetInfo(renderAssetId)
+          geometry.set(renderAssetId, { width: a.width, height: a.height, orientation: a.orientation, mime: a.mime })
         } catch (err) {
           if (!estimateOnly) throw err
           unresolved++
         }
       }
-      assets.add(item.assetId)
-      for (const key of columns) byRecord.get(records[item.rowIndex])[key] = item.assetId
+      assets.add(renderAssetId)
+      for (const key of columns) byRecord.get(records[item.rowIndex])[key] = renderAssetId
     }
   return { byRecord, assets: [...assets], geometry, overrides, unresolved }
 }

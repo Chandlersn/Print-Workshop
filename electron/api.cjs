@@ -67,7 +67,7 @@ function registerPrintTask(jobKey) {
 
 function printInputFingerprint(datasetId, templateId) {
   const photos = loadJson('photo-bindings', { expect: 'array' }) || []
-  return JSON.stringify({ dataset: dataset.getDataset(datasetId), template: templates.getTemplate(templateId), photos: photos.filter(b => b.datasetId === datasetId) })
+  return JSON.stringify({ dataset: dataset.getDataset(datasetId), template: templates.getTemplate(templateId), photos: photos.filter(b => b.datasetId === datasetId), photoProcessing: require('./photo-processing.cjs').revision(datasetId) })
 }
 function guardedPrintDomain(datasetId, templateId, fingerprint) {
   return { ...printDomain, buildBatchHtml(...args) {
@@ -600,6 +600,63 @@ const OPS = {
     params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, rows: { required: false, desc: '原始行号数组（0 基）' } },
     run: p => photoLibrary.report(p),
   },
+  'photo:processingGet': {
+    params: { datasetId: { required: true }, rowId: { required: false } },
+    run: (p, ctx) => require('./photo-processing.cjs').inspect(p, ctx.photoProcessor),
+  },
+  'photo:processingPreview': {
+    write: true, gui: 'photoProcessor',
+    params: { datasetId: { required: true }, assetId: { required: true }, recipe: { required: true } },
+    run: (p, ctx) => require('./photo-processing.cjs').render(p, ctx.photoProcessor),
+  },
+  'photo:processingApply': {
+    write: true, gui: 'photoProcessor',
+    params: { datasetId: { required: true }, sampleAssetId: { required: true }, recipe: { required: true }, taskId: { required: true } },
+    run: (p, ctx) => require('./photo-processing.cjs').apply(p, ctx.photoProcessor, ctx.emit),
+  },
+  'photo:processingCancel': {
+    write: true,
+    params: { datasetId: { required: true }, taskId: { required: true } },
+    run: p => require('./photo-processing.cjs').cancel(p),
+  },
+  'photo:processingClear': {
+    write: true,
+    params: { datasetId: { required: true } },
+    run: p => require('./photo-processing.cjs').clear(p.datasetId),
+  },
+  'photo:processingPresetSave': {
+    write: true,
+    params: { name: { required: true }, recipe: { required: true }, id: { required: false } },
+    run: p => require('./photo-processing.cjs').savePreset(p),
+  },
+  'photo:processingPresetDelete': {
+    write: true,
+    params: { id: { required: true } },
+    run: p => require('./photo-processing.cjs').deletePreset(p),
+  },
+  'photo:processingOptions': {
+    write: true,
+    params: { datasetId: { required: true }, autoProcess: { required: true } },
+    run: (p, ctx) => {
+      const processing = require('./photo-processing.cjs'), result = processing.setOptions(p)
+      processing.scheduleAutomatic(ctx.photoProcessor, ctx.emit, p.datasetId)
+      return result
+    },
+  },
+  'photo:processingSingleSet': {
+    write: true, gui: 'photoProcessor',
+    params: { datasetId: { required: true }, rowId: { required: true }, assetId: { required: true }, recipe: { required: true }, edit: { required: false } },
+    run: (p, ctx) => require('./photo-processing.cjs').setSingle(p, ctx.photoProcessor),
+  },
+  'photo:processingSingleClear': {
+    write: true,
+    params: { datasetId: { required: true }, rowId: { required: true } },
+    run: p => require('./photo-processing.cjs').clearSingle(p),
+  },
+  'photo:processingReview': {
+    params: { datasetId: { required: true }, templateId: { required: false } },
+    run: p => require('./photo-processing.cjs').review(p),
+  },
   'photo:exportIssues': {
     write: true,
     params: {
@@ -853,6 +910,19 @@ const OPS = {
     write: true,
     params: { background: { required: true, desc: '现有 print-bg 相对路径' }, w: { required: true, desc: '成品宽度 mm' }, h: { required: true, desc: '成品高度 mm' }, name: { required: false, desc: '工程名称' } },
     run: (p) => designs.importLegacyBackground(p),
+  },
+
+  'design:samplePixel': {
+    gui: 'pixel',
+    params: {
+      x: { required: true, desc: 'content viewport X coordinate' },
+      y: { required: true, desc: 'content viewport Y coordinate' },
+    },
+    run: (p, ctx) => {
+      const x = Number(p.x), y = Number(p.y)
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) throw new Error('Pixel sample coordinates are invalid')
+      return ctx.capturePixel({ x, y })
+    },
   },
 
   'design:exportPng': {
@@ -1673,6 +1743,8 @@ function normalizeCtx(ctx) {
     dialog: c.dialog || null,
     printer: c.printer || null,
     thumbs: c.thumbs || null,
+    capturePixel: typeof c.capturePixel === 'function' ? c.capturePixel : null,
+    photoProcessor: c.photoProcessor || null,
     // 自动更新能力（electron-updater 在 main 侧，本层不得 require electron）
     autoUpdate: c.autoUpdate || null,
     emit: typeof c.emit === 'function' ? c.emit : () => {},
@@ -1681,6 +1753,7 @@ function normalizeCtx(ctx) {
 
 /** 宿主能力前置检查：缺失即 GUI_REQUIRED，且把「为什么」写清楚 */
 function assertCapabilities(name, op, ctx) {
+  if (op.gui === 'photoProcessor' && !ctx.photoProcessor) throw guiRequired(name, '本地照片自动处理')
   if (op.gui === 'dialog' && !ctx.dialog) {
     throw guiRequired(name, '文件对话框 / 应用内窗口')
   }
@@ -1692,6 +1765,9 @@ function assertCapabilities(name, op, ctx) {
   }
   if (op.gui === 'updater' && !ctx.autoUpdate) {
     throw guiRequired(name, '应用内更新能力（仅打包态 GUI 可用）')
+  }
+  if (op.gui === 'pixel' && !ctx.capturePixel) {
+    throw guiRequired(name, 'window pixel capture')
   }
 }
 
@@ -1708,7 +1784,12 @@ function call(name, params, ctx) {
   // 实测 I-18 那条守卫会遍历全部写操作断言这一点。GUI 自己持锁，靠 pid 自检放行（I-54）
   if (op.write) require('./data-lock.cjs').assertWritableByClient()
   assertCapabilities(name, op, c)
-  return op.run(params || {}, c)
+  const result = op.run(params || {}, c)
+  if (op.write && c.photoProcessor && (name.startsWith('dataset:') || ['photo:commitSelection', 'photo:importFolder'].includes(name))) {
+    const notify = value => { require('./photo-processing.cjs').scheduleAutomatic(c.photoProcessor, c.emit, params?.datasetId || value?.report?.datasetId || value?.id); return value }
+    return result && typeof result.then === 'function' ? result.then(notify) : notify(result)
+  }
+  return result
 }
 
 /** 必填参数体检：只查 required，不做类型强制（类型转换仍归各 run，避免改变既有语义） */

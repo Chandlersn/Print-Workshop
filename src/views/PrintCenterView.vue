@@ -19,6 +19,9 @@ const datasets = ref([])
 const templates = ref([])
 const jobs = ref([])
 const historyOpen = ref(false)
+const selectedJobIds = ref([])
+const historyDeleting = ref(false)
+const allHistorySelected = computed(() => jobs.value.length > 0 && jobs.value.every(job => selectedJobIds.value.includes(job.id)))
 const selDs = ref('')
 const selTpl = ref('')
 const previewHtml = ref('')
@@ -293,6 +296,8 @@ function say(msg) {
   setTimeout(() => { if (toast.value === msg) toast.value = '' }, 4000)
 }
 
+watch(jobs, (items) => { const valid = new Set(items.map(job => job.id)); selectedJobIds.value = selectedJobIds.value.filter(id => valid.has(id)) })
+
 async function refreshAll() {
   // 三个清单各自独立 catch：任何一个失败都不该让整页空白（onMounted 直调，
   // 一次 reject 就是白屏），也不该把「IPC 没连通」伪装成「还没导入任何数据」
@@ -415,7 +420,7 @@ async function openPhotoEdit(rowIndex, layerId) {
     if (seq !== photoEditSeq) return
     if (!current.assetId) throw new Error('当前人员没有可调整的匹配照片')
     photoEdit.value = { ...key, rowIndex, label: rowPreview(detail.rows[rowIndex]), assetId: current.assetId,
-      state: current.state, fit: current.fit, focal: { ...current.focal } }
+      displayAssetId: current.displayAssetId || current.assetId, state: current.state, fit: current.fit, focal: { ...current.focal } }
   } catch (err) { if (seq === photoEditSeq) photoEditError.value = toUserMessage(err) }
 }
 
@@ -777,32 +782,45 @@ async function openSnapshot(jobId) {
 
 // ---- 打印历史管理：删除（应用内确认弹窗） ----
 const pendingDelete = ref(null)
-
-/** 删除打印任务：元数据 + 磁盘归档目录一并清理，不可恢复，先过确认弹窗 */
-function deleteJob(job) {
-  pendingDelete.value = {
-      message: `删除打印任务「${job.templateName} × ${job.recordCount} 份（${fmtTime(job.createdAt)}）」？\n其归档快照及归档照片副本会一并删除，该操作不可恢复。已导出的 PDF/PNG、照片库原件和名单打印状态保留。`,
-    job,
-  }
+function toggleHistoryJob(id, event) {
+  selectedJobIds.value = event.target.checked ? [...new Set([...selectedJobIds.value, id])] : selectedJobIds.value.filter(value => value !== id)
 }
-
+function toggleAllHistory(event) { selectedJobIds.value = event.target.checked ? jobs.value.map(job => job.id) : [] }
+function requestDeleteJobs(targets) {
+  if (!targets.length || historyDeleting.value) return
+  const count = targets.length
+  const message = count === 1
+    ? '\u5220\u9664\u6253\u5370\u4efb\u52a1\u300c' + targets[0].templateName + ' × ' + targets[0].recordCount + ' \u4efd\uff08' + fmtTime(targets[0].createdAt) + '\uff09\u300d\uff1f\n\u5f52\u6863\u5feb\u7167\u53ca\u5f52\u6863\u7167\u7247\u526f\u672c\u5c06\u4e00\u5e76\u5220\u9664\uff0c\u4e14\u65e0\u6cd5\u6062\u590d\u3002\u5df2\u5bfc\u51fa\u7684 PDF/PNG\u3001\u7167\u7247\u5e93\u539f\u4ef6\u548c\u540d\u5355\u6253\u5370\u72b6\u6001\u4f1a\u4fdd\u7559\u3002'
+    : '\u786e\u5b9a\u5220\u9664\u9009\u4e2d\u7684 ' + count + ' \u6761\u6253\u5370\u5386\u53f2\u8bb0\u5f55\u5417\uff1f\n\u6bcf\u6761\u8bb0\u5f55\u7684\u5f52\u6863\u5feb\u7167\u53ca\u5f52\u6863\u7167\u7247\u526f\u672c\u5c06\u4e00\u5e76\u5220\u9664\uff0c\u4e14\u65e0\u6cd5\u6062\u590d\u3002\u5df2\u5bfc\u51fa\u7684 PDF/PNG\u3001\u7167\u7247\u5e93\u539f\u4ef6\u548c\u540d\u5355\u6253\u5370\u72b6\u6001\u4f1a\u4fdd\u7559\u3002'
+  pendingDelete.value = { jobs: targets, message }
+}
+function deleteJob(job) { requestDeleteJobs([job]) }
+function deleteSelectedJobs() { requestDeleteJobs(jobs.value.filter(job => selectedJobIds.value.includes(job.id))) }
 async function confirmDelete() {
-  const job = pendingDelete.value.job
-  pendingDelete.value = null
+  const request = pendingDelete.value
+  if (!request || historyDeleting.value) return
+  pendingDelete.value = null; historyDeleting.value = true
+  let deleted = 0, archiveWarnings = 0, backupWarnings = 0
+  const failures = []
   try {
-    const result = await window.printpress.deleteJob(job.id)
+    for (const job of request.jobs) {
+      try {
+        const result = await window.printpress.deleteJob(job.id)
+        deleted++
+        if (result.archiveRemoved === false) archiveWarnings++
+        if (result.backupUpdated === false) backupWarnings++
+      } catch (err) { failures.push(toUserMessage(err)) }
+    }
     jobs.value = await window.printpress.listJobs()
-    say(result.archiveRemoved === false
-      ? '打印记录已删除，但归档文件未清理完成'
-      : result.backupUpdated === false
-        ? '已删除记录及归档件，但历史恢复副本更新失败'
-        : '已删除该打印记录及归档件')
-  } catch (err) {
-    say(`删除失败：${toUserMessage(err)}`)
-  }
+    selectedJobIds.value = selectedJobIds.value.filter(id => jobs.value.some(job => job.id === id))
+    if (failures.length) say('\u5df2\u5220\u9664 ' + deleted + ' \u6761\uff0c\u5931\u8d25 ' + failures.length + ' \u6761\uff1a' + failures[0])
+    else if (archiveWarnings) say('\u5df2\u5220\u9664 ' + deleted + ' \u6761\u8bb0\u5f55\uff0c\u4f46\u6709 ' + archiveWarnings + ' \u4e2a\u5f52\u6863\u76ee\u5f55\u672a\u6e05\u7406\u5b8c\u6210\u3002')
+    else if (backupWarnings) say('\u5df2\u5220\u9664 ' + deleted + ' \u6761\u8bb0\u5f55\uff0c\u5386\u53f2\u6062\u590d\u526f\u672c\u66f4\u65b0\u5931\u8d25\u3002')
+    else say('\u5df2\u5220\u9664 ' + deleted + ' \u6761\u6253\u5370\u5386\u53f2\u8bb0\u5f55\u53ca\u5bf9\u5e94\u5f52\u6863\u4ef6\u3002')
+  } catch (err) { say('\u5237\u65b0\u5386\u53f2\u8bb0\u5f55\u5931\u8d25\uff1a' + toUserMessage(err)) }
+  finally { historyDeleting.value = false }
 }
 
-/** 一键重打：回填任务的模板（数据集由模板绑定自动带出），走同样的校验→执行流程 */
 async function reprint(job) {
   if (busy.value) return
   if (!templates.value.some((t) => t.id === job.templateId)) {
@@ -970,6 +988,7 @@ onMounted(refreshAll)
           </template>
         </template>
       </template>
+      <details v-if="photoPreflight?.warnings?.length" class="photo-issues" data-testid="print-photo-quality"><summary>{{ photoPreflight.warnings.length }} 人有清晰度、人物对齐或裁切提示（建议输出前检查）</summary><div class="photo-issues-list"><div v-for="item in photoPreflight.warnings" :key="item.rowIndex" class="photo-issue-row"><button class="btn btn-mini" @click="goPhotoIssue(item)">第 {{ item.rowIndex + 1 }} 行</button><span>{{ item.name }}</span><span class="scope-note">{{ item.reasons.join('；') }}</span></div></div></details>
       <div v-if="photoIssuesOpen && visiblePhotoIssues.length" class="photo-issues">
         <div class="photo-issues-head">
           <strong>{{ photoIssueFilter ? photoStatusLabel[photoIssueFilter] : '照片问题' }} · {{ visiblePhotoIssues.length }} 人</strong>
@@ -1034,7 +1053,7 @@ onMounted(refreshAll)
         <div class="photo-edit-head"><strong>调整第 {{ photoEdit.rowIndex + 1 }} 行 · {{ photoEdit.label }}</strong><button class="btn btn-mini" @click="photoEdit = null">收起</button></div>
         <div class="photo-edit-body">
           <div class="photo-edit-image" :style="{ cursor: 'grab' }" @pointerdown="startPhotoDrag" @pointermove="movePhotoDrag" @pointerup="stopPhotoDrag" @pointercancel="stopPhotoDrag">
-            <img :src="`pp://media/${photoEdit.assetId}`" alt="当前人员照片" draggable="false" :style="{ objectFit: photoEdit.fit, objectPosition: `${photoEdit.focal.x * 100}% ${photoEdit.focal.y * 100}%` }" />
+            <img :src="`pp://media/${photoEdit.displayAssetId || photoEdit.assetId}`" alt="当前人员照片" draggable="false" :style="{ objectFit: photoEdit.fit, objectPosition: `${photoEdit.focal.x * 100}% ${photoEdit.focal.y * 100}%` }" />
           </div>
           <div class="photo-edit-controls">
             <p v-if="photoEdit.state === 'stale'" class="photo-preflight-error">旧取景对应的照片已变化，保存后才会应用到当前照片。</p>
@@ -1091,17 +1110,18 @@ onMounted(refreshAll)
         <header class="history-head">
           <div>
             <h3 id="history-title" class="modal-title">打印历史</h3>
-            <p class="history-count">共 {{ jobs.length }} 条记录</p>
+            <p class="history-count">&#x5171; {{ jobs.length }} &#x6761; &#x5DF2;&#x9009; {{ selectedJobIds.length }} &#x6761;</p>
+            <button class="btn btn-mini job-del" data-testid="history-delete-selected" :disabled="!selectedJobIds.length || historyDeleting" @click="deleteSelectedJobs">&#x5220;&#x9664;&#x6240;&#x9009; ({{ selectedJobIds.length }})</button>
           </div>
           <button class="btn btn-mini" @click="historyOpen = false">关闭</button>
         </header>
         <div class="history-table-wrap">
           <table v-if="jobs.length" class="job-table">
             <thead>
-              <tr><th>时间</th><th>模板</th><th>数据集</th><th>方式</th><th>份数</th><th>状态</th><th>操作</th></tr>
+              <tr><th class="history-select"><input type="checkbox" aria-label="Select all print history" :checked="allHistorySelected" :disabled="historyDeleting || !jobs.length" @change="toggleAllHistory($event)"></th><th>时间</th><th>模板</th><th>数据集</th><th>方式</th><th>份数</th><th>状态</th><th>操作</th></tr>
             </thead>
             <tbody>
-              <tr v-for="j in jobs" :key="j.id">
+              <tr v-for="j in jobs" :key="j.id"><td class="history-select"><input type="checkbox" :aria-label="'Select ' + j.templateName + ' history'" :checked="selectedJobIds.includes(j.id)" :disabled="historyDeleting" @change="toggleHistoryJob(j.id, $event)"></td>
                 <td>{{ fmtTime(j.createdAt) }}</td>
                 <td>{{ j.templateName }}</td>
                 <td>{{ j.datasetName }}</td>
@@ -1271,7 +1291,7 @@ onMounted(refreshAll)
     <!-- 删除打印任务确认：应用内统一风格，替代原生 confirm -->
     <ConfirmDialog
       v-if="pendingDelete"
-      title="删除打印任务"
+      :title="pendingDelete.jobs.length > 1 ? '删除打印历史' : '删除打印任务'"
       :message="pendingDelete.message"
       confirm-text="删除"
       @confirm="confirmDelete"
@@ -1544,7 +1564,9 @@ onMounted(refreshAll)
 .history-head .modal-title { margin: 0; }
 .history-count { margin: 4px 0 0; color: var(--stone); font-size: 12px; }
 .history-table-wrap { min-height: 0; overflow: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.history-table-wrap .job-table { min-width: 900px; }
+.history-table-wrap .job-table { min-width: 940px; }
+.history-select { width: 38px; text-align: center !important; }
+.history-select input { width: 15px; height: 15px; accent-color: var(--cinnabar); }
 .history-empty { padding: 20px; text-align: center; }
 
 .job-table {

@@ -48,6 +48,7 @@ function inspect(query) {
     fit: active ? old.fit : layer.fit, focal: active ? old.focal : layer.focal,
     defaultFit: layer.fit, defaultFocal: layer.focal,
     assetId: current?.match.assetId || null,
+    displayAssetId: current ? require('./photo-processing.cjs').resolver(ds)(current.match.assetId, String(query.rowId)) : null,
   }
 }
 

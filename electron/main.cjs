@@ -72,6 +72,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: '#f6f2e9', // 宣纸底色，避免白闪
+    icon: path.join(__dirname, 'brand', 'printpress-logo-v2.png'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),

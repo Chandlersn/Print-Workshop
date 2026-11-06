@@ -30,7 +30,10 @@ async function waitFor(predicate, label, timeout = 15000) {
   }
   throw new Error('等待失败：' + label)
 }
-const evaluate = expression => ui.webContents.executeJavaScript(expression)
+const evaluate = async expression => {
+  try { return await ui.webContents.executeJavaScript(expression) }
+  catch (error) { throw new Error(`${error.message}\nUI expression: ${expression.slice(0, 500)}`) }
+}
 async function clickText(selector, label) {
   const point = await evaluate(`(() => { const el=[...document.querySelectorAll(${JSON.stringify(selector)})].find(el=>el.textContent.trim()===${JSON.stringify(label)}); if(!el)throw new Error('missing button: '+${JSON.stringify(label)}); el.scrollIntoView({block:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)} })()`)
   ui.webContents.sendInputEvent({ type: 'mouseMove', ...point })
@@ -226,14 +229,14 @@ app.whenReady().then(async () => {
   store.saveJson('datasets', [{ ...detail, id: 'ds_disabled', name: '未开启配图的名单', photoMatchColumn: null }, ...store.loadJson('datasets')])
   await clickText('.nav-label', '底图制作')
   await waitFor(() => evaluate(`document.querySelector('[data-testid="design-add-portrait"]')?.disabled === false`), '开启配图后变量图入口可用')
-  await clickText('button', '＋ 变量图')
+  await clickText('[data-testid="design-add-portrait"]', '变量图')
   await waitFor(() => evaluate(`document.querySelector('.portrait-picker button')?.disabled === false`), '选择照片列')
   ok(await evaluate(`document.querySelector('.portrait-picker select').value===${JSON.stringify(ds.id)} && document.querySelectorAll('.portrait-picker option').length===1`), '首份名单未开启配图时，自动选择已开启的名单且过滤未开启项')
   await clickText('.portrait-picker button', '取消')
   require('../electron/dataset.cjs').setPhotoMatchColumn(ds.id, null)
-  await clickText('button', '＋ 变量图')
+  await clickText('[data-testid="design-add-portrait"]', '变量图')
   await waitFor(() => evaluate(`document.querySelector('[data-testid="design-add-portrait"]')?.disabled`), '点击时复核已关闭的配图状态')
-  ok(await evaluate(`!document.querySelector('#variable-image-hint') && !document.querySelector('[data-testid="design-add-portrait"]').hasAttribute('title')`), '变量图未开启时仅置灰，无长提醒和悬浮提示')
+  ok(await evaluate(`!document.querySelector('#variable-image-hint') && document.querySelector('[data-testid="design-add-portrait"]').disabled && document.querySelector('[data-testid="design-add-portrait"]').title.includes('配图')`), '变量图未开启时禁用入口，并提示先开启配图')
   ok(await evaluate(`!document.querySelector('.portrait-picker')`), '配图已关闭时入口复核并置灰，不打开弹窗')
   // Use the actual Data-page switch to verify KeepAlive refresh in both directions.
   await clickText('.nav-label', '数据')
@@ -243,7 +246,7 @@ app.whenReady().then(async () => {
   await clickText('.nav-label', '底图制作')
   await waitFor(() => evaluate(`document.querySelector('[data-testid="design-add-portrait"]')?.disabled === false`), '返回编辑器自动启用变量图')
   ok(true, '数据页开启匹配后返回编辑器，变量图按钮自动可用')
-  await clickText('button', '＋ 变量图')
+  await clickText('[data-testid="design-add-portrait"]', '变量图')
   await waitFor(() => evaluate(`document.querySelector('.portrait-picker button')?.disabled === false`), '打开变量图弹窗')
   require('../electron/dataset.cjs').setPhotoMatchColumn(ds.id, null)
   await clickText('.portrait-picker button', '插入变量图')
@@ -262,7 +265,7 @@ app.whenReady().then(async () => {
   await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(`[data-photo-key="${column}"]`)}).getAttribute('aria-pressed')==='true'`), '重新开启配图')
   await clickText('.nav-label', '底图制作')
   await waitFor(() => evaluate(`document.querySelector('[data-testid="design-add-portrait"]')?.disabled === false`), '入口恢复可用')
-  await clickText('button', '＋ 变量图')
+  await clickText('[data-testid="design-add-portrait"]', '变量图')
   await waitFor(() => evaluate(`document.querySelector('.portrait-picker button')?.disabled === false`), '重新开启后刷新参考名单')
   await clickText('.portrait-picker button', '插入变量图')
   await waitFor(() => evaluate(`!!document.querySelector('[data-canvas-layer-id^="portrait-"]')`), '变量图插入画布')
@@ -308,7 +311,7 @@ app.whenReady().then(async () => {
   await evaluate(`document.querySelector('[data-testid="print-photo-edit"] .photo-edit-controls button:last-child').click()`)
   await waitFor(() => evaluate(`!document.querySelector('iframe')?.srcdoc.includes('object-fit:contain;object-position:20% 80%')`), '恢复模板默认取景')
   await waitFor(() => evaluate(`document.querySelector('[data-testid="print-photo-preflight"]')?.textContent.includes('已配图 3 人')`), '打印页照片预检')
-  ok(await evaluate(`document.querySelector('[data-testid="print-photo-preflight"]').textContent.includes('本次 3 人') && document.querySelector('[data-testid="print-photo-preflight"]').textContent.includes('预计 3 页') && !document.querySelector('.modal-mask')`), '打印页内显示所选范围照片人数和页数，不弹遮挡预检窗口')
+  ok(await evaluate(`document.querySelector('.range-count').textContent.includes('本次 3 人') && document.querySelector('.range-count').textContent.includes('预计 3 页') && !document.querySelector('.modal-mask')`), '打印页内显示所选范围照片人数和页数，不弹遮挡预检窗口')
   ok(await evaluate(`(document.querySelector('iframe').srcdoc.match(/data-photo-column=/g)||[]).length===1 && document.querySelector('[data-testid="print-preview-paging"]').textContent.includes('/ 3 页')`), '打印中心只预览一张纸，保留三页总统计')
   await clickText('[data-testid="print-preview-paging"] button', '下一页')
   await waitFor(() => evaluate(`document.querySelector('[data-testid="print-preview-paging"]').textContent.includes('第 2 / 3 页')`), '预览下一张纸')

@@ -1,6 +1,6 @@
 const assert = require('assert/strict')
 const { normalizeDesign, renderDesign } = require('../electron/design-layout.cjs')
-const { normalizeErasures, cropImageLayer, EDIT_LIMITS } = require('../electron/design-image-edit.cjs')
+const { normalizeErasures, cropImageLayer, referenceImageLayer, EDIT_LIMITS } = require('../electron/design-image-edit.cjs')
 const { bakeTargets, bakeGeometry, bakeName } = require('../electron/output-dpi.cjs')
 const id = 'a'.repeat(64)
 const asset = { id, path: `design-assets/${id}.png`, mime: 'image/png', name: 'source.png', width: 400, height: 300 }
@@ -47,6 +47,34 @@ const first = bakeName(layer, geom, asset, 300)
 assert.notEqual(first, bakeName({ ...layer, erasures: [] }, geom, asset, 300))
 assert.notEqual(first, bakeName({ ...layer, erasures: [erasures[0]] }, geom, asset, 300))
 console.log('ok - 普通预览、多页几何渲染及打印烘焙缓存都包含擦除')
+
+const variable = { id: 'variable', type: 'image', name: '变量图', variable: true, bindColumn: 'photo', x: 10, y: 20, w: 40, h: 60, fit: 'cover', focal: { x: 0.25, y: 0.75 }, rotation: 30 }
+const reference = referenceImageLayer(variable, asset, 'reference')
+assert.equal(reference.variable, undefined)
+assert.equal(reference.referenceFor, variable.id)
+assert.equal(reference.crop.w, 0.5)
+assert.equal(reference.crop.x, 0.125)
+const referenceDoc = normalizeDesign({ ...doc(variable), layers: [variable, { ...reference, editorOnly: false, erasures }] })
+assert.equal(referenceDoc.schemaVersion, 9)
+assert.equal(referenceDoc.layers[1].editorOnly, true, '参考样图不能被关闭仅编辑可见')
+assert.deepEqual(normalizeDesign(referenceDoc), referenceDoc)
+const output = renderDesign(referenceDoc, { photoUrl: () => 'pp://media/batch-photo' }).html
+assert.ok(output.includes('batch-photo') && !output.includes('data-design-asset') && !output.includes('mask-image'), '输出仍使用变量图，参考像素与擦除不会进入输出')
+const editor = renderDesign(referenceDoc, { includeEditorOnly: true, photoUrl: () => 'pp://media/batch-photo' }).html
+assert.ok(editor.includes('data-design-asset') && editor.includes('mask-image') && !editor.includes('batch-photo'), '编辑器显示普通参考图片，不叠加另一份变量照片')
+assert.equal(bakeTargets(referenceDoc).length, 0, '参考图片不会进入输出烘焙')
+assert.ok(renderDesign({ ...referenceDoc, layers: [variable, { ...reference, visible: false }] }, { includeEditorOnly: true, photoUrl: () => 'batch-photo' }).html.includes('batch-photo'), '隐藏参考样图后可查看真实变量照片')
+assert.throws(() => normalizeDesign({ ...doc(variable), layers: [{ ...variable, referenceFor: 'other' }] }), /参考样图/)
+assert.throws(() => normalizeDesign(doc({ ...image, referenceFor: image.id })), /自身/)
+const contained = referenceImageLayer({ ...variable, fit: 'contain', rotation: 0 }, asset, 'contained')
+assert.equal(contained.w, 40); assert.equal(contained.h, 30)
+assert.equal(contained.x, 10); assert.equal(contained.y, 42.5)
+assert.deepEqual(contained.crop, { x: 0, y: 0, w: 1, h: 1 })
+let nextId = 0
+const duplicated = require('../electron/design-editor.cjs').duplicateSelection(referenceDoc, ['variable', 'reference'], { makeId: () => `copy_${nextId++}` }).design
+assert.equal(duplicated.layers[3].referenceFor, duplicated.layers[2].id, '复制变量框与参考样图时保持副本之间的关联')
+assert.equal(duplicated.layers[3].editorOnly, true)
+console.log('ok - 参考样图复用普通图片、保留取景、关联复制及持久化；编辑效果与批量输出隔离')
 
 ;(async () => {
   const { repairImagePixels } = require('../src/lib/image-repair.cjs')

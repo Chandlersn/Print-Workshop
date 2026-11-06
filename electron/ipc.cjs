@@ -19,6 +19,7 @@ const api = require('./api.cjs')
 const printer = require('./printer.cjs')
 const thumbs = require('./asset-thumbnails.cjs')
 const autoUpdate = require('./auto-update.cjs')
+const photoProcessor = require('./photo-processing-host.cjs')
 
 /** 对话框统一挂主窗口：无主对话框在 Windows 上可能被主窗口遮挡，用户看似「没反应」 */
 function dialogParent() {
@@ -68,6 +69,19 @@ function hostContext(event) {
     },
 
     printer,
+    photoProcessor,
+
+    capturePixel: async ({ x, y }) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win || win.isDestroyed()) throw new Error('Pixel sampling window is unavailable')
+      const image = await event.sender.capturePage({ x: Math.round(x), y: Math.round(y), width: 1, height: 1 })
+      if (image.isEmpty()) throw new Error('Unable to sample this pixel')
+      const { width, height } = image.getSize()
+      const bitmap = image.getBitmap()
+      const offset = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4
+      const hex = [bitmap[offset + 2], bitmap[offset + 1], bitmap[offset]].map(value => value.toString(16).padStart(2, '0')).join('')
+      return { color: `#${hex}` }
+    },
 
     // 宿主导图解码能力（缩略图）。纯 Node 下 ctx.thumbs 不存在，领域层据此跳过缓存
     thumbs,
@@ -95,6 +109,9 @@ function registerIpc() {
     ipcMain.handle(name, (event, ...args) =>
       api.call(name, fromIpc(...args), hostContext(event)))
   }
+  require('./photo-processing.cjs').scheduleAutomatic(photoProcessor, (channel, payload) => {
+    for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send(channel, payload)
+  })
 }
 
 module.exports = { registerIpc }

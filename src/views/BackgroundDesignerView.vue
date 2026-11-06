@@ -3,8 +3,10 @@ import { ref, reactive, computed, watch, nextTick, onMounted, onActivated, onDea
 import PageHeader from '../components/PageHeader.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import DesignImageEditor from '../components/DesignImageEditor.vue'
+import DesignTextColorPicker from '../components/DesignTextColorPicker.vue'
+import { photoProcessingRevision, photoProcessingSample } from '../lib/photo-processing.js'
 import AppIcon from '../components/AppIcon.vue'
-import { cropImageLayer } from '../../electron/design-image-edit.cjs'
+import { cropImageLayer, referenceImageLayer } from '../../electron/design-image-edit.cjs'
 import AssetLibrarySidebar from '../components/AssetLibrarySidebar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { designerNav } from '../lib/designer-nav.js'
@@ -49,6 +51,24 @@ const portraitTarget = computed(() => {
   return portraitDatasets.value.find(ds => ds.id === portraitDataset.value) || portraitDatasets.value[0]
 })
 const canAddPortrait = computed(() => !portraitChecking.value && !!portraitTarget.value?.photoMatchColumn)
+const variablePhotoSample = ref('')
+let photoSampleRequest = 0
+const variablePhotoUrls = computed(() => Object.fromEntries(design.value.layers.filter(layer => layer.variable).map(layer => [layer.bindColumn, variablePhotoSample.value]).filter(([, url]) => url)))
+async function refreshVariablePhotoSample() {
+  const datasetId = portraitTarget.value?.id, request = ++photoSampleRequest
+  variablePhotoSample.value = ''
+  if (!datasetId) { variablePhotoSample.value = ''; return }
+  try {
+    const [ds, processing] = await Promise.all([window.printpress.getDataset(datasetId), window.printpress.getPhotoProcessing(datasetId)])
+    if (!ds.photoMatchColumn || request !== photoSampleRequest) return
+    const report = await window.printpress.photoReport({ datasetId, column: ds.photoMatchColumn })
+    if (request !== photoSampleRequest) return
+    const rows = report.results.filter(row => row.status === 'matched'), sample = rows.find(row => row.assetId === processing.state?.sampleAssetId) || rows[0]
+    const preview = photoProcessingSample.value
+    if (preview?.datasetId === datasetId && preview.column === ds.photoMatchColumn && rows.some(row => row.assetId === preview.sourceAssetId)) { variablePhotoSample.value = `pp://media/${preview.assetId}`; return }
+    variablePhotoSample.value = sample ? `pp://media/${processing.state?.items?.[sample.assetId] || sample.assetId}` : ''
+  } catch { if (request === photoSampleRequest) variablePhotoSample.value = '' }
+}
 async function refreshPortraitAvailability() {
   const token = ++portraitListRequest
   portraitChecking.value = true
@@ -138,6 +158,10 @@ const inspectorPanel = ref(null)
 watch(() => selectedIds.value.join('\0'), () => nextTick(() => { if (inspectorPanel.value) inspectorPanel.value.scrollTop = 0 }))
 const selected = computed(() => design.value.layers.filter((layer) => selectedIds.value.includes(layer.id)))
 const single = computed(() => selected.value.length === 1 ? selected.value[0] : null)
+const canvasHitLayers = computed(() => {
+  const referenced = new Set(design.value.layers.filter(layer => layer.visible && layer.referenceFor).map(layer => layer.referenceFor))
+  return design.value.layers.filter(layer => layer.visible && (!layer.variable || !referenced.has(layer.id) || selectedIds.value.includes(layer.id)))
+})
 const editable = computed(() => {
   const ids = new Set(editableSelection(design.value, selectedIds.value))
   return design.value.layers.filter((layer) => ids.has(layer.id) && selectedIds.value.includes(layer.id))
@@ -233,16 +257,56 @@ const busy = ref(false)
 const imageMenu = ref(null)
 const imageEdit = ref(null)
 function openImageMenu(event, layer) {
-  if (layer.type !== 'image' || layer.variable || busy.value || modalOpen.value) return
+  if (layer.type !== 'image' || (layer.variable && !variablePhotoSample.value) || busy.value || modalOpen.value) return
   event.preventDefault(); event.stopPropagation()
   finishTextEdit(); endGesture(); finishKeyboardMove()
   selectedIds.value = [layer.id]
   imageMenu.value = { id: layer.id, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 120)) }
   nextTick(() => document.querySelector('[data-testid="design-image-menu"] button:not(:disabled)')?.focus())
 }
-function openImageEdit(mode) {
+async function editReferenceSample(refresh = false) {
+  const layer = single.value?.referenceFor ? design.value.layers.find(item => item.id === single.value.referenceFor) : single.value
+  if (!layer?.variable || singleBlocked.value || busy.value || modalOpen.value) return false
+  const existing = design.value.layers.find(item => item.referenceFor === layer.id)
+  if (existing && !refresh) { selectedIds.value = [existing.id]; return true }
+  if (!editableSelection(design.value, [layer.id]).includes(layer.id) || (existing && !editableSelection(design.value, [existing.id]).includes(existing.id))) { fail('请先解锁变量框和参考样图。'); return false }
+  const source = variablePhotoSample.value, session = sessionToken.value
+  if (!source) { fail('请先到变量照片页导入并选择样板照片。'); return false }
+  busy.value = true
+  try {
+    const response = await fetch(source)
+    if (!response.ok) throw new Error('参考样图无法读取，请到变量照片页重新选择样板。')
+    const bytes = await response.blob()
+    if (bytes.size > MAX_IMAGE_BYTES) throw new Error('参考样图超过图片编辑大小限制。')
+    // Reuse the normal image import path. Content-addressing retains the original bytes.
+    const asset = await window.printpress.uploadDesignImageBytes({ base64: await fileToBase64(bytes), name: '变量参考样图.png' })
+    if (!active || session !== sessionToken.value || source !== variablePhotoSample.value) return false
+    const current = design.value.layers.find(item => item.id === layer.id)
+    if (!current?.variable || !editableSelection(design.value, [layer.id]).includes(layer.id)) throw new Error('变量图已变化或锁定，请重新选择。')
+    const id = existing?.id || uid('reference')
+    if (!commit(doc => {
+      doc.assets[asset.id] = asset
+      const index = doc.layers.findIndex(item => item.id === layer.id)
+      const sample = referenceImageLayer(doc.layers[index], asset, id)
+      const sampleIndex = doc.layers.findIndex(item => item.id === id)
+      if (sampleIndex >= 0) doc.layers[sampleIndex] = sample
+      else doc.layers.splice(index + 1, 0, sample)
+    })) return false
+    selectedIds.value = [id]
+    message.value = '已打开参考样图，可使用普通图片的全部编辑工具；修改仅供排版参考，不影响批量照片。'
+    return true
+  } catch (err) { fail(err); return false }
+  finally { busy.value = false }
+}
+function selectVariableFrame() {
+  const id = single.value?.referenceFor
+  if (design.value.layers.some(layer => layer.id === id && layer.variable)) selectedIds.value = [id]
+  else fail('关联的变量框已删除；这张图片仍仅供排版参考。')
+}
+async function openImageEdit(mode) {
   imageMenu.value = null
-  if (busy.value || !single.value || singleBlocked.value || single.value.type !== 'image' || single.value.variable) return
+  if (busy.value || !single.value || singleBlocked.value || single.value.type !== 'image') return
+  if (single.value.variable && !await editReferenceSample()) return
   finishTextEdit(); endGesture(); finishKeyboardMove()
   clearFeedback()
   imageEdit.value = { layer: clone(single.value), asset: clone(design.value.assets[single.value.assetId]), mode, session: sessionToken.value }
@@ -267,7 +331,7 @@ async function applyImageEdit(result) {
       if (result.erasures.length) layer.erasures = result.erasures
       else delete layer.erasures
       doc.layers[index] = layer
-    })) { imageEdit.value = null; message.value = '图片修改已应用，可撤销；原图保持完整。' }
+    })) { imageEdit.value = null; message.value = edit.layer.referenceFor ? '参考样图已修改，可撤销；批量照片仍使用变量照片页的处理结果。' : '图片修改已应用，可撤销；原图保持完整。' }
   } catch (err) { fail(err) }
   finally { busy.value = false }
 }
@@ -1365,6 +1429,8 @@ function setLayer(key, value, numeric = false) {
  * 中间过程不进撤销栈，否则拖一次取色器能塞进上百条历史。
  */
 const colorDraft = ref(null)
+const pickingTextColor = ref(false)
+let textColorPickListener = null
 function colorInput(key, value, scope = 'layer') {
   if (scope === 'artboard') {
     if (!colorDraft.value) colorDraft.value = { before: clone(design.value) }
@@ -1510,6 +1576,29 @@ function groupOpacityChange() {
  * 而色块本体只有 34px 宽，用户点的往往是整块盒子 → 看起来「点了没反应」。
  * 自己调 showPicker()：在真实点击里算用户手势，允许调用；失败再退回 click()。
  */
+function stopTextColorPick() {
+  if (!pickingTextColor.value) return
+  pickingTextColor.value = false
+  if (textColorPickListener) window.removeEventListener('pointerdown', textColorPickListener, true)
+  textColorPickListener = null
+}
+function startTextColorPick() {
+  if (!single.value || single.value.type !== 'text' || singleBlocked.value || pickingTextColor.value) return
+  const layerId = single.value.id
+  pickingTextColor.value = true
+  textColorPickListener = async (event) => {
+    if (!event.target.closest?.('[data-testid="design-stage"]')) return
+    event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
+    stopTextColorPick()
+    try {
+      const result = await window.printpress.samplePixel(event.clientX, event.clientY)
+      if (single.value?.id !== layerId || singleBlocked.value) return
+      colorChange('color', result.color)
+    } catch (err) { fail(err) }
+  }
+  window.addEventListener('pointerdown', textColorPickListener, true)
+}
+watch(() => [single.value?.id, singleBlocked.value], stopTextColorPick)
 function openColorPicker(event) {
   const input = event.currentTarget?.querySelector?.('input[type="color"]')
   if (!input || input.disabled) return
@@ -1960,6 +2049,7 @@ function finishKeyboardMove() {
   }
 }
 function onKeyDown(event) {
+  if (pickingTextColor.value && event.key === 'Escape') { event.preventDefault(); stopTextColorPick(); return }
   if (!active || modalOpen.value || event.isComposing) return
   if (layerDrag.value) {
     if (event.key === 'Escape') { event.preventDefault(); endLayerDrag() }
@@ -2025,6 +2115,8 @@ function activate() {
   })
 }
 function deactivate() {
+  stopTextColorPick()
+  photoSampleRequest++
   active = false
   endLayerDrag()
   imageEdit.value = null; imageMenu.value = null
@@ -2088,7 +2180,8 @@ onMounted(async () => {
   refreshAdopted()
   if (designerNav.request) consumeRequest(designerNav.request)
 })
-onActivated(() => { activate(); nextTick(updateNavigator) })
+watch([() => portraitTarget.value?.id, photoProcessingRevision, photoProcessingSample], refreshVariablePhotoSample)
+onActivated(() => { activate(); refreshVariablePhotoSample(); nextTick(updateNavigator) })
 onDeactivated(deactivate)
 onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerDrag(); clearTimeout(draftTimer); clearTimeout(messageTimer); for (const face of fontFaces) document.fonts.delete(face) })
 </script>
@@ -2233,8 +2326,8 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <button title="放大" @click="zoom = Math.min(3, round(zoom + 0.25))">＋</button>
         </div>
         <div ref="canvasScroll" class="canvas-scroll" :class="{ 'drop-active': dropActive }" @scroll.passive="updateNavigator" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
-          <div ref="stage" data-testid="design-stage" class="design-stage" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
-            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :show-editor-only="true" @error="fail" />
+          <div ref="stage" data-testid="design-stage" class="design-stage" :class="{ 'pixel-picking': pickingTextColor }" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
+            <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :photos="variablePhotoUrls" :show-editor-only="true" @error="fail" />
             <!-- 布局网格：只是画布上的辅助层，不进工程、不进 renderDesign（见 I-45） -->
             <div v-if="gridVisible" data-testid="design-grid-overlay" class="grid-overlay" :style="gridOverlayStyle" aria-hidden="true"></div>
             <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
@@ -2251,7 +2344,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
                 @blur="finishTextEdit"
               ></textarea>
             </div>
-            <div v-for="layer in design.layers.filter(item => item.visible)" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)" @contextmenu="openImageMenu($event, layer)">
+            <div v-for="layer in canvasHitLayers" :key="layer.id" :data-canvas-layer-id="layer.id" class="layer-hit" :class="{ chosen: selectedIds.includes(layer.id), locked: layer.locked, 'line-hit': layer.type === 'line' }" :style="hitStyle(layer)" @pointerdown="pointerDown($event, layer)" @contextmenu="openImageMenu($event, layer)">
               <template v-if="single?.id === layer.id && editable.some(item => item.id === layer.id)">
                 <button v-if="layer.type === 'line'" class="resize-handle line-resize-handle" :aria-label="'调整直线长度'" :title="'拖动线段末端调整长度'" @pointerdown.stop="pointerDown($event, layer, 'se')"></button>
                 <template v-else>
@@ -2286,7 +2379,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <div class="canvas-horizontal-track" :style="{ width: `${horizontalTrackWidth}px` }"></div>
         </div>
         <div v-if="navigator.needed" class="canvas-navigator" data-testid="design-navigator" :style="{ width: `${navigator.width}px`, height: `${navigator.height}px` }" title="拖动定位画布" @pointerdown="navigatorPointerDown" @pointermove="navigatorPointerMove">
-          <DesignSurface :design="surfaceDesign" :width="navigator.width" :height="navigator.height" :show-editor-only="true" @error="fail" />
+          <DesignSurface :design="surfaceDesign" :width="navigator.width" :height="navigator.height" :photos="variablePhotoUrls" :show-editor-only="true" @error="fail" />
           <div class="navigator-viewport" :style="{ left: `${navigator.left}px`, top: `${navigator.top}px`, width: `${navigator.boxWidth}px`, height: `${navigator.boxHeight}px` }"></div>
         </div>
         <div class="canvas-status"><span>{{ design.artboard.w }} × {{ design.artboard.h }} mm · {{ selected.length ? `已选 ${selected.length} 个图层` : '未选中图层' }}</span><span :class="{ unsaved: dirty }">{{ dirty ? '未保存' : design.id ? `已保存 · v${design.revision}` : '空白工程' }}</span></div>
@@ -2348,9 +2441,15 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         </details>
         <template v-if="selected.length">
         <h3>{{ selectedGroup ? '分组属性' : selected.length > 1 ? `多选 ${selected.length} 个图层` : single ? '图层属性' : '排版属性' }}</h3>
-        <div v-if="single?.type === 'image' && !single.variable" class="image-quick-actions" role="toolbar" aria-label="图片编辑">
-          <button data-testid="design-image-crop" :disabled="singleBlocked" @click="openImageEdit('crop')"><AppIcon name="crop" /> 裁剪…</button>
-          <button data-testid="design-image-erase" :disabled="singleBlocked" @click="openImageEdit('erase')"><AppIcon name="brush" /> 魔法擦除…</button>
+        <div v-if="single?.type === 'image'" class="image-quick-actions" role="toolbar" aria-label="图片编辑">
+          <button data-testid="design-image-crop" :disabled="singleBlocked || (single.variable && !variablePhotoSample)" @click="openImageEdit('crop')"><AppIcon name="crop" /> 裁剪…</button>
+          <button data-testid="design-image-erase" :disabled="singleBlocked || (single.variable && !variablePhotoSample)" @click="openImageEdit('erase')"><AppIcon name="brush" /> 魔法擦除…</button>
+        </div>
+        <div v-if="single?.referenceFor" class="reference-sample-note" data-testid="design-reference-note">
+          <strong>参考样图 · 仅用于底图排版</strong>
+          <p>这里的裁剪、擦除、图章、颜色和图层效果只修改参考样图，不打印，也不应用到整批照片。批量处理请到变量照片页。</p>
+          <button data-testid="design-reference-frame" @click="selectVariableFrame">选择变量框（调整实际输出位置）</button>
+          <button data-testid="design-reference-refresh" :disabled="singleBlocked || !variablePhotoSample || busy" @click="editReferenceSample(true)">重新取样（重置参考修改）</button>
         </div>
         <template v-if="selectedGroup">
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
@@ -2370,7 +2469,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <p v-if="singleBlocked" class="locked-note">该图层或同组成员已锁定，请在图层列表解锁后编辑。</p>
           <fieldset :key="`${single.id}-${inputEpoch}`" :disabled="singleBlocked">
             <label>图层名称<input :value="single.name" maxlength="120" @change="setLayer('name', $event.target.value)"></label>
-            <label class="inline"><input data-testid="design-layer-editor-only" type="checkbox" :checked="single.editorOnly" @change="setLayer('editorOnly', $event.target.checked)"> 仅编辑可见（不打印）</label>
+            <label class="inline"><input data-testid="design-layer-editor-only" type="checkbox" :checked="single.editorOnly" :disabled="!!single.referenceFor" @change="setLayer('editorOnly', $event.target.checked)"> 仅编辑可见（不打印）</label>
             <p v-if="single.editorOnly" class="muted">对齐用的参考框勾上它：编辑时看得见、能选中能拖动，打印、导出 PDF 和 PNG 里都不会出现。</p>
             <div class="property-grid">
               <label v-for="[key, label] in [['x','X mm'],['y','Y mm'],['w','宽度 mm'],['h','高度 mm']]" :key="key">{{ label }}<input type="number" step="0.1" :value="single[key]" :data-testid="`design-layer-${key}`" @change="setLayer(key, $event.target.value, true)"></label>
@@ -2397,7 +2496,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
               <label>字体<select :value="single.fontFamily" @change="setLayer('fontFamily', $event.target.value)"><option value="">默认字体</option><option v-for="name in fontNames" :key="name" :value="name">{{ name }}</option><option v-if="single.fontFamily && !fontNames.includes(single.fontFamily)" :value="single.fontFamily">{{ single.fontFamily }}（当前未找到）</option></select></label>
               <div class="property-grid">
                 <label>字号 pt<input type="number" min="1" step="1" :value="single.fontSize" @change="setLayer('fontSize', $event.target.value, true)"></label>
-                <label class="color-field" @click="openColorPicker"><span>文字颜色</span><span class="color-control"><input type="color" :value="single.color === 'transparent' ? '#ffffff' : single.color" aria-label="选择文字颜色" @input="colorInput('color', $event.target.value)" @change="colorChange('color', $event.target.value)"><code class="color-value">{{ formatColor(single.color) }}</code><span class="color-open" aria-hidden="true">⌄</span></span></label>
+                <DesignTextColorPicker :key="single.id" class="text-color-property" :model-value="single.color" :picking="pickingTextColor" :disabled="singleBlocked" @input="colorInput('color', $event)" @change="colorChange('color', $event)" @pick="startTextColorPick" />
                 <label>行距倍数<input type="number" min="0.5" step="0.1" :value="single.lineHeight" @change="setLayer('lineHeight', $event.target.value, true)"></label>
                 <label>字距 pt<input type="number" step="0.1" :value="single.letterSpacing" @change="setLayer('letterSpacing', $event.target.value, true)"></label>
               </div>
@@ -2406,6 +2505,8 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
             </template>
             <template v-else-if="single.type === 'image' && single.variable">
               <h4>变量照片</h4>
+              <button data-testid="design-variable-reference" :disabled="!variablePhotoSample || singleBlocked || busy" @click="editReferenceSample()">编辑参考样图</button>
+              <p class="muted">参考样图使用普通图片工具，修改仅供排版参考。整批照片的抠图、适配和柔边只在变量照片页设置；这里的变量框尺寸、位置和取景仍用于实际输出。</p>
               <p>匹配字段跟随名单的“配图”开关。切换字段无需重新制作变量图。</p>
               <label>成品尺寸 / 比例
                 <select v-model="sizePreset" data-testid="design-size-preset" :disabled="singleBlocked">
@@ -2740,6 +2841,7 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 /* 画布内就地编辑：尺寸/字号/行距全部由 inline style 按图层数据给出，这里只做「把浏览器默认外观清干净」，
    否则 textarea 自带的 border/padding 会让编辑中的字比出片时偏一点。outline 不占布局。 */
 .inline-text-editor { position: absolute; box-sizing: border-box; margin: 0; padding: 0; border: 0; background: transparent; resize: none; overflow: hidden; transform-origin: center center; pointer-events: auto; caret-color: currentColor; outline: 1px dashed var(--cinnabar); outline-offset: 2px; }
+.design-stage.pixel-picking, .design-stage.pixel-picking * { cursor: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2224%22 height=%2224%22 viewBox=%220 0 24 24%22%3E%3Cpath d=%22M4 20l1-4L16 5l3 3L8 19z%22 fill=%22%23fff%22 stroke=%22%231b2730%22 stroke-width=%221.6%22/%3E%3Cpath d=%22M14 7l3 3m-5-5l3-3 5 5-3 3%22 fill=%22%2371d3e8%22 stroke=%22%231b2730%22 stroke-width=%221.6%22/%3E%3C/svg%3E") 3 20, crosshair !important; }
 .design-stage { position: relative; flex-shrink: 0; background: #fff; box-shadow: 0 3px 16px #0003; margin: 0 auto; isolation: isolate; }
 .layer-hit { position: absolute; cursor: move; touch-action: none; outline: 1px solid transparent; transform-origin: center; user-select: none; }
 .layer-hit:hover { outline-color: #b03a2e88; } .layer-hit.chosen { outline: 1px solid #b03a2e; z-index: 2; }
@@ -2800,6 +2902,7 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .adjust-reset-field { width: 26px; height: 26px; padding: 0; font-size: 16px; line-height: 1; }
 .inspector input, .inspector select, .inspector textarea, .tools-panel input, .tools-panel select, .tools-panel textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); background: var(--input-bg); color: var(--ink); border-radius: 4px; padding: 6px; font: inherit; font-size: 12px; }
 .inspector .color-field, .tools-panel .color-field { gap: 6px; }
+.text-color-property { grid-column: 1 / -1; }
 .inspector .color-control, .tools-panel .color-control { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 40px; padding: 4px 10px 4px 5px; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--input-bg); transition: border-color .15s, box-shadow .15s; }
 .inspector .color-control:focus-within, .tools-panel .color-control:focus-within { border-color: var(--cinnabar); box-shadow: 0 0 0 2px var(--cinnabar-soft); }
 .inspector .color-control input[type="color"], .tools-panel .color-control input[type="color"] { flex: 0 0 34px; width: 34px; height: 30px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-card); cursor: pointer; }
@@ -2817,6 +2920,8 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .guide-row input { flex: 1; width: 65px; padding: 5px 3px; }
 .guide-outside { color: var(--warn); flex-shrink: 0; font-size: 10px; }
 .export-mask { position: fixed; inset: 0; z-index: 130; background: #201b1666; display: flex; align-items: center; justify-content: center; }
+.reference-sample-note { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-card); font-size: 12px; }
+.reference-sample-note p { color: var(--stone); line-height: 1.6; margin: 6px 0; }
 .export-dialog { width: 410px; padding: 24px; border-radius: 10px; background: var(--paper-card); border: 1px solid var(--line-strong); box-shadow: var(--shadow); }
 .export-dialog h3 { font-size: 16px; margin: 0 0 12px; }
 .export-dialog p { font-size: 12px; line-height: 1.8; color: var(--ink-2); }
