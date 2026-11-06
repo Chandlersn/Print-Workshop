@@ -97,7 +97,12 @@ async function main() {
   const pkgVer = require(path.join(ROOT, 'package.json')).version
   const latest = JSON.parse(fs.readFileSync(path.join(ROOT, 'latest.json'), 'utf-8'))
   const readmeVer = (() => {
-    const m = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf-8').match(/\|\s*当前版本\s*\|\s*v?([\d.]+)\s*\|/)
+    const md = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf-8')
+    // README 头部版本写法换过：早期是表格「| 当前版本 | v0.6.9 |」，
+    // 2026-11-06 起是「**当前源码版本：v0.6.9 · …**」。两种都要认，
+    // 否则版本明明一致却因正则失配在建 Release 前退出（同版本重发踩过）。
+    const m = md.match(/\|\s*当前版本\s*\|\s*v?([\d.]+)\s*\|/)
+      || md.match(/当前源码版本[：:]\s*v?([\d.]+)/)
     return m ? m[1] : ''
   })()
   ok(pkgVer === latest.version, `latest.json 与 package.json 一致（${pkgVer}）`, { pkg: pkgVer, latest: latest.version })
