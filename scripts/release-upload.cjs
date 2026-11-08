@@ -133,6 +133,14 @@ async function main() {
   console.log('\n== 4. Release 状态 ==')
   const existing = await api('GET', `${API}/repos/${OWNER}/${REPO}/releases/tags/${tag}`)
   let release = existing.ok ? existing.json : null
+  if (!release && existing.status === 404) {
+    // GitHub 的按标签查询不返回草稿；重试必须复用草稿，避免创建多个同版本草稿。
+    const list = await api('GET', `${API}/repos/${OWNER}/${REPO}/releases?per_page=100`)
+    if (!list.ok || !Array.isArray(list.json)) throw new Error('无法查询已有发布草稿，请稍后重试')
+    release = list.json.find(item => item.draft && item.tag_name === tag) || null
+  } else if (!release && existing.status !== 404) {
+    throw new Error(`无法查询已有 Release（HTTP ${existing.status}）`)
+  }
   const assetName = `PrintPress-${pkgVer}-Setup.exe`
   if (release) {
     console.log(`     已存在 Release: ${release.html_url}`)
@@ -184,7 +192,10 @@ async function main() {
   console.log('\n== 6. 上传安装包 ==')
   console.log(`     ${assetName}（${localSize} 字节）…`)
   const buf = fs.readFileSync(exe)
-  await uploadAsset(release.id, assetName, buf)
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex')
+  const uploadedInstaller = (release.assets || []).find(a => a.name === assetName && a.state === 'uploaded' && a.size === localSize && a.digest === `sha256:${sha256}`)
+  if (uploadedInstaller) console.log('     已有相同哈希的安装包，复用上传结果')
+  else await uploadAsset(release.id, assetName, buf)
 
   // ── 6b. 自动更新清单 latest.yml（electron-updater 靠它校验 sha512 + 定位安装包）──
   console.log('\n== 6b. 生成 latest.yml（所有安装资产就绪后上传）==')
@@ -217,7 +228,6 @@ async function main() {
   // 是这种前提下唯一可用的替代手段：用户下完自己算一遍、跟这里比一遍。
   // 校验和必须由 CI 对**已定稿的那份 exe**算，不能人工填（人填的会漂）。
   console.log('\n== 6c. 上传 SHA256SUMS.txt（未签名安装包的替代核对手段）==')
-  const sha256 = crypto.createHash('sha256').update(buf).digest('hex')
   const sums = `${sha256}  ${assetName}\n`
   await uploadAsset(release.id, 'SHA256SUMS.txt', Buffer.from(sums, 'utf-8'))
   console.log(`     sha256 = ${sha256}`)
@@ -227,7 +237,7 @@ async function main() {
 
   // ── 7. 回读复核 ──
   console.log('\n== 7. 回读复核 ==')
-  const after = await api('GET', `${API}/repos/${OWNER}/${REPO}/releases/tags/${tag}`)
+  const after = await api('GET', `${API}/repos/${OWNER}/${REPO}/releases/${release.id}`)
   const asset = after.ok ? (after.json.assets || []).find((a) => a.name === assetName) : null
   ok(Boolean(asset), '资产已挂到 Release 上')
   ok(Boolean(asset) && asset.size === localSize, '**远端大小 == 本地大小**（没传一半）',

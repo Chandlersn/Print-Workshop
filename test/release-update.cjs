@@ -13,18 +13,18 @@ const installer = Buffer.from('fixture installer bytes')
 const source = fs.readFileSync(path.join(ROOT, 'scripts/release-upload.cjs'), 'utf8')
   .replace(/main\(\)\.catch\([^\n]+\)/, 'globalThis.run = main')
 
-async function run({ missingInstaller = false, dry = false, newRelease = false, missingManifest = false } = {}) {
+async function run({ missingInstaller = false, dry = false, newRelease = false, missingManifest = false, resumeDraft = false } = {}) {
   let id = 1
-  const assets = newRelease ? [] : [{ id: id++, name: EXE, size: installer.length, state: 'uploaded' }]
+  const assets = newRelease && !resumeDraft ? [] : [{ id: id++, name: EXE, size: installer.length, state: 'uploaded', ...(resumeDraft ? { digest: `sha256:${crypto.createHash('sha256').update(installer).digest('hex')}` } : {}) }]
   const uploads = [], operations = []
-  let created = !newRelease, draft = false
+  let created = !newRelease || resumeDraft, draft = resumeDraft
   const files = new Map([
     [path.join(ROOT, 'latest.json'), JSON.stringify({ version: VERSION })],
     [path.join(ROOT, 'README.md'), `| 当前版本 | v${VERSION} |\n`],
     [path.join(ROOT, 'release', '批印坊 Setup 0.6.0.exe'), installer],
   ])
   if (!missingInstaller) files.set(path.join(ROOT, 'release', `批印坊 Setup ${VERSION}.exe`), installer)
-  const release = () => ({ id: 100, html_url: 'https://github.com/example/release', draft, assets: missingManifest ? assets.filter(a => a.name !== 'latest.yml') : assets })
+  const release = () => ({ id: 100, tag_name: `v${VERSION}`, html_url: 'https://github.com/example/release', draft, assets: missingManifest ? assets.filter(a => a.name !== 'latest.yml') : assets })
   const context = {
     __dirname: path.join(ROOT, 'scripts'), Buffer,
     console: { log() {}, error() {} },
@@ -65,7 +65,9 @@ async function run({ missingInstaller = false, dry = false, newRelease = false, 
       else if (url.endsWith('/Print-Workshop')) data = { full_name: 'test/repo', permissions: { push: true } }
       else if (url.includes('/git/ref/tags/')) data = { object: { sha: '0123456789' } }
       else if (url.endsWith('/assets')) data = assets
-      else if (url.includes('/releases/tags/')) { if (created) data = release(); else { status = 404; data = { message: 'not found' } } }
+      else if (url.endsWith('/releases?per_page=100')) data = created ? [release()] : []
+      else if (url.endsWith('/releases/100')) data = release()
+      else if (url.includes('/releases/tags/')) { if (created && !draft) data = release(); else { status = 404; data = { message: 'not found' } } }
       else throw new Error(`意外网络请求 ${url}`)
       return { ok: status < 400, status, text: async () => JSON.stringify(data) }
     },
@@ -109,6 +111,10 @@ async function main() {
   const incomplete = await run({ newRelease: true, missingManifest: true })
   assert.equal(incomplete.exitCode, 1)
   assert.ok(!incomplete.operations.includes('publish'), '更新清单缺失时保留草稿，不能发布半成品')
+  const resumed = await run({ newRelease: true, resumeDraft: true })
+  assert.equal(resumed.exitCode, 0)
+  assert.ok(!resumed.uploads.some(a => a.name === EXE), '重试复用草稿和哈希相同的安装包，避免重复上传')
+  assert.equal(resumed.operations.at(-1), 'publish')
   console.log('PASS 发布更新资产：补传清单、真实哈希、发布顺序、拒绝旧包及 dry-run')
 }
 
