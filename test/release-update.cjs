@@ -13,17 +13,18 @@ const installer = Buffer.from('fixture installer bytes')
 const source = fs.readFileSync(path.join(ROOT, 'scripts/release-upload.cjs'), 'utf8')
   .replace(/main\(\)\.catch\([^\n]+\)/, 'globalThis.run = main')
 
-async function run({ missingInstaller = false, dry = false } = {}) {
+async function run({ missingInstaller = false, dry = false, newRelease = false, missingManifest = false } = {}) {
   let id = 1
-  const assets = [{ id: id++, name: EXE, size: installer.length }]
-  const uploads = []
+  const assets = newRelease ? [] : [{ id: id++, name: EXE, size: installer.length, state: 'uploaded' }]
+  const uploads = [], operations = []
+  let created = !newRelease, draft = false
   const files = new Map([
     [path.join(ROOT, 'latest.json'), JSON.stringify({ version: VERSION })],
     [path.join(ROOT, 'README.md'), `| 当前版本 | v${VERSION} |\n`],
     [path.join(ROOT, 'release', '批印坊 Setup 0.6.0.exe'), installer],
   ])
   if (!missingInstaller) files.set(path.join(ROOT, 'release', `批印坊 Setup ${VERSION}.exe`), installer)
-  const release = () => ({ id: 100, html_url: 'https://github.com/example/release', assets })
+  const release = () => ({ id: 100, html_url: 'https://github.com/example/release', draft, assets: missingManifest ? assets.filter(a => a.name !== 'latest.yml') : assets })
   const context = {
     __dirname: path.join(ROOT, 'scripts'), Buffer,
     console: { log() {}, error() {} },
@@ -41,24 +42,32 @@ async function run({ missingInstaller = false, dry = false } = {}) {
     },
     async fetch(url, options = {}) {
       const method = options.method || 'GET'
-      let data
+      let data, status = 200
       if (url.startsWith('https://uploads.github.com/')) {
         assert.equal(method, 'POST')
         const name = new URL(url).searchParams.get('name')
         uploads.push({ name, body: options.body })
-        assets.push({ id: id++, name, size: options.body.length })
+        operations.push(`upload:${name}`)
+        assets.push({ id: id++, name, size: options.body.length, state: 'uploaded' })
         data = {}
       } else if (method === 'DELETE') {
         const assetId = Number(url.split('/').pop())
         assets.splice(assets.findIndex(a => a.id === assetId), 1)
         data = null
+      } else if (method === 'POST' && url.endsWith('/releases')) {
+        const body = JSON.parse(options.body)
+        assert.equal(body.draft, true, '新 Release 必须先作为草稿创建')
+        created = true; draft = true; operations.push('create-draft'); data = release()
+      } else if (method === 'PATCH' && url.endsWith('/releases/100')) {
+        const body = JSON.parse(options.body)
+        assert.equal(body.draft, false); draft = false; operations.push('publish'); data = release()
       } else if (url.endsWith('/user')) data = { login: 'test' }
       else if (url.endsWith('/Print-Workshop')) data = { full_name: 'test/repo', permissions: { push: true } }
       else if (url.includes('/git/ref/tags/')) data = { object: { sha: '0123456789' } }
       else if (url.endsWith('/assets')) data = assets
-      else if (url.includes('/releases/tags/')) data = release()
+      else if (url.includes('/releases/tags/')) { if (created) data = release(); else { status = 404; data = { message: 'not found' } } }
       else throw new Error(`意外网络请求 ${url}`)
-      return { ok: true, status: 200, text: async () => JSON.stringify(data) }
+      return { ok: status < 400, status, text: async () => JSON.stringify(data) }
     },
   }
   vm.runInNewContext(source, context)
@@ -67,7 +76,7 @@ async function run({ missingInstaller = false, dry = false } = {}) {
     if (!Number.isInteger(e.exitCode)) throw e
     exitCode = e.exitCode
   }
-  return { exitCode, uploads, assets }
+  return { exitCode, uploads, assets, operations }
 }
 
 async function main() {
@@ -93,6 +102,13 @@ async function main() {
   const dry = await run({ dry: true })
   assert.equal(dry.exitCode, 0)
   assert.equal(dry.uploads.length, 0, 'dry-run 无写操作')
+  const fresh = await run({ newRelease: true })
+  assert.equal(fresh.exitCode, 0)
+  assert.equal(fresh.operations[0], 'create-draft')
+  assert.equal(fresh.operations.at(-1), 'publish', '安装包及更新清单回读验证成功后才正式发布')
+  const incomplete = await run({ newRelease: true, missingManifest: true })
+  assert.equal(incomplete.exitCode, 1)
+  assert.ok(!incomplete.operations.includes('publish'), '更新清单缺失时保留草稿，不能发布半成品')
   console.log('PASS 发布更新资产：补传清单、真实哈希、发布顺序、拒绝旧包及 dry-run')
 }
 

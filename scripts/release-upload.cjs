@@ -162,7 +162,7 @@ async function main() {
   // ── 5. 创建 Release（若不存在） ──
   console.log('\n== 5. 创建 Release ==')
   if (!release) {
-    const notes = readVersionHistoryEntry(pkgVer)
+    const notes = readVersionHistoryEntry(pkgVer) || (typeof latest.notes === 'string' ? latest.notes : '')
     const created = await api('POST', `${API}/repos/${OWNER}/${REPO}/releases`, {
       tag_name: tag,
       target_commitish: 'main',
@@ -170,7 +170,7 @@ async function main() {
       body: notes
         ? `## ${tag}\n\n${notes}\n\n---\n\n安装包未做代码签名。下载后请对照 Release 里的 \`SHA256SUMS.txt\` 核对：\n\n\`\`\`powershell\nGet-FileHash .\\${assetName} -Algorithm SHA256\n\`\`\`\n\n哈希一致才运行；不一致说明下载被替换过，别装。`
         : tag,
-      draft: false,
+      draft: true,
       prerelease: false,
     })
     ok(created.ok, 'Release 创建成功', created.ok ? created.json.html_url : `HTTP ${created.status} ${created.text.slice(0, 200)}`)
@@ -232,13 +232,26 @@ async function main() {
   ok(Boolean(asset), '资产已挂到 Release 上')
   ok(Boolean(asset) && asset.size === localSize, '**远端大小 == 本地大小**（没传一半）',
     { 远端: asset && asset.size, 本地: localSize })
-  for (const [name, size] of [['latest.yml', latestYmlBytes.length], ['SHA256SUMS.txt', Buffer.byteLength(sums)]]) {
+  ok(Boolean(asset) && asset.state === 'uploaded', '安装包上传状态正常')
+  if (asset?.digest) ok(asset.digest === `sha256:${sha256}`, '远端安装包哈希与本地一致')
+  const requiredAssets = [['latest.yml', latestYmlBytes.length], ['SHA256SUMS.txt', Buffer.byteLength(sums)]]
+  if (fs.existsSync(blockmapPath)) requiredAssets.push([blockmapName, fs.statSync(blockmapPath).size])
+  for (const [name, size] of requiredAssets) {
     const hit = after.ok && (after.json.assets || []).find(a => a.name === name)
-    ok(Boolean(hit) && hit.size === size, `必需资产 ${name} 已完整上传`)
+    ok(Boolean(hit) && hit.size === size && hit.state === 'uploaded', `必需资产 ${name} 已完整上传`)
   }
   if (asset) {
     console.log(`     下载地址: ${asset.browser_download_url}`)
     console.log(`     状态: ${asset.state}`)
+  }
+  if (bad) {
+    console.log('资产验证未通过，草稿不会发布。')
+    process.exit(1)
+  }
+  if (release.draft) {
+    console.log('\n== 8. 发布已验证的 Release ==')
+    const published = await api('PATCH', `${API}/repos/${OWNER}/${REPO}/releases/${release.id}`, { draft: false, prerelease: false, make_latest: 'true' })
+    ok(published.ok && published.json?.draft === false, 'Release 已正式发布', published.ok ? published.json.html_url : `HTTP ${published.status}`)
   }
   console.log(`\nRelease 页面: ${release.html_url}`)
   process.exit(bad ? 1 : 0)
