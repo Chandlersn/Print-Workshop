@@ -29,7 +29,17 @@ jobs:
           cache: npm
 
       - name: 安装依赖
-        run: npm ci
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            npm ci
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 3) {
+              Write-Warning "依赖下载失败，稍后重试（$attempt / 3）"
+              Start-Sleep -Seconds (10 * $attempt)
+            }
+          }
+          exit 1
 
       # 发版前再跑一遍：防止「测试没绿也发出去」
       - name: 领域层测试
