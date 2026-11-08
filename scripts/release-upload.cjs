@@ -262,6 +262,7 @@ async function main() {
     console.log('\n== 8. 发布已验证的 Release ==')
     const published = await api('PATCH', `${API}/repos/${OWNER}/${REPO}/releases/${release.id}`, { draft: false, prerelease: false, make_latest: 'true' })
     ok(published.ok && published.json?.draft === false, 'Release 已正式发布', published.ok ? published.json.html_url : `HTTP ${published.status}`)
+    if (published.ok) release = published.json
   }
   console.log(`\nRelease 页面: ${release.html_url}`)
   process.exit(bad ? 1 : 0)

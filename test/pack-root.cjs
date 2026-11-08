@@ -211,8 +211,9 @@ check('npm run dist 里先跑自查、再 build、最后才 electron-builder', (
 })
 
 check('CI 的 release.yml 走 npm run dist ⇒ 自动被自查覆盖', () => {
-  const yml = read('.github/workflows/release.yml')
-  assert.ok(/run: npm run dist/.test(yml), 'release.yml 必须走 npm run dist（这样自查才在 CI 里生效）')
+  const yml = require('js-yaml').load(read('.github/workflows/release.yml'))
+  const step = yml.jobs?.release?.steps?.find(item => item.name === '构建并打包（NSIS）')
+  assert.ok(step && /^\s*npm run dist\s*$/m.test(step.run || ''), 'release.yml 的打包步骤必须走 npm run dist（这样自查才在 CI 里生效）')
 })
 
 check('自查脚本以 Buffer 取名字：非法 UTF-8 的名字走字符串会对不上', () => {
