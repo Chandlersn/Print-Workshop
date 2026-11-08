@@ -50,7 +50,17 @@ jobs:
       # ⇒ 包明明打好了却 `⨯ GitHub Personal Access Token is not set` exit 1，整步挂掉、
       # 走不到下面的上传。发布是 release-upload.cjs 的活，两条路不能重叠。
       - name: 构建并打包（NSIS）
-        run: npm run dist
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            npm run dist
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 3) {
+              Write-Warning "打包依赖下载失败或打包未完成，稍后重试（$attempt / 3）"
+              Start-Sleep -Seconds (10 * $attempt)
+            }
+          }
+          exit 1
 
       # release-upload.cjs 自己会核对三处版本号一致 / tag 在位 / 远端大小 == 本地
       - name: 建 Release 并上传安装包
