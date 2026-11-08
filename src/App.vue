@@ -15,6 +15,7 @@ import brandLogo from '../electron/brand/printpress-logo-v2.png'
 import { toUserMessage } from '../electron/user-error.cjs'
 import { cellNav } from './lib/cell-nav.js'
 import { designerNav } from './lib/designer-nav.js'
+import { photoNav } from './lib/photo-nav.js'
 
 const TABS = [
   { id: 'dataset', label: '数据', hint: '导入名单' },
@@ -29,7 +30,9 @@ const env = ref(null)
 const theme = ref('light')
 
 watch(() => designerNav.request, (request) => { if (request) activeTab.value = 'designer' })
-watch(() => designerNav.result, (result) => { if (result) activeTab.value = 'template' })
+watch(() => designerNav.result, (result) => { if (result) activeTab.value = result.origin === 'print' ? 'print' : 'template' })
+watch(() => photoNav.request, request => { if (request) activeTab.value = 'photos' })
+watch(() => photoNav.result, result => { if (result?.origin === 'print') activeTab.value = 'print' })
 
 // 去补录直达：打印中心校验弹窗点单元格 → 切到数据页（DatasetView 自行消费 cellNav.req）
 watch(cellNav, (r) => {
@@ -402,7 +405,7 @@ onMounted(async () => {
     </div>
 
     <main class="app-main">
-      <KeepAlive include="TemplateView,BackgroundDesignerView">
+      <KeepAlive include="TemplateView,BackgroundDesignerView,PrintCenterView">
         <DatasetView v-if="activeTab === 'dataset'" />
         <PhotoLibraryView v-else-if="activeTab === 'photos'" @navigate="activeTab = $event" />
         <TemplateView v-else-if="activeTab === 'template'" />

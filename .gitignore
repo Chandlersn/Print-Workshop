@@ -33,6 +33,7 @@ data/print-bg/
 data/print-fonts/
 data/designs/
 data/design-assets/
+data/photo-assets/
 data/designs.write.lock/
 data/archive/
 .workbuddy-ai/
@@ -45,3 +46,5 @@ test-logs/
 ppw.config.json
 # 分发用的 skill 打包产物：刻意不输出到 dist/——那是 vite 的产物目录，每次 build 都被清空
 packages/
+build/models/birefnet-portrait.onnx
+build/models/birefnet-lite.onnx

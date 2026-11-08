@@ -242,7 +242,7 @@ function normalizeDesign(input) {
     const assetPath = string(asset.path, '', 200, '素材路径')
     // 两个原件池都合法（I-51）：design-assets/ 素材库、ephemeral-assets/ 临时底图。
     // 主进程每次保存都按 readAsset 的真身把 path 改写一遍，所以两个值都是不动点。
-    if (!/^(design-assets|ephemeral-assets)\/[a-f0-9]{64}\.(png|jpg)$/.test(assetPath)) throw new Error('素材路径不在底图素材目录内')
+    if (!/^(design-assets|ephemeral-assets|photo-assets)\/[a-f0-9]{64}\.(png|jpg)$/.test(assetPath)) throw new Error('素材路径不在底图素材目录内')
     assets[id] = { id, path: assetPath, width: number(asset.width, 1, 1, 24000, '图片宽度'), height: number(asset.height, 1, 1, 24000, '图片高度'), name: string(asset.name, '图片', 200, '素材名称'), mime: asset.mime, source: normalizeSource(asset.source) }
     if (!['image/png', 'image/jpeg'].includes(asset.mime)) throw new Error('素材格式无效')
     /*
@@ -487,6 +487,7 @@ function renderDesign(input, options = {}) {
   const referenced = new Set(includeEditorOnly ? doc.layers.filter(l => l.visible && l.referenceFor).map(l => l.referenceFor) : [])
   const fragments = doc.layers.filter(l => l.visible && (includeEditorOnly || !l.editorOnly) && !(l.variable && referenced.has(l.id))).map(l => {
     let body = ''
+    const photoStyle = l.type === 'image' && l.variable ? options.photoStyle?.(l) : null
     const effectiveOpacity = Math.min(1, Math.max(0, l.opacity * (groupOpacity.get(l.id) ?? 1)))
     /*
      * 烘焙覆盖（契约 I-50）：带 CSS `filter` 或 `drop-shadow` 的固定图片会让 Chromium
@@ -501,7 +502,7 @@ function renderDesign(input, options = {}) {
     const baked = (l.type === 'image' && !l.variable) ? options.bakedLayer?.(l) : null
     const style = baked
       ? [`left:${baked.x}mm`, `top:${baked.y}mm`, `width:${baked.w}mm`, `height:${baked.h}mm`, `opacity:${effectiveOpacity}`]
-      : [`left:${l.x}mm`, `top:${l.y}mm`, `width:${l.w}mm`, `height:${l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${effectiveOpacity}`]
+      : [`left:${photoStyle?.position?.x ?? l.x}mm`, `top:${photoStyle?.position?.y ?? l.y}mm`, `width:${photoStyle?.size?.w ?? l.w}mm`, `height:${photoStyle?.size?.h ?? l.h}mm`, `transform:rotate(${l.rotation}deg)`, `opacity:${effectiveOpacity}`]
     if (l.blend && l.blend !== 'normal') style.push(`mix-blend-mode:${l.blend}`)
     // 图片图层的描边与投影（v0.7 §6）。两条都**不碰几何**，这是刻意的：
     // - 描边走一个**叠层元素** + `inset box-shadow`，画在框的内侧。
@@ -519,7 +520,6 @@ function renderDesign(input, options = {}) {
     // 而「描边 + 投影」正是证件照衬边最常见的组合，不能赌浏览器的裁剪语义。
     if (l.type === 'image' && l.variable) {
       const url = options.photoUrl?.(l)
-      const photoStyle = options.photoStyle?.(l)
       const fit = photoStyle?.fit || l.fit
       const focal = photoStyle?.focal || l.focal
       style.push(`border-radius:${l.radius}mm`)

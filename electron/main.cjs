@@ -240,6 +240,12 @@ function main() {
     }
   } catch (err) { console.error('照片导入恢复异常:', err) }
 
+  // Copy legacy photo originals separately in the background; never move or
+  // delete old shared files, so existing designs and print history stay valid.
+  setImmediate(() => require('./photo-library.cjs').migrateLegacyPhotoAssets()
+    .then(result => { if (result.migrated || result.failed) console.log(`照片目录整理：复制 ${result.migrated} 项，跳过 ${result.failed} 项`) })
+    .catch(err => console.error('照片目录整理异常:', err)))
+
   // 更新检测 IPC：meta 给渲染层版本与出口链接；checkUpdate 支持手动触发（卡点可见）
   ipcMain.handle('app:meta', () => ({
     version: app.getVersion(),

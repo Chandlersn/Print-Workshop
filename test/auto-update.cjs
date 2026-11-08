@@ -163,7 +163,7 @@ async function main() {
       .split('<script setup>')[1].split('</script>')[0].replace(/^import .+$/gm, '')
     const snapshot = { phase: 'downloaded', at: 10, version: '0.7.0', info: { version: '0.7.0' } }
     const context = {
-      ...vue, onMounted: cb => { mounted = cb }, cellNav: vue.ref(null), designerNav: vue.reactive({}),
+      ...vue, onMounted: cb => { mounted = cb }, cellNav: vue.ref(null), designerNav: vue.reactive({}), photoNav: vue.reactive({}),
       toUserMessage: e => e.message, document: { documentElement: { dataset: {} } },
       window: { printpress: {
         onUpdateState: cb => { notify = cb }, onUpdateAvailable() {},

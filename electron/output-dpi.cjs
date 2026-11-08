@@ -304,13 +304,15 @@ function planDerivatives({ design, photos, dpi }) {
 
   // 归集 assetId → 用到它的图框集合（同一素材可能被多个图层/多行复用）
   const framesByAsset = new Map()
-  for (const perColumn of photos?.byRecord?.values() || []) {
+  for (const [record, perColumn] of photos?.byRecord?.entries() || []) {
     for (const layer of layers) {
       const assetId = perColumn[layer.bindColumn]
       if (typeof assetId !== 'string') continue
       let frames = framesByAsset.get(assetId)
       if (!frames) { frames = new Map(); framesByAsset.set(assetId, frames) }
-      frames.set(`${layer.w}x${layer.h}`, layer)
+      const size = photos.overrides?.get(record)?.[layer.id]?.size
+      const frame = size ? { ...layer, w:size.w, h:size.h } : layer
+      frames.set(`${frame.w}x${frame.h}`, frame)
     }
   }
 

@@ -293,6 +293,7 @@ function getDataset(id) {
 function deleteDataset(id) {
   findDs(id)
   persistAll(loadAll().filter((d) => d.id !== id))
+  try { require('./record-designs.cjs').forget({datasetIds:[id]}) } catch (error) { console.warn('[record-designs] cleanup deferred:', error.message) }
   return { ok: true }
 }
 
@@ -309,6 +310,7 @@ function deleteBatch(ids) {
   const deleted = list.length - remaining.length
   if (deleted === 0) throw new Error('所选数据集均已不存在（可能已被删除），请刷新后重试')
   persistAll(remaining)
+  try { require('./record-designs.cjs').forget({datasetIds:[...want]}) } catch (error) { console.warn('[record-designs] cleanup deferred:', error.message) }
   return { ok: true, deleted }
 }
 
@@ -387,10 +389,12 @@ function deleteRow(id, rowIndex) {
   const ds = list.find((d) => d.id === id)
   if (!ds) throw new Error(`所选数据集已不存在（可能已被删除），请刷新后重新选择`)
   const i = assertRowIndex(ds, rowIndex)
+  const removedRowId = ds.recordIds[i]
   ds.rows.splice(i, 1)
   ds.recordIds.splice(i, 1)
   recomputeColumnStats(ds)
   persistAll(list)
+  try { require('./record-designs.cjs').forget({datasetId:id,rowId:removedRowId}) } catch (error) { console.warn('[record-designs] cleanup deferred:', error.message) }
   return { ok: true, rowCount: ds.rows.length }
 }
 

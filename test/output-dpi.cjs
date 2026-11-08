@@ -448,6 +448,13 @@ check('同图大小框共用：任一框需要原图时，两种图层顺序都�
   const smaller = dpi.planDerivatives({ design: { layers: [layer, { ...layer, w: 40, h: 40 }] }, photos, dpi: 300 })
   assert.deepEqual(smaller.plans.get(id).target, { w: 472, h: 472 }, '全部可缩时取较大框')
 })
+check('单人放大的图框参与降采样规划，避免输出变模糊', () => {
+  const id = 'asset_' + 'c'.repeat(64), first = {}, second = {}
+  const layer = { id:'portrait', variable:true, visible:true, bindColumn:'photo', w:20, h:20 }
+  const photos = { byRecord:new Map([[first,{photo:id}],[second,{photo:id}]]), geometry:new Map([[id,{width:2000,height:2000}]]), overrides:new Map([[first,{portrait:{size:{w:60,h:60}}}]]) }
+  const plan = dpi.planDerivatives({design:{layers:[layer]},photos,dpi:300}).plans.get(id)
+  assert.deepEqual(plan.target,{w:709,h:709}, '同图复用时按调整后最大的图框保留分辨率')
+})
 check('对称旋转的外接框相同，缓存名必须不同；仅改透明度仍可复用', () => {
   const id = 'asset_' + 'b'.repeat(64)
   const layer = { id: 'image', type: 'image', assetId: id, visible: true, x: 60, y: 60, w: 40, h: 20, rotation: 30,

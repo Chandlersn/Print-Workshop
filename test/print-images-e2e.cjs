@@ -202,7 +202,7 @@ async function main() {
   check(await evaluate(`getComputedStyle(document.querySelector('.history-mask')).position==='fixed'`), 'history opens in fixed overlay, not preview layout')
   fs.writeFileSync(path.join(output, 'history-ui.png'), (await ui.webContents.capturePage()).toPNG())
   check(await evaluate(`document.querySelector('.history-modal').getBoundingClientRect().width > 900`), 'desktop history dialog is wide enough for the table')
-  await evaluate(`document.querySelector('.history-head button').click()`)
+  await evaluate(`document.querySelector('.history-head > button').click()`)
   await waitFor(`!document.querySelector('.history-modal')`, 'history closed')
   check(await evaluate(`!document.querySelector('.history-modal')`), 'close button hides history dialog')
   dataset.updateCell(ds.id, 0, '姓名', '')
@@ -217,7 +217,7 @@ async function main() {
   const previewBefore = await evaluate(`document.querySelector('.preview-wrap').getBoundingClientRect().top`)
   await evaluate(`document.querySelector('.history-trigger').click()`)
   await waitFor(`!!document.querySelector('.history-modal')`, 'history over preview')
-  await evaluate(`document.querySelector('.history-head button').click()`)
+  await evaluate(`document.querySelector('.history-head > button').click()`)
   await waitFor(`!document.querySelector('.history-modal')`, 'history over preview closed')
   check(await evaluate(`document.querySelector('.preview-wrap').getBoundingClientRect().top === ${previewBefore}`), 'opening and closing history does not move the print preview')
   check(await evaluate(`(() => { const bar=document.querySelector('.range-bar'); const items=[...bar.children].filter(el=>el.offsetWidth && !el.classList.contains('tb-spacer')); return items.every(el=>Math.abs(el.getBoundingClientRect().top-items[0].getBoundingClientRect().top)<8) })()`), 'scope and record/page summary stay on one desktop row')
@@ -226,7 +226,7 @@ async function main() {
   const originalDialog = dialog.showOpenDialog
   const zoomFiles = []
   try {
-    for (const zoom of [50, 125]) {
+    for (const zoom of [25, 50, 125]) {
       await evaluate(`document.querySelector('.preview-bar .cs-trigger').click()`)
       await waitFor(`!!document.querySelector('.preview-bar .cs-option')`, 'preview zoom menu')
       await evaluate(`Array.from(document.querySelectorAll('.preview-bar .cs-option')).find(el=>el.textContent.trim()==='${zoom}%').click()`)
@@ -236,10 +236,13 @@ async function main() {
       zoomFiles.push(result.files[0])
     }
   } finally { dialog.showOpenDialog = originalDialog }
-  check(fs.readFileSync(zoomFiles[0]).equals(fs.readFileSync(zoomFiles[1])), '50% and 125% preview zoom produce byte-identical PNG through actual IPC')
+  check(zoomFiles.slice(1).every(file => fs.readFileSync(zoomFiles[0]).equals(fs.readFileSync(file))), '25%, 50% and 125% preview zoom produce byte-identical PNG through actual IPC')
   const countBeforeUi = dataset.listDatasets().find(d => d.id === ds.id).printCount
   try {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(output, 'ui-full')] })
+    check(await evaluate(`!document.querySelector('[data-testid="print-output-settings"]').open && document.querySelector('[data-testid="print-output-settings"] summary').textContent.includes('PNG')`), '出片设置默认收起并显示当前格式')
+    await evaluate(`document.querySelector('[data-testid="print-output-settings"] summary').click()`)
+    await waitFor(`document.querySelector('[data-testid="print-output-settings"]').open`, '展开出片设置')
     await evaluate(`document.querySelector('.toolbar-row-output .toolbar-control .cs-trigger').click()`)
     await waitFor(`!!document.querySelector('.toolbar-row-output .cs-option')`, 'output DPI menu')
     await evaluate(`Array.from(document.querySelectorAll('.toolbar-row-output .cs-option')).find(el=>el.textContent.includes('150')).click()`)

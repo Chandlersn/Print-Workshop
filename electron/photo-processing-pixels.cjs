@@ -45,15 +45,105 @@ function sampleMask(data, width, height, x, y) {
   const x0 = Math.floor(x), y0 = Math.floor(y), x1 = Math.min(width - 1, x0 + 1), y1 = Math.min(height - 1, y0 + 1), tx = x - x0, ty = y - y0
   return (data[y0 * width + x0] * (1 - tx) + data[y0 * width + x1] * tx) * (1 - ty) + (data[y1 * width + x0] * (1 - tx) + data[y1 * width + x1] * tx) * ty
 }
-function applyMatte(image, mask, mw, mh) {
+function normalizeProtectPolygon(points) {
+  if (points == null) return null
+  if (!Array.isArray(points) || points.length < 3 || points.length > 512) throw new Error('人物选区需要 3 至 512 个点')
+  const polygon = points.map(point => {
+    if (!point || typeof point.x !== 'number' || typeof point.y !== 'number' || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) throw new Error('人物选区超出图片范围')
+    return { x: point.x, y: point.y }
+  })
+  let area = 0
+  for (let i = 0; i < polygon.length; i++) { const a = polygon[i], b = polygon[(i + 1) % polygon.length]; area += a.x * b.y - b.x * a.y }
+  if (Math.abs(area) < 0.0001) throw new Error('人物选区太小或没有围成有效区域，请重新圈选')
+  return polygon
+}
+// The lasso is a loose spatial hint, not an opaque mask. Keep contextual
+// padding for hair and limbs outside a roughly drawn outline.
+function subjectRegion(image, points) {
+  const polygon = normalizeProtectPolygon(points)
+  if (!polygon) return null
+  const xs = polygon.map(point => point.x * image.width), ys = polygon.map(point => point.y * image.height)
+  const left = Math.min(...xs), right = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys)
+  const padX = Math.max(16, (right - left) * .25), padY = Math.max(16, (bottom - top) * .25)
+  const x = Math.max(0, Math.floor(left - padX)), y = Math.max(0, Math.floor(top - padY))
+  const r = Math.min(image.width, Math.ceil(right + padX)), b = Math.min(image.height, Math.ceil(bottom + padY))
+  return { x, y, width: Math.max(1, r - x), height: Math.max(1, b - y) }
+}
+function subjectPrior(image, mw, mh, region, polygon) {
+  const distance = new Float32Array(mw * mh), dx = region.width / mw, dy = region.height / mh
+  const diagonal = Math.hypot(dx, dy), infinity = image.width + image.height + 1
+  for (let y = 0; y < mh; y++) {
+    const scanY = (region.y + (y + .5) * dy) / image.height, crossings = []
+    for (let i = 0; i < polygon.length; i++) {
+      const a = polygon[i], b = polygon[(i + 1) % polygon.length]
+      if ((a.y > scanY) !== (b.y > scanY)) crossings.push(a.x + (scanY - a.y) * (b.x - a.x) / (b.y - a.y))
+    }
+    crossings.sort((a, b) => a - b)
+    let k = 0
+    for (let x = 0; x < mw; x++) {
+      const scanX = (region.x + (x + .5) * dx) / image.width
+      while (k < crossings.length && scanX >= crossings[k]) k++
+      distance[y * mw + x] = k % 2 ? 0 : infinity
+    }
+  }
+  for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) {
+    const i = y * mw + x
+    if (x) distance[i] = Math.min(distance[i], distance[i - 1] + dx)
+    if (y) { distance[i] = Math.min(distance[i], distance[i - mw] + dy); if (x) distance[i] = Math.min(distance[i], distance[i - mw - 1] + diagonal); if (x + 1 < mw) distance[i] = Math.min(distance[i], distance[i - mw + 1] + diagonal) }
+  }
+  for (let y = mh - 1; y >= 0; y--) for (let x = mw - 1; x >= 0; x--) {
+    const i = y * mw + x
+    if (x + 1 < mw) distance[i] = Math.min(distance[i], distance[i + 1] + dx)
+    if (y + 1 < mh) { distance[i] = Math.min(distance[i], distance[i + mw] + dy); if (x) distance[i] = Math.min(distance[i], distance[i + mw - 1] + diagonal); if (x + 1 < mw) distance[i] = Math.min(distance[i], distance[i + mw + 1] + diagonal) }
+  }
+  const radius = Math.max(6, Math.min(region.width, region.height) * .15)
+  for (let i = 0; i < distance.length; i++) {
+    const t = clamp((distance[i] - radius * .3) / (radius * .7))
+    distance[i] = 1 - t * t * (3 - 2 * t)
+  }
+  return distance
+}
+function applySubjectMatte(image, mask, mw, mh, points, region) {
+  const polygon = normalizeProtectPolygon(points)
+  if (!polygon || !region) throw new Error('请先圈选人物的大致范围')
+  const prior = subjectPrior(image, mw, mh, region, polygon)
   let subject = 0
   for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
     const i = (y * image.width + x) * 4 + 3
-    let a = clamp(sampleMask(mask, mw, mh, (x + .5) * mw / image.width - .5, (y + .5) * mh / image.height - .5))
+    if (x < region.x || x >= region.x + region.width || y < region.y || y >= region.y + region.height) { image.data[i] = 0; continue }
+    const mx = (x + .5 - region.x) * mw / region.width - .5, my = (y + .5 - region.y) * mh / region.height - .5
+    let alpha = clamp(sampleMask(mask, mw, mh, mx, my))
+    if (alpha < .015) alpha = 0
+    if (alpha > .97) alpha = 1
+    image.data[i] *= alpha * sampleMask(prior, mw, mh, mx, my)
+    if (image.data[i] > 32) subject++
+  }
+  if (subject < Math.max(4, region.width * region.height * .002)) throw new Error('选区内未识别到可用人物，请扩大范围或重新圈选')
+}
+function applyMatte(image, mask, mw, mh, protectedArea = null) {
+  const polygon = normalizeProtectPolygon(protectedArea)
+  let subject = 0
+  for (let y = 0; y < image.height; y++) {
+    const intersections = []
+    if (polygon) {
+      const scanY = (y + .5) / image.height
+      for (let i = 0; i < polygon.length; i++) {
+        const a = polygon[i], b = polygon[(i + 1) % polygon.length]
+        if ((a.y > scanY) !== (b.y > scanY)) intersections.push(a.x + (scanY - a.y) * (b.x - a.x) / (b.y - a.y))
+      }
+      intersections.sort((a, b) => a - b)
+    }
+    let interval = 0
+    for (let x = 0; x < image.width; x++) {
+    const i = (y * image.width + x) * 4 + 3
+    const scanX = (x + .5) / image.width
+    while (interval < intersections.length && scanX >= intersections[interval]) interval++
+    let a = interval % 2 ? 1 : clamp(sampleMask(mask, mw, mh, (x + .5) * mw / image.width - .5, (y + .5) * mh / image.height - .5))
     if (a < .015) a = 0
     if (a > .97) a = 1
     image.data[i] *= a
     if (image.data[i] > 32) subject++
+    }
   }
   if (subject < image.width * image.height * .002) throw new Error('没有检测到可用的人物，请关闭抠图或更换样板照片')
 }
@@ -132,4 +222,4 @@ function processPixels(image, input, transform) {
   }
   return { data, width, height }
 }
-module.exports = { VERSION, normalizeRecipe, orientedRgba, applyMatte, processPixels, photoTransform, alphaBounds, sampleMask }
+module.exports = { VERSION, normalizeRecipe, normalizeProtectPolygon, subjectRegion, applySubjectMatte, orientedRgba, applyMatte, processPixels, photoTransform, alphaBounds, sampleMask }

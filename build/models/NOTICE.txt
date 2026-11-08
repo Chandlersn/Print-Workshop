@@ -17,3 +17,9 @@ File: face_detection_yunet_2023mar.onnx (unmodified)
 SHA-256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
 The face decoder follows the stride-based output contract documented by OpenCV
 FaceDetectorYN. Face detection is local and is used only for photo positioning.
+
+BiRefNet Lite: Copyright (c) 2024 ZhengPeng. MIT (LICENSE-BiRefNet.txt).
+Original model: https://huggingface.co/ZhengPeng7/BiRefNet_lite
+ONNX conversion: https://huggingface.co/onnx-community/BiRefNet_lite-ONNX
+File: onnx/model.onnx (unmodified)
+SHA-256: 5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333

@@ -21,6 +21,7 @@ const renderEngine = require('./render-engine.cjs')
 const { estimatePdfBytes } = require('./output-dpi.cjs')
 const { isPlaceholder } = require('./placeholder.cjs')
 const { normalizeFormat, normalizeQuality } = require('./export-formats.cjs')
+const { fieldDirection, graphemes } = require('./field-text.cjs')
 
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
 const ARCHIVE_ROOT = path.join(DATA_DIR, 'archive')
@@ -117,12 +118,15 @@ async function photoPreflight(datasetId, templateId, rows) {
   const tpl = templates.getTemplate(String(templateId))
   const scope = resolveScope(ds, { rows })
   const design = renderEngine.resolveTemplateDesign(tpl)
-  const photoLayers = (design?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly)
+  const indexes = scope.rowIndexes || ds.rows.map((_, index) => index)
+  const recordDesigns = require('./record-designs.cjs').forRows(ds, tpl, indexes)
+  const photoLayersOf = doc => (doc?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly)
+  const photoLayers = [...photoLayersOf(design), ...[...recordDesigns.values()].flatMap(item => photoLayersOf(item.design))]
+  const photoIndexes = indexes.filter(index => photoLayersOf(recordDesigns.get(ds.recordIds[index])?.design || design).length > 0)
   const spec = renderEngine.pageSpec(tpl.pageSize)
   const layout = renderEngine.resolveLayout(tpl.layout, spec)
-  const indexes = scope.rowIndexes || ds.rows.map((_, index) => index)
   const photo = photoLayers.length
-    ? await require('./photo-library.cjs').preflightRows(ds, indexes)
+    ? await require('./photo-library.cjs').preflightRows(ds, photoIndexes)
     : { column: null, enabled: false, total: indexes.length,
       counts: { matched: 0, empty: 0, missing: 0, ambiguous: 0, invalid: 0, broken: 0 },
       results: [], bindingRevision: null }
@@ -131,7 +135,7 @@ async function photoPreflight(datasetId, templateId, rows) {
     rows: indexes.map(index => ds.rows[index]), photoMatchColumn: ds.photoMatchColumn,
   })).digest('hex')
   const templateRevision = crypto.createHash('sha256').update(JSON.stringify(tpl)).digest('hex')
-  const overrideRevision = require('./photo-overrides.cjs').revisionFor(ds.id, tpl.id, indexes.map(index => ds.recordIds?.[index]))
+  const overrideRevision = crypto.createHash('sha256').update(require('./photo-overrides.cjs').revisionFor(ds.id, tpl.id, indexes.map(index => ds.recordIds?.[index])) + require('./record-designs.cjs').revisionFor(ds.id, tpl.id, indexes.map(index => ds.recordIds?.[index]))).digest('hex')
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
     selectionFingerprint, templateRevision, bindingRevision: photo.bindingRevision, overrideRevision,
   })).digest('hex')
@@ -140,6 +144,7 @@ async function photoPreflight(datasetId, templateId, rows) {
       ...(item.reason ? { reason: toUserMessage(item.reason) } : {}) }))
   const warnings = [], processingDetails = require('./photo-processing.cjs').details(ds), geometry = new Map()
   const processed = require('./photo-processing.cjs').resolver(ds)
+  const preflightStyles = require('./photo-overrides.cjs').forRecords(ds, tpl.id, ds.rows, null, photo)
   for (const item of photo.results) if (item.status === 'matched') {
     const meta = processingDetails(item.assetId, ds.recordIds[item.rowIndex]), reasons = []
     for (const code of meta.analysis.issues || []) reasons.push(({ 'no-face': '未识别人脸，请检查取景', 'multiple-faces': '检测到多人，请检查取景', 'face-clipped': '人脸可能被裁切', 'subject-clipped': '人物可能超出画面', upscaled: '照片放大较多，请检查清晰度' })[code] || code)
@@ -147,16 +152,46 @@ async function photoPreflight(datasetId, templateId, rows) {
     const id = processed(item.assetId, ds.recordIds[item.rowIndex])
     if (!geometry.has(id)) geometry.set(id, require('./designs.cjs').assetGeometry(id))
     const size = geometry.get(id)
-    if (photoLayers.some(layer => Math.min(size.width / layer.w, size.height / layer.h) * 25.4 < 150)) reasons.push('输出不足 150 dpi，建议检查清晰度')
+    const actualLayers = photoLayersOf(recordDesigns.get(ds.recordIds[item.rowIndex])?.design || design)
+    const individual = recordDesigns.get(ds.recordIds[item.rowIndex])
+    const styles = individual ? require('./record-designs.cjs').filteredPhotoStyles(individual.entry, preflightStyles.get(ds.rows[item.rowIndex])) : preflightStyles.get(ds.rows[item.rowIndex])
+    if (actualLayers.some(layer => { const frame = styles?.[layer.id]?.size || layer; return Math.min(size.width / frame.w, size.height / frame.h) * 25.4 < 150 })) reasons.push('输出不足 150 dpi，建议检查清晰度')
     if (reasons.length) warnings.push({ rowIndex: item.rowIndex, rowId: ds.recordIds[item.rowIndex], name: item.name, reasons })
   }
   return {
     selectionFingerprint, templateRevision, bindingRevision: photo.bindingRevision, overrideRevision, fingerprint,
     recordCount: indexes.length, pageCount: Math.ceil(indexes.length / (layout.enabled ? layout.perPage : 1)),
-    photoLayerCount: photoLayers.length, photoFrameCount: photoLayers.length * indexes.length,
+    photoLayerCount: indexes.reduce((max, index) => Math.max(max, photoLayersOf(recordDesigns.get(ds.recordIds[index])?.design || design).length), 0), photoFrameCount: indexes.reduce((sum, index) => sum + photoLayersOf(recordDesigns.get(ds.recordIds[index])?.design || design).length, 0),
     photoEnabled: photo.enabled, photoColumn: photo.column, counts: photo.counts, issues, warnings,
     canOutput: !issues.some(item => ['ambiguous', 'invalid', 'broken'].includes(item.status)),
   }
+}
+
+function prepareRecordDesigns(template, ds, indexes, rows, photos, variants, base, options) {
+  if (!variants.size) return base
+  const outputs = new Map(), byRecord = new Map(), css = [base.css || ''], fonts = new Set(base.fontFamilies || [])
+  const photoOverrides = new Map()
+  for (const entry of loadJson('photo-overrides', { expect:'array' }) || []) {
+    if (entry.datasetId !== ds.id || entry.templateId !== template.id) continue
+    if (!photoOverrides.has(entry.rowId)) photoOverrides.set(entry.rowId, [])
+    photoOverrides.get(entry.rowId).push(entry)
+  }
+  for (let i = 0; i < rows.length; i++) {
+    const item = variants.get(ds.recordIds[indexes[i]])
+    if (!item) continue
+    const ref = item.entry.designRef, key = `${ref.id}:${ref.revision}`
+    if (!outputs.has(key)) {
+      const row = rows[i], values = photos.byRecord.get(row) || {}, ids = [...new Set(Object.values(values).filter(id => typeof id === 'string'))]
+      const styles = require('./record-designs.cjs').filteredPhotoStyles(item.entry, photos.overrides?.get(row), photoOverrides.get(item.entry.rowId) || [])
+      const ownPhotos = { byRecord:new Map([[row, values]]), assets:ids, geometry:photos.geometry, overrides:new Map([[row, styles]]) }
+      const variant = renderEngine.prepareTemplateDesign({ ...template, background:null, backgroundDesign:ref }, ownPhotos, { ...options, classPrefix:`print-individual-${outputs.size}` })
+      outputs.set(key, variant); css.push(variant.css || '')
+      for (const family of variant.fontFamilies || []) fonts.add(family)
+    }
+    byRecord.set(rows[i], outputs.get(key))
+  }
+  return { ...base, css:css.filter(Boolean).join('\n'), fontFamilies:[...fonts],
+    renderInstance:record => { const item = byRecord.get(record) || base; return item.renderInstance ? item.renderInstance(record) : item.html || '' } }
 }
 
 async function assertPhotoPreflight(datasetId, templateId, rows, expectedFingerprint) {
@@ -238,6 +273,7 @@ function validateBatch(datasetId, templateId, rows) {
   const spec = renderEngine.pageSpec(tpl.pageSize)
   const layout = renderEngine.resolveLayout(tpl.layout, spec)
   const containerW = layout.enabled ? layout.itemW : spec.w
+  const containerH = layout.enabled ? layout.itemH : spec.h
 
   const issues = []
   const dsKeys = new Set((ds.columns || []).map((c) => c.key))
@@ -279,7 +315,10 @@ function validateBatch(datasetId, templateId, rows) {
       } else if (isPlaceholder(v)) {
         placeholder++
         if (cells.length < CELL_CAP) cells.push({ rowIndex: fullIndex, kind: 'placeholder' })
-      } else if (estimateTextWidthMm(v, f.fontSize) > usableWidthMm(f, containerW)) {
+      } else if (fieldDirection(f) === 'horizontal'
+        ? estimateTextWidthMm(v, f.fontSize) > usableWidthMm(f, containerW)
+        : graphemes(v).length * (Number(f.fontSize) || 12) * 25.4 / 72 > containerH * Math.max(0, 100 - (Number(f.y) || 0)) / 100
+          || (Number(f.fontSize) || 12) * 25.4 / 72 > usableWidthMm(f, containerW)) {
         overlong++
         if (cells.length < CELL_CAP) cells.push({ rowIndex: fullIndex, kind: 'overlong' })
       }
@@ -379,27 +418,32 @@ function buildBatchHtml(datasetId, templateId, rows, { range, previewPage, outpu
     if (fullCount) scope = resolveScope(ds, { rows, range: { from: shownPage * perPage, to: (shownPage + 1) * perPage } })
   }
   const list = scope.rows
+  const renderedIndexes = scope.rowIndexes || list.map((_, index) => index)
   const pageCount = layout.enabled ? Math.ceil(list.length / layout.perPage) : list.length
   const doc = renderEngine.resolveTemplateDesign(tpl)
-  const photoColumns = (doc?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly).map(layer => layer.bindColumn)
-  const photos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, list, scope.rowIndexes, { templateId: tpl.id })
-  const preparedDesign = renderEngine.prepareTemplateDesign(tpl, photos, { outputDpi, encodeDerivatives })
+  const variants = require('./record-designs.cjs').forRows(ds, tpl, renderedIndexes)
+  const photoColumns = [...new Set([doc, ...[...variants.values()].map(item => item.design)].flatMap(design => (design?.layers || []).filter(layer => layer.variable && layer.visible && !layer.editorOnly).map(layer => layer.bindColumn)))]
+  const needsPhoto = new Set(renderedIndexes.filter(index => (variants.get(ds.recordIds[index])?.design || doc)?.layers.some(layer => layer.variable && layer.visible && !layer.editorOnly)))
+  const photos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, list, scope.rowIndexes, { templateId: tpl.id, needsPhoto })
+  const baseDesign = renderEngine.prepareTemplateDesign(tpl, photos, { outputDpi, encodeDerivatives })
+  const preparedDesign = prepareRecordDesigns(tpl, ds, renderedIndexes, list, photos, variants, baseDesign, { outputDpi, encodeDerivatives })
   // 预览只渲染一页，但预估覆盖用户选定的全部记录。其余页只读尺寸元数据，
   // 不解码或哈希所有照片；出片时仍逐张验证原件。缺失信息时不显示不完整的体积数字。
   let output = preparedDesign.output
-  let outputEstimateIncomplete = false
-  if (shownPage !== null && doc) {
+  const fullIndexes = fullScope.rowIndexes || fullScope.rows.map((_, index) => index)
+  let outputEstimateIncomplete = require('./record-designs.cjs').hasForRows(ds.id, tpl.id, fullIndexes.map(index => ds.recordIds[index]))
+  if (shownPage !== null && doc && !outputEstimateIncomplete) {
     const allPhotos = require('./photo-library.cjs').prepareRows(ds.id, photoColumns, fullScope.rows, fullScope.rowIndexes,
       { estimateOnly: true, knownGeometry: photos.geometry, templateId: tpl.id })
     output = require('./output-dpi.cjs').planDerivatives({ design: doc, photos: allPhotos, dpi: outputDpi }).stats
-    outputEstimateIncomplete = allPhotos.unresolved > 0 || output.failed > 0
+    outputEstimateIncomplete = outputEstimateIncomplete || allPhotos.unresolved > 0 || output.failed > 0
   }
   // 归档快照显式按「原图 + 不烘焙」再准备一次，不复用出片用的那份。
   // 出片档位本来就是「原图」、且没有烘焙件时两者等价，直接复用，不白做一遍。
-  const canReuseForArchive = preparedDesign.output?.dpi == null && !(preparedDesign.bake?.baked > 0)
+  const canReuseForArchive = !variants.size && preparedDesign.output?.dpi == null && !(preparedDesign.bake?.baked > 0)
   const archiveDesign = canReuseForArchive
     ? preparedDesign
-    : renderEngine.prepareTemplateDesign(tpl, photos, { outputDpi: null, encodeDerivatives: false, bake: false })
+    : prepareRecordDesigns(tpl, ds, renderedIndexes, list, photos, variants, renderEngine.prepareTemplateDesign(tpl, photos, { outputDpi:null, encodeDerivatives:false, bake:false }), { outputDpi:null, encodeDerivatives:false, bake:false })
   // 底图输出分辨率：交给界面提示「印出来够不够清」。
   // 成品口径与渲染一致——多联是单格、对折是半页、单页是整张纸。
   const itemW = layout.enabled ? layout.itemW : spec.w

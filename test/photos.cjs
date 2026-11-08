@@ -53,6 +53,47 @@ async function run() {
   const args = { datasetId: 'ds_photos', column: 'photo' }
   dataset.setPhotoMatchColumn(args.datasetId, 'photo')
   let report
+  await check('照片独立存储、批量删除及共享引用保护，删除后可重新导入', async () => {
+    const pixelPng = (r,g,b) => require('../electron/psd-import.cjs').pngFromPixels({ width:64, height:64, data: new Uint8ClampedArray(Array.from({length:64*64},()=>[r,g,b,255]).flat()) })
+    const bytesA = pixelPng(27,91,174), bytesB = pixelPng(191,35,73)
+    const folder = path.join(tmp, 'delete-photos'); fs.mkdirSync(folder)
+    fs.writeFileSync(path.join(folder, 'a.png'), bytesA); fs.writeFileSync(path.join(folder, 'b.png'), bytesB); fs.writeFileSync(path.join(folder, 'c.png'), bytesA)
+    const dsId = 'ds_delete_photos', otherId = 'ds_shared_photos'
+    store.saveJson('datasets', [...store.loadJson('datasets'), { id:dsId, name:'删除验收', photoMatchColumn:'photo', columns:[{key:'photo'}], rows:[{photo:'a'}, {photo:'a'}, {photo:'b'}, {photo:'c'}] }, { id:otherId, name:'共享名单', photoMatchColumn:'photo', columns:[{key:'photo'}], rows:[{photo:'a'}] }])
+    const imported = await photos.importFolder({datasetId:dsId,column:'photo',folder})
+    const idA = imported.results[0].assetId, idB = imported.results[2].assetId
+    assert.equal(imported.results[0].fileName, 'a.png')
+    const pool = path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-assets')
+    assert.ok(fs.existsSync(path.join(pool, idA.slice(6)+'.png')) && fs.existsSync(path.join(pool, idB.slice(6)+'.png')))
+    const shared = await photos.importFolder({datasetId:otherId,column:'photo',folder})
+    assert.equal(shared.results[0].assetId, idA)
+    const asDesign = designs.importImageBuffer(bytesA, '普通图层.png', 'managed')
+    assert.equal(asDesign.id, idA)
+    assert.ok(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets', idA.slice(6)+'.png')), '相同内容作为普通图层时有独立副本')
+    library.upsert(asDesign, {role:'design'})
+    const removedA = photos.deletePhotos({datasetId:dsId,column:'photo',names:['a.png']})
+    assert.deepEqual([removedA.removed,removedA.affectedRows], [1,2])
+    assert.deepEqual((await photos.report({datasetId:dsId,column:'photo'})).results.map(row=>row.status), ['missing','missing','matched','matched'], '同字节不同文件名只删除所选关联')
+    assert.equal((await photos.report({datasetId:otherId,column:'photo'})).results[0].status, 'matched')
+    assert.ok(fs.existsSync(path.join(pool,idA.slice(6)+'.png')) && designs.assetBytes(idA).buffer.equals(bytesA), '共享照片和普通图层均不受影响')
+    assert.throws(()=>photos.deletePhotos({datasetId:dsId,column:'photo',names:['a.png']}), /变化/)
+    const removedB = photos.deletePhotos({datasetId:dsId,column:'photo',all:true})
+    assert.equal(removedB.removed, 2)
+    assert.equal(removedB.cleanupWarning, '')
+    assert.ok(!fs.existsSync(path.join(pool,idB.slice(6)+'.png')), '不再引用的独立照片原件被删除')
+    const reimported = await photos.importFolder({datasetId:dsId,column:'photo',folder})
+    assert.deepEqual(reimported.results.map(row=>row.status), ['matched','matched','matched','matched'])
+    assert.ok(fs.existsSync(path.join(pool,idB.slice(6)+'.png')), '删除后可重新导入')
+    photos.deletePhotos({datasetId:dsId,column:'photo',names:['b.png'],protectedIds:[idB]})
+    assert.ok(fs.existsSync(path.join(pool,idB.slice(6)+'.png')), '底图未保存草稿引用的照片不会被清理')
+    assert.ok(fs.existsSync(path.join(folder,'a.png')) && fs.existsSync(path.join(folder,'b.png')), '外部原文件不被修改')
+    store.saveJson('datasets', store.loadJson('datasets').filter(item => item.id !== dsId && item.id !== otherId))
+    store.saveJson('photo-bindings', store.loadJson('photo-bindings').filter(item => item.datasetId !== dsId && item.datasetId !== otherId))
+    store.saveJson('asset-library', (store.loadJson('asset-library') || []).filter(item => item.assetId !== idA && item.assetId !== idB))
+    for (const folder of ['photo-assets','design-assets']) for (const id of [idA,idB]) for (const ext of ['png','json']) {
+      try { fs.unlinkSync(path.join(process.env.PRINTPRESS_DATA_DIR,folder,id.slice(6)+'.'+ext)) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+  })
   await check('先按名单筛选：未匹配与同名冲突不写入素材库或缩略图，坏图不入库', async () => {
     const saved = store.loadJson('datasets')
     store.saveJson('datasets', [...saved, { id: 'ds_filter', name: '筛选', photoMatchColumn: 'photo', columns: [{ key: 'photo' }], rows: ['matched', 'dup', 'bad', 'absent'].map(photo => ({ photo })) }])
@@ -68,7 +109,8 @@ async function run() {
       assert.deepEqual(res.results.map(r => r.status), ['matched', 'ambiguous', 'broken', 'missing'])
       assert.deepEqual(res.files.filter(f => f.assetId).map(f => f.name), ['matched.jpg'])
       assert.ok(res.ignored.some(f => f.name === 'unmatched.png'))
-      assert.equal(fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')).filter(f => /\.(png|jpg)$/.test(f)).length, 1)
+      assert.equal(fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-assets')).filter(f => /\.(png|jpg)$/.test(f)).length, 1)
+      assert.equal(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')) ? fs.readdirSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'design-assets')).filter(f => /\.(png|jpg)$/.test(f)).length : 0, 0, '导入名单照片不会写入普通图层素材目录')
       assert.equal(require('../electron/asset-library.cjs').listLibrary({ category: 'photo' }).total, 1)
       assert.equal(require('../electron/asset-library.cjs').listLibrary().total, 0, '名单照片默认不挤占设计素材列表')
       dataset.setPhotoMatchColumn('ds_filter', null)
@@ -415,6 +457,18 @@ async function run() {
     assert.equal(removal.removed, false)
     assert.ok(library.referencedAssetIds().has(assetId))
     assert.ok(fs.existsSync(path.join(process.env.PRINTPRESS_DATA_DIR, info.path)))
+  })
+  await check('旧版照片后台复制到独立目录，保留共用原件', async () => {
+    const pixels = new Uint8ClampedArray(64*64*4).fill(71)
+    const bytes = require('../electron/psd-import.cjs').pngFromPixels({width:64,height:64,data:pixels})
+    const legacy = designs.importImageBuffer(bytes, '旧照片.png', 'managed')
+    const hash = legacy.id.slice(6), oldFile = path.join(process.env.PRINTPRESS_DATA_DIR,'design-assets',hash+'.png'), newFile = path.join(process.env.PRINTPRESS_DATA_DIR,'photo-assets',hash+'.png')
+    assert.ok(fs.existsSync(oldFile) && !fs.existsSync(newFile))
+    const existing = store.loadJson('photo-bindings') || []
+    store.saveJson('photo-bindings', [...existing,{datasetId:'ds_legacy_copy',column:'photo',files:[{name:'旧照片.png',assetId:legacy.id}]}])
+    const result = await photos.migrateLegacyPhotoAssets()
+    assert.ok(result.migrated >= 1 && fs.readFileSync(newFile).equals(bytes) && fs.readFileSync(oldFile).equals(bytes))
+    store.saveJson('photo-bindings', existing)
   })
   await check('任务历史溢出改归档，不再静默销毁（I-55）', () => {
     // 任务 id 必须是 36 位 [a-f0-9-]（taskPath 会校验），所以种子也用合法形状

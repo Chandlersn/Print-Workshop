@@ -3,7 +3,7 @@ const crypto = require('crypto')
 const { loadJson, saveJson } = require('./store.cjs')
 const designs = require('./designs.cjs')
 const dataset = require('./dataset.cjs')
-const { normalizeRecipe, VERSION } = require('./photo-processing-pixels.cjs')
+const { normalizeRecipe, normalizeProtectPolygon, VERSION } = require('./photo-processing-pixels.cjs')
 const tasks = new Map(), datasetTasks = new Set()
 const states = () => loadJson('photo-processing', { expect: 'array' }) || []
 const cache = () => loadJson('photo-processing-cache', { expect: 'array' }) || []
@@ -31,18 +31,27 @@ function inspect(query, host) {
     single: single ? { rowId: single.rowId, assetId: single.match.assetId, override: single.override,
       asset: available(single.override?.assetId), restoreAsset: available(single.override?.restoreAssetId) } : null }
 }
-async function render({ datasetId, assetId, recipe }, host) {
+function normalizeModel(model) {
+  if (model == null) return 'fast'
+  if (!['fast', 'quality'].includes(model)) throw new Error('抠图模式无效')
+  return model
+}
+async function render({ datasetId, assetId, recipe, protectPolygon, subjectPolygon, model }, host) {
   if (!host?.processPhoto) throw new Error('照片自动处理需要在桌面应用中运行')
   const context = sourceContext(datasetId)
   if (!context.source?.files?.some(file => file.assetId === assetId && !file.error)) throw new Error('样板照片已变化，请重新选择')
   recipe = normalizeRecipe(recipe)
-  const key = hash({ source: assetId, recipe, algorithm: VERSION, model: recipe.cutout ? 'modnet-07c308cf' : null })
+  model = normalizeModel(model)
+  protectPolygon = normalizeProtectPolygon(protectPolygon)
+  subjectPolygon = normalizeProtectPolygon(subjectPolygon)
+  if (protectPolygon && subjectPolygon) throw new Error('人物范围和旧版保护区不能同时使用')
+  const key = hash({ source: assetId, recipe, algorithm: VERSION, model: recipe.cutout ? (model === 'quality' ? 'birefnet-lite-56000243' : 'modnet-07c308cf') : null, ...(protectPolygon && recipe.cutout ? { protectPolygon } : {}), ...(subjectPolygon && recipe.cutout ? { subjectPolygon, selectionModel: 'subject-region-v1' } : {}) })
   const hit = cache().find(item => item.key === key)
   if (hit) { try { return { asset: designs.assetInfo(hit.assetId), restoreAsset: designs.assetInfo(hit.restoreAssetId || hit.assetId), analysis: hit.analysis || { issues: [] }, key, cached: true } } catch { /* regenerate a missing cached result */ } }
   const { asset, buffer } = designs.assetBytes(assetId)
-  const output = await host.processPhoto({ asset, buffer, recipe })
-  const result = designs.importImageBuffer(Buffer.from(output.png || output), `${asset.name.slice(0, 160)} 自动处理.png`, 'managed')
-  const restoreAsset = output.restorePng ? designs.importImageBuffer(Buffer.from(output.restorePng), `${asset.name.slice(0, 160)} 蒙版原色.png`, 'managed') : result
+  const output = await host.processPhoto({ asset, buffer, recipe, protectPolygon, subjectPolygon, model })
+  const result = designs.importImageBuffer(Buffer.from(output.png || output), `${asset.name.slice(0, 160)} 自动处理.png`, 'photo')
+  const restoreAsset = output.restorePng ? designs.importImageBuffer(Buffer.from(output.restorePng), `${asset.name.slice(0, 160)} 蒙版原色.png`, 'photo') : result
   const analysis = output.analysis || { issues: [] }
   saveCache([...cache().filter(item => item.key !== key), { key, sourceAssetId: assetId, assetId: result.id, restoreAssetId: restoreAsset.id, analysis, createdAt: new Date().toISOString() }])
   return { asset: result, restoreAsset, analysis, key, cached: false }
@@ -53,6 +62,8 @@ async function apply(payload, host, emit = () => {}) {
   const taskId = String(payload.taskId || '')
   if (!/^[\w-]{1,100}$/.test(taskId) || tasks.has(taskId)) throw new Error('照片处理任务标识无效')
   const recipe = normalizeRecipe(payload.recipe)
+  const model = normalizeModel(payload.model)
+  const modelVersion = model === 'quality' ? 'birefnet-lite-56000243' : 'modnet-07c308cf'
   const task = { datasetId, canceled: false }
   tasks.set(taskId, task); datasetTasks.add(datasetId)
   try {
@@ -67,11 +78,11 @@ async function apply(payload, host, emit = () => {}) {
       emit('photo:processingProgress', { taskId, datasetId, index, total: targets.length, phase: 'processing' })
       try {
         let reusable = false
-        if (payload.incremental && previous?.enabled && previous.column === context.ds.photoMatchColumn && hash(normalizeRecipe(previous.recipe)) === hash(recipe) && previous.items?.[assetId]) {
+        if (payload.incremental && previous?.enabled && previous.column === context.ds.photoMatchColumn && normalizeModel(previous.model) === model && (!recipe.cutout || model === 'fast' || previous.modelVersion === modelVersion) && hash(normalizeRecipe(previous.recipe)) === hash(recipe) && previous.items?.[assetId]) {
           try { designs.assetInfo(previous.items[assetId]); reusable = true } catch { /* Regenerate missing or corrupt results. */ }
         }
         if (reusable) { items[assetId] = previous.items[assetId]; analysis[assetId] = previous.analysis?.[assetId] || { issues: [] } }
-        else { const output = await render({ datasetId, assetId, recipe }, host); items[assetId] = output.asset.id; analysis[assetId] = output.analysis }
+        else { const output = await render({ datasetId, assetId, recipe, model }, host); items[assetId] = output.asset.id; analysis[assetId] = output.analysis }
       }
       catch (error) { failures.push({ assetId, message: error.message }) }
     }
@@ -81,7 +92,7 @@ async function apply(payload, host, emit = () => {}) {
       saveJson('photo-processing-jobs', [...jobs().filter(item => item.datasetId !== datasetId), { datasetId, phase: 'failed', failures, completedAssets: Object.values(items), completed: targets.length - failures.length, total: targets.length, updatedAt: new Date().toISOString() }])
       return { applied: false, total: targets.length, completed: targets.length - failures.length, failures }
     }
-    const state = { datasetId, column: context.ds.photoMatchColumn, sampleAssetId: payload.sampleAssetId, recipe, enabled: true, items, analysis, updatedAt: new Date().toISOString() }
+    const state = { datasetId, column: context.ds.photoMatchColumn, sampleAssetId: payload.sampleAssetId, recipe, model, modelVersion, enabled: true, items, analysis, ...(payload.bootstrapReference ? { bootstrapReference: payload.bootstrapReference } : {}), updatedAt: new Date().toISOString() }
     saveJson('photo-processing', [...states().filter(item => item.datasetId !== datasetId), state])
     saveJson('photo-processing-jobs', jobs().filter(item => item.datasetId !== datasetId))
     emit('photo:processingProgress', { taskId, datasetId, index: targets.length, total: targets.length, phase: 'completed' })
@@ -98,14 +109,17 @@ function clear(datasetId) {
   if (datasetTasks.has(datasetId)) throw new Error('请先取消正在进行的照片处理')
   saveJson('photo-processing', states().filter(item => item.datasetId !== datasetId))
   saveJson('photo-processing-singles', singles().filter(item => item.datasetId !== datasetId))
+  setOptions({ datasetId, autoProcess: false })
   return { ok: true }
 }
 function resolver(ds) {
   const state = current(ds.id), active = Boolean(state?.enabled && state.column === ds.photoMatchColumn)
+  const pending = jobs().find(item => item.datasetId === ds.id && item.bootstrap && ['processing', 'failed'].includes(item.phase))
   const overrides = new Map(singles().filter(item => item.datasetId === ds.id && item.column === ds.photoMatchColumn).map(item => [item.rowId, item]))
   return (assetId, rowId) => {
     const override = overrides.get(rowId)
     if (override?.sourceAssetId === assetId) return override.assetId
+    if (!active && pending) throw new Error(pending.phase === 'failed' ? '照片统一处理失败，请到变量照片页检查并重试' : '照片正在统一尺寸和人物位置，请等待处理完成')
     if (!active) return assetId
     const processed = state.items?.[assetId]
     if (!processed) throw new Error('有新增或更换的照片尚未应用样板，请到变量照片页重新应用自动处理')
@@ -120,12 +134,12 @@ const optionsFor = datasetId => options().find(item => item.datasetId === datase
 function setOptions({ datasetId, autoProcess }) {
   datasetId = dataset.getDataset(String(datasetId)).id
   if (typeof autoProcess !== 'boolean') throw new Error('自动处理开关无效')
-  const next = { datasetId, autoProcess }
+  const next = { datasetId, autoProcess, ...(autoProcess && !current(datasetId)?.enabled ? { bootstrap: true } : {}) }
   saveJson('photo-processing-options', [...options().filter(item => item.datasetId !== datasetId), next])
   if (!autoProcess) {
     autoQueue.delete(datasetId)
     for (const [id, task] of tasks) if (task.datasetId === datasetId && id.startsWith('automatic-')) task.canceled = true
-    saveJson('photo-processing-jobs', jobs().map(item => item.datasetId === datasetId && item.phase === 'processing' ? { ...item, phase: 'canceled' } : item))
+    saveJson('photo-processing-jobs', jobs().map(item => item.datasetId === datasetId && (item.phase === 'processing' || item.bootstrap) ? { ...item, phase: 'canceled', bootstrap: false } : item))
   }
   return next
 }
@@ -162,26 +176,29 @@ async function setSingle(payload, host) {
   const context = singleContext(payload), sourceAssetId = context.match.assetId
   if (payload.assetId !== sourceAssetId) throw new Error('照片已更换，请重新打开单张编辑')
   const recipe = normalizeRecipe(payload.recipe)
-  const output = await render({ datasetId: context.ds.id, assetId: sourceAssetId, recipe }, host)
+  const protectPolygon = normalizeProtectPolygon(payload.protectPolygon)
+  const subjectPolygon = normalizeProtectPolygon(payload.subjectPolygon)
+  const model = normalizeModel(payload.model)
+  const output = await render({ datasetId: context.ds.id, assetId: sourceAssetId, recipe, protectPolygon, subjectPolygon, model }, host)
   let asset = output.asset, restoreAsset = output.restoreAsset
   if (payload.edit) {
     const edit = payload.edit
     const validBase = edit.baseAssetId === output.asset.id || edit.baseAssetId === context.override?.assetId
     if (!validBase) throw new Error('编辑底图已变化，请重新预览后修补')
     if (edit.baseAssetId === context.override?.assetId && context.override.restoreAssetId) restoreAsset = designs.assetInfo(context.override.restoreAssetId)
-    if (edit.base64) asset = designs.importImageBytes({ base64: edit.base64, name: '单张照片修补.png', source: 'managed' })
+    if (edit.base64) asset = designs.importImageBytes({ base64: edit.base64, name: '单张照片修补.png', source: 'photo' })
     else asset = designs.assetInfo(edit.baseAssetId)
     if (asset.width !== restoreAsset.width || asset.height !== restoreAsset.height) throw new Error('修补图片尺寸与样板不一致')
     if (edit.crop) {
       if (!host?.cropPhoto) throw new Error('裁剪需要桌面图片编辑组件')
       const cropped = await host.cropPhoto({ buffer: designs.assetBytes(asset.id).buffer, crop: edit.crop })
       const restored = await host.cropPhoto({ buffer: designs.assetBytes(restoreAsset.id).buffer, crop: edit.crop })
-      asset = designs.importImageBuffer(cropped, '单张照片裁剪.png', 'managed'); restoreAsset = designs.importImageBuffer(restored, '单张照片蒙版原色.png', 'managed')
+      asset = designs.importImageBuffer(cropped, '单张照片裁剪.png', 'photo'); restoreAsset = designs.importImageBuffer(restored, '单张照片蒙版原色.png', 'photo')
     }
   }
   const latest = singleContext(payload)
   if (latest.match.assetId !== sourceAssetId || latest.ds.photoMatchColumn !== context.ds.photoMatchColumn) throw new Error('处理期间照片或配图列发生变化，请重新编辑')
-  const entry = { datasetId: context.ds.id, rowId: context.rowId, column: context.ds.photoMatchColumn, sourceAssetId, assetId: asset.id, restoreAssetId: restoreAsset.id, recipe, analysis: output.analysis, edited: Boolean(payload.edit), updatedAt: new Date().toISOString() }
+  const entry = { datasetId: context.ds.id, rowId: context.rowId, column: context.ds.photoMatchColumn, sourceAssetId, assetId: asset.id, restoreAssetId: restoreAsset.id, recipe, model, protectPolygon, subjectPolygon, analysis: output.analysis, edited: Boolean(payload.edit), updatedAt: new Date().toISOString() }
   saveJson('photo-processing-singles', [...singles().filter(item => !(item.datasetId === entry.datasetId && item.rowId === entry.rowId)), entry])
   return { applied: true, entry, asset, restoreAsset, analysis: output.analysis }
 }
@@ -190,12 +207,56 @@ function clearSingle({ datasetId, rowId }) {
   saveJson('photo-processing-singles', singles().filter(item => !(item.datasetId === datasetId && item.rowId === rowId)))
   return { removed: true }
 }
+function assertPhotoChangeIdle(datasetId) {
+  if (datasetTasks.has(String(datasetId)) || autoQueue.has(String(datasetId)) || jobs().some(job => job.datasetId === String(datasetId) && job.phase === 'processing')) throw new Error('照片正在自动处理，请等待完成后再删除')
+}
+function forgetRemovedPhotos(datasetId, rowIds, removedIds, noFiles = false) {
+  const rows = new Set(rowIds), removed = new Set(removedIds), candidates = new Set()
+  const statesNext = states().map(state => {
+    if (state.datasetId !== datasetId) return state
+    const items = { ...(state.items || {}) }, analysis = { ...(state.analysis || {}) }
+    for (const id of removed) { if (items[id]) candidates.add(items[id]); delete items[id]; delete analysis[id] }
+    return { ...state, items, analysis }
+  })
+  const singlesNext = singles().filter(item => {
+    if (item.datasetId !== datasetId || !rows.has(item.rowId)) return true
+    for (const id of [item.assetId, item.restoreAssetId]) if (id) candidates.add(id)
+    return false
+  })
+  saveJson('photo-processing', statesNext)
+  saveJson('photo-processing-singles', singlesNext)
+  if (noFiles) saveJson('photo-processing-jobs', jobs().filter(item => item.datasetId !== datasetId))
+  return [...candidates]
+}
 const autoQueue = new Map()
 let autoRunning = false
 function jobState(datasetId, state, emit) {
   const entry = { ...jobs().find(item => item.datasetId === datasetId), datasetId, ...state, updatedAt: new Date().toISOString() }
   saveJson('photo-processing-jobs', [...jobs().filter(item => item.datasetId !== datasetId), entry])
   emit('photo:processingProgress', { ...entry, automatic: true })
+}
+function startAutomaticOnImport(datasetId, report, host, emit = () => {}) {
+  if (!datasetId || !host?.processPhoto || !report || report.canceled) return
+  const ds = dataset.getDataset(String(datasetId))
+  if (!ds.photoMatchColumn || options().some(item => item.datasetId === ds.id) || current(ds.id)) return
+  saveJson('photo-processing-options', [...options(), { datasetId: ds.id, autoProcess: true, bootstrap: true }])
+  if (report.counts?.matched > 0) jobState(ds.id, { phase: 'processing', bootstrap: true, index: 0, total: report.counts.matched }, emit)
+}
+async function initialRecipe(target, host) {
+  const { asset, buffer } = designs.assetBytes(target.assetId)
+  // Preserve the reference aspect ratio even for tiny source images; the
+  // processing recipe requires each canvas dimension to be at least 64 px.
+  const factor = Math.min(3200 / Math.max(asset.width, asset.height), Math.max(1, 64 / Math.min(asset.width, asset.height)))
+  const width = Math.max(64, Math.round(asset.width * factor)), height = Math.max(64, Math.round(asset.height * factor))
+  let reference = { faceCount: 0, reason: 'not-detected' }
+  if (host.analyzePhoto && host.status?.().faceReady) {
+    try { reference = await host.analyzePhoto({ asset, buffer }) } catch (error) { reference = { faceCount: 0, reason: 'unavailable', message: error.message } }
+  } else reference.reason = 'unavailable'
+  const faceAlign = reference.faceCount === 1 && Number.isFinite(reference.faceHeight) && Number.isFinite(reference.eyeY)
+  const clamp = (n, min, max) => Math.max(min, Math.min(max, n))
+  const recipe = normalizeRecipe({ width, height, fit: 'contain', faceAlign,
+    ...(faceAlign ? { faceHeight: clamp(reference.faceHeight, .08, .8), eyeY: clamp(reference.eyeY, .1, .75) } : {}) })
+  return { recipe, reference: { faceCount: reference.faceCount, reason: reference.reason || '', centered: faceAlign, ...(faceAlign ? { clamped: recipe.faceHeight !== reference.faceHeight || recipe.eyeY !== reference.eyeY } : {}) } }
 }
 function scheduleAutomatic(host, emit = () => {}, datasetId) {
   if (!host?.processPhoto) return
@@ -208,22 +269,27 @@ function scheduleAutomatic(host, emit = () => {}, datasetId) {
         autoQueue.delete(id)
         try {
           const { ds } = sourceContext(id), state = current(id)
-          if (!state?.enabled || state.column !== ds.photoMatchColumn || !optionsFor(id).autoProcess) {
+          const option = optionsFor(id)
+          const bootstrap = Boolean(option.bootstrap && (!state?.enabled || state.column !== ds.photoMatchColumn))
+          if ((!bootstrap && (!state?.enabled || state.column !== ds.photoMatchColumn)) || !option.autoProcess) {
             if (jobs().some(item => item.datasetId === id && item.phase === 'processing')) jobState(id, { phase: 'canceled', message: '照片规则或配图列已变化，请重新应用样板' }, context.emit)
             continue
           }
           if (datasetTasks.has(id)) { autoQueue.set(id, context); await new Promise(resolve => setTimeout(resolve, 250)); continue }
           const report = await require('./photo-library.cjs').report({ datasetId: id, column: ds.photoMatchColumn })
           const targets = report.results.filter(item => item.status === 'matched')
-          if (!targets.length || !targets.some(item => { try { if (!state.items?.[item.assetId]) return true; designs.assetInfo(state.items[item.assetId]); return false } catch { return true } })) {
+          if (!targets.length || (!bootstrap && !targets.some(item => { try { if (!state.items?.[item.assetId]) return true; designs.assetInfo(state.items[item.assetId]); return false } catch { return true } }))) {
             if (jobs().some(item => item.datasetId === id && item.phase === 'processing')) jobState(id, { phase: 'completed', completedAssets: [], completed: targets.length, total: targets.length }, context.emit)
             continue
           }
           const taskId = `automatic-${crypto.randomUUID()}`
-          jobState(id, { phase: 'processing', index: 0, total: targets.length }, context.emit)
-          const result = await apply({ datasetId: id, recipe: state.recipe, sampleAssetId: targets.some(item => item.assetId === state.sampleAssetId) ? state.sampleAssetId : targets[0].assetId, taskId, incremental: true }, context.host,
-            (_channel, progress) => jobState(id, { ...progress, phase: progress.phase }, context.emit))
-          jobState(id, { phase: result.applied ? 'completed' : result.canceled ? 'canceled' : 'failed', failures: result.failures || [], completed: result.completed || 0, total: result.total || 0 }, context.emit)
+          jobState(id, { phase: 'processing', bootstrap, index: 0, total: targets.length }, context.emit)
+          const initial = bootstrap ? await initialRecipe(targets[0], context.host) : null
+          if (!optionsFor(id).autoProcess) { jobState(id, { phase: 'canceled', bootstrap: false }, context.emit); continue }
+          const result = await apply({ datasetId: id, recipe: initial ? initial.recipe : state.recipe, model: initial ? 'fast' : state.model, sampleAssetId: bootstrap ? targets[0].assetId : targets.some(item => item.assetId === state.sampleAssetId) ? state.sampleAssetId : targets[0].assetId, taskId, incremental: true, ...(initial ? { bootstrapReference: initial.reference } : {}) }, context.host,
+            (_channel, progress) => jobState(id, { ...progress, bootstrap, phase: progress.phase }, context.emit))
+          if (result.applied && bootstrap) setOptions({ datasetId: id, autoProcess: true })
+          jobState(id, { phase: result.applied ? 'completed' : result.canceled ? 'canceled' : 'failed', bootstrap: bootstrap && !result.applied, failures: result.failures || [], completed: result.completed || 0, total: result.total || 0 }, context.emit)
         } catch (error) { jobState(id, { phase: 'failed', message: error.message }, context.emit) }
       }
     } finally { autoRunning = false; if (autoQueue.size) scheduleAutomatic(host, emit, datasetId) }
@@ -278,4 +344,4 @@ async function review({ datasetId, templateId, previewRows }) {
   }
   return { rows, counts: { total: rows.length, problems: rows.filter(row => row.issues.length).length, blocking: rows.filter(row => row.issues.some(issue => issue.blocking)).length, individual: rows.filter(row => row.individual).length }, previews }
 }
-module.exports = { inspect, render, apply, cancel, clear, resolver, revision, normalizeRecipe, current, setOptions, listPresets, savePreset, deletePreset, setSingle, clearSingle, scheduleAutomatic, singles, details, review }
+module.exports = { inspect, render, apply, cancel, clear, resolver, revision, normalizeRecipe, current, setOptions, listPresets, savePreset, deletePreset, setSingle, clearSingle, scheduleAutomatic, startAutomaticOnImport, singles, details, review, assertPhotoChangeIdle, forgetRemovedPhotos }

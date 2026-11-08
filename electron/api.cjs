@@ -67,7 +67,8 @@ function registerPrintTask(jobKey) {
 
 function printInputFingerprint(datasetId, templateId) {
   const photos = loadJson('photo-bindings', { expect: 'array' }) || []
-  return JSON.stringify({ dataset: dataset.getDataset(datasetId), template: templates.getTemplate(templateId), photos: photos.filter(b => b.datasetId === datasetId), photoProcessing: require('./photo-processing.cjs').revision(datasetId) })
+  const ds = dataset.getDataset(datasetId)
+  return JSON.stringify({ dataset: ds, template: templates.getTemplate(templateId), photos: photos.filter(b => b.datasetId === datasetId), photoProcessing: require('./photo-processing.cjs').revision(datasetId), photoOverrides: require('./photo-overrides.cjs').revisionFor(datasetId,templateId,ds.recordIds), recordDesigns: require('./record-designs.cjs').revisionFor(datasetId,templateId,ds.recordIds) })
 }
 function guardedPrintDomain(datasetId, templateId, fingerprint) {
   return { ...printDomain, buildBatchHtml(...args) {
@@ -600,18 +601,23 @@ const OPS = {
     params: { datasetId: { required: true, desc: '数据集 id' }, column: { required: true, desc: '照片文件名列 key' }, rows: { required: false, desc: '原始行号数组（0 基）' } },
     run: p => photoLibrary.report(p),
   },
+  'photo:delete': {
+    write: true,
+    params: { datasetId: { required: true }, column: { required: true }, names: { required: false }, all: { required: false }, protectedIds: { required: false } },
+    run: p => { if (printTasks.size) throw new Error('正在打印或导出，请等待完成后再删除照片'); return photoLibrary.deletePhotos(p) },
+  },
   'photo:processingGet': {
     params: { datasetId: { required: true }, rowId: { required: false } },
     run: (p, ctx) => require('./photo-processing.cjs').inspect(p, ctx.photoProcessor),
   },
   'photo:processingPreview': {
     write: true, gui: 'photoProcessor',
-    params: { datasetId: { required: true }, assetId: { required: true }, recipe: { required: true } },
+    params: { datasetId: { required: true }, assetId: { required: true }, recipe: { required: true }, model: { required: false }, protectPolygon: { required: false }, subjectPolygon: { required: false } },
     run: (p, ctx) => require('./photo-processing.cjs').render(p, ctx.photoProcessor),
   },
   'photo:processingApply': {
     write: true, gui: 'photoProcessor',
-    params: { datasetId: { required: true }, sampleAssetId: { required: true }, recipe: { required: true }, taskId: { required: true } },
+    params: { datasetId: { required: true }, sampleAssetId: { required: true }, recipe: { required: true }, taskId: { required: true }, model: { required: false } },
     run: (p, ctx) => require('./photo-processing.cjs').apply(p, ctx.photoProcessor, ctx.emit),
   },
   'photo:processingCancel': {
@@ -645,7 +651,7 @@ const OPS = {
   },
   'photo:processingSingleSet': {
     write: true, gui: 'photoProcessor',
-    params: { datasetId: { required: true }, rowId: { required: true }, assetId: { required: true }, recipe: { required: true }, edit: { required: false } },
+    params: { datasetId: { required: true }, rowId: { required: true }, assetId: { required: true }, recipe: { required: true }, model: { required: false }, edit: { required: false }, protectPolygon: { required: false }, subjectPolygon: { required: false } },
     run: (p, ctx) => require('./photo-processing.cjs').setSingle(p, ctx.photoProcessor),
   },
   'photo:processingSingleClear': {
@@ -674,7 +680,7 @@ const OPS = {
   },
   'photo:overrideSet': {
     write: true,
-    params: { datasetId: { required: true }, templateId: { required: true }, rowId: { required: true }, layerId: { required: true }, fit: { required: true }, focal: { required: true } },
+    params: { datasetId: { required: true }, templateId: { required: true }, rowId: { required: true }, layerId: { required: true }, fit: { required: true }, focal: { required: true }, position: { required: false }, size: { required: false } },
     run: p => require('./photo-overrides.cjs').set(p),
   },
   'photo:overrideClear': {
@@ -682,6 +688,9 @@ const OPS = {
     params: { datasetId: { required: true }, templateId: { required: true }, rowId: { required: true }, layerId: { required: true } },
     run: p => require('./photo-overrides.cjs').clear(p),
   },
+  'print:recordDesignGet': { params: { datasetId:{required:true}, templateId:{required:true}, rowId:{required:true} }, run: p => require('./record-designs.cjs').get(p) },
+  'print:recordDesignSet': { write:true, params: { datasetId:{required:true}, templateId:{required:true}, rowId:{required:true}, baseKey:{required:true}, photoRevision:{required:true}, recordRevision:{required:true}, overrideRevision:{required:true}, designRef:{required:true} }, run: p => require('./record-designs.cjs').set(p) },
+  'print:recordDesignClear': { write:true, params: { datasetId:{required:true}, templateId:{required:true}, rowId:{required:true} }, run: p => require('./record-designs.cjs').clear(p) },
 
   'catalog:fields': {
     params: { id: { required: true, desc: '数据集 id' } },
@@ -821,7 +830,7 @@ const OPS = {
       const preset = designPresets.listPresets().find((item) => item.id === p.presetId)
       if (!preset) throw new Error(`没有这个内置模板：${p.presetId}`)
       const title = String(p.name == null ? '' : p.name).trim() || preset.name
-      const existing = designs.listDesigns().find((item) => item.name === title)
+      const existing = designs.listDesigns().find((item) => !item.recordOwner && item.name === title)
       if (existing) {
         designs.touchDesign(existing.id)
         return { design: designs.getDesign(existing.id), reused: true }
@@ -860,9 +869,16 @@ const OPS = {
 
   'design:save': {
     write: true,
-    params: { design: { required: true, desc: '完整底图工程；更新时携带读取到的 revision' } },
-    fromIpc: (design) => ({ design }),
-    run: (p) => designs.saveDesign(p.design),
+    params: { design: { required: true, desc: '完整底图工程；更新时携带读取到的 revision' }, recordOwner: { required:false } },
+    fromIpc: (design, recordOwner) => ({ design, recordOwner }),
+    run: (p) => {
+      let recordOwner
+      if (p.recordOwner) {
+        const info = require('./record-designs.cjs').get(p.recordOwner)
+        recordOwner = {datasetId:info.datasetId,templateId:info.templateId,rowId:info.rowId}
+      }
+      return designs.saveDesign(p.design, recordOwner ? {recordOwner} : undefined)
+    },
   },
 
   'design:delete': {
@@ -1786,7 +1802,12 @@ function call(name, params, ctx) {
   assertCapabilities(name, op, c)
   const result = op.run(params || {}, c)
   if (op.write && c.photoProcessor && (name.startsWith('dataset:') || ['photo:commitSelection', 'photo:importFolder'].includes(name))) {
-    const notify = value => { require('./photo-processing.cjs').scheduleAutomatic(c.photoProcessor, c.emit, params?.datasetId || value?.report?.datasetId || value?.id); return value }
+    const notify = value => {
+      const processing = require('./photo-processing.cjs'), id = params?.datasetId || value?.report?.datasetId || value?.datasetId || value?.id
+      if (['photo:commitSelection', 'photo:importFolder'].includes(name)) processing.startAutomaticOnImport(id, value?.report || value, c.photoProcessor, c.emit)
+      processing.scheduleAutomatic(c.photoProcessor, c.emit, id)
+      return value
+    }
     return result && typeof result.then === 'function' ? result.then(notify) : notify(result)
   }
   return result

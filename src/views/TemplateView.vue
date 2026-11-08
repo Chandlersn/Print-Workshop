@@ -13,6 +13,7 @@ import PageHeader from '../components/PageHeader.vue'
 import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DesignSurface from '../components/DesignSurface.vue'
+import TemplateFieldText from '../components/TemplateFieldText.vue'
 import { designerNav, openDesigner } from '../lib/designer-nav.js'
 import { photoProcessingRevision } from '../lib/photo-processing.js'
 import { anchorRatio } from '../lib/field-layout.cjs'
@@ -237,10 +238,10 @@ const templateKey = ref('')
 let requestedDesignNonce = null
 let designReadToken = 0
 const hasBackground = computed(() => Boolean(activeTpl.value?.background || activeTpl.value?.backgroundDesign))
-const designOptions = computed(() => designs.value.map((d) => ({
+const designOptions = computed(() => designs.value.filter(d => !d.recordOwner).map((d) => ({
   value: d.id, label: `${d.name} · v${d.revision} · ${d.artboard.w}×${d.artboard.h}mm`,
 })))
-const candidateDesign = computed(() => designs.value.find((d) => d.id === selectedDesignId.value))
+const candidateDesign = computed(() => designs.value.find((d) => !d.recordOwner && d.id === selectedDesignId.value))
 const designSurfaceWidth = computed(() => activeDesign.value
   ? canvasDisplayW.value * activeDesign.value.artboard.w / activeTpl.value.pageSize.w : canvasDisplayW.value)
 
@@ -996,6 +997,7 @@ function addField(key) {
     align: 'left',
     bold: false,
     fontFamily: '',
+    direction: 'horizontal',
   })
   selectedIdx.value = t.fields.length - 1
   multiSel.value = new Set([selectedIdx.value])
@@ -1029,7 +1031,52 @@ function fieldStyle(f) {
     fontFamily: family ? JSON.stringify(family) : 'inherit',
     fontWeight: f.bold ? 700 : 400,
     textAlign: f.align === 'center' || f.align === 'right' ? f.align : 'left',
+    width: Number(f.boxWidth) > 0 ? `${f.boxWidth}%` : undefined,
+    height: Number(f.boxHeight) > 0 ? `${f.boxHeight}%` : undefined,
   }
+}
+
+function resetFieldBox() {
+  delete selectedField.value.boxWidth
+  delete selectedField.value.boxHeight
+}
+
+let fieldResize = null
+function startFieldResize(e, idx) {
+  const box = e.currentTarget.parentElement
+  const frame = box.closest('.canvas-cell, .fold-ref') || canvasEl.value
+  const rect = frame.getBoundingClientRect()
+  const bounds = box.getBoundingClientRect()
+  const field = activeTpl.value.fields[idx]
+  if (!rect.width || !rect.height || !bounds.width || !bounds.height) return
+  pushUndo()
+  selectedIdx.value = idx
+  multiSel.value = new Set([idx])
+  bgSelected.value = false
+  fieldResize = { idx, rect, width: bounds.width, height: bounds.height, x: field.x,
+    startX: e.clientX, startY: e.clientY, fontSize: Number(field.fontSize) || 24, ratio: anchorRatio(field) }
+  window.addEventListener('pointermove', moveFieldResize)
+  window.addEventListener('pointerup', stopFieldResize)
+  window.addEventListener('pointercancel', stopFieldResize)
+}
+function moveFieldResize(e) {
+  if (!fieldResize || !activeTpl.value) return
+  const d = fieldResize
+  const field = activeTpl.value.fields[d.idx]
+  if (!field) return
+  const width = Math.max(8, Math.min(d.rect.width * 10, d.width + e.clientX - d.startX))
+  const height = Math.max(8, Math.min(d.rect.height * 10, d.height + e.clientY - d.startY))
+  field.boxWidth = +(width / d.rect.width * 100).toFixed(3)
+  field.boxHeight = +(height / d.rect.height * 100).toFixed(3)
+  // Keep the visible left edge fixed for centered and right-aligned fields.
+  field.x = clampPct(d.x + d.ratio * (width - d.width) / d.rect.width * 100)
+  field.fontSize = +Math.max(1, Math.min(500, d.fontSize * Math.sqrt(width / d.width * height / d.height))).toFixed(2)
+}
+function stopFieldResize() {
+  fieldResize = null
+  window.removeEventListener('pointermove', moveFieldResize)
+  window.removeEventListener('pointerup', stopFieldResize)
+  window.removeEventListener('pointercancel', stopFieldResize)
 }
 
 function fieldText(f) {
@@ -1374,6 +1421,7 @@ function bindTemplateEvents() {
 }
 function unbindTemplateEvents() {
   cancelRulerDrag()
+  stopFieldResize()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('paste', onPaste)
   window.removeEventListener('pointermove', onPointerMove)
@@ -1806,8 +1854,18 @@ onBeforeUnmount(() => {
                 </div>
                 <label class="prop-row">
                   <span class="prop-label">字号 pt</span>
-                  <input v-model.number="selectedField.fontSize" type="number" min="6" max="200" class="prop-input" @focus="pushUndo" />
+                  <input v-model.number="selectedField.fontSize" type="number" min="1" max="500" class="prop-input" @focus="pushUndo" />
                 </label>
+                <div class="prop-row">
+                  <span class="prop-label">排列方向</span>
+                  <CustomSelect v-model="selectedField.direction" :options="[
+                    { value: 'horizontal', label: '横排 · 从左到右' },
+                    { value: 'vertical', label: '竖排 · 文字朝上' },
+                    { value: 'vertical-left', label: '竖排 · 文字朝左' },
+                    { value: 'vertical-right', label: '竖排 · 文字朝右' },
+                  ]" width="150px" placeholder="横排 · 从左到右" @open="pushUndo" @change="resetFieldBox" />
+                </div>
+                <p class="prop-meta prop-align-hint">拖动选中框右下角调整大小，字号随之变化。</p>
                 <label class="prop-row">
                   <span class="prop-label">颜色</span>
                   <input v-model="selectedField.color" type="color" class="prop-color" @pointerdown="pushUndo" />
@@ -1901,7 +1959,8 @@ onBeforeUnmount(() => {
                   :style="fieldStyle(f)"
                   @pointerdown.prevent="onFieldPointerDown($event, idx)"
                 >
-                  {{ fieldText(f) }}
+                  <TemplateFieldText :field="f" :text="fieldText(f)" />
+                  <span v-if="idx === selectedIdx && multiSel.size <= 1" class="field-resize" title="拖动调整大小和字号" @pointerdown.stop.prevent="startFieldResize($event, idx)"></span>
                 </div>
               </template>
 
@@ -1928,7 +1987,7 @@ onBeforeUnmount(() => {
                     :class="{ nodata: fieldEmpty(f) && !fieldMissing(f), stale: fieldMissing(f) }"
                     :style="fieldStyle(f)"
                   >
-                    {{ fieldText(f) }}
+                    <TemplateFieldText :field="f" :text="fieldText(f)" />
                   </div>
                 </div>
                 <div class="canvas-fold-half fold-ref">
@@ -1958,7 +2017,8 @@ onBeforeUnmount(() => {
                     :style="fieldStyle(f)"
                     @pointerdown.prevent="onFieldPointerDown($event, idx)"
                   >
-                    {{ fieldText(f) }}
+                    <TemplateFieldText :field="f" :text="fieldText(f)" />
+                    <span v-if="idx === selectedIdx && multiSel.size <= 1" class="field-resize" title="拖动调整大小和字号" @pointerdown.stop.prevent="startFieldResize($event, idx)"></span>
                   </div>
                 </div>
                 <div class="canvas-fold-line"></div>
@@ -2002,7 +2062,8 @@ onBeforeUnmount(() => {
                     :style="fieldStyle(f)"
                     @pointerdown.prevent="onFieldPointerDown($event, idx)"
                   >
-                    {{ fieldText(f) }}
+                    <TemplateFieldText :field="f" :text="fieldText(f)" />
+                    <span v-if="idx === selectedIdx && multiSel.size <= 1" class="field-resize" title="拖动调整大小和字号" @pointerdown.stop.prevent="startFieldResize($event, idx)"></span>
                   </div>
                 </div>
                 <p v-if="!gridCells.length" class="canvas-hint">
@@ -2562,6 +2623,8 @@ onBeforeUnmount(() => {
   outline: 1px solid var(--cinnabar);
   outline-offset: 3px;
 }
+
+.field-resize { position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: white; border: 1px solid var(--cinnabar); border-radius: 2px; cursor: nwse-resize; z-index: 3; }
 
 .field-box.nodata {
   opacity: 0.45;

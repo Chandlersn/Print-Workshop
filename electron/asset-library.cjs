@@ -46,6 +46,7 @@ function persist(all) {
 }
 function effectiveSource(entry) {
   const id = entry && entry.assetId
+  if (entry?.roles?.includes('photo')) return 'managed'
   if (typeof id !== 'string' || !ASSET_ID.test(id)) return normalizeSource(entry && entry.source)
   const originalSource = designs.assetSource(id)
   // The immutable original metadata is authoritative when it has an explicit
@@ -257,6 +258,20 @@ function restoreImportEntry(assetId, previous, removeOriginal = true) {
   if (!previous && removeOriginal) return removeImportAssetIfUnreferenced(id)
   return { removed: false }
 }
+/** Remove photo-only library entries after the final photo binding is removed. */
+function releasePhotoEntries(assetIds) {
+  const targets = new Set(assetIds)
+  const bound = new Set((loadJson('photo-bindings', { expect: 'array' }) || []).flatMap(binding => (binding.files || []).map(file => file.assetId)))
+  const designIds = new Set(require('./templates.cjs').listReferencedAssetIds())
+  for (const head of designs.listDesigns()) for (const id of Object.keys(designs.getDesign(head.id).assets || {})) designIds.add(id)
+  const updated = []
+  for (const entry of index()) {
+    if (!targets.has(entry.assetId) || bound.has(entry.assetId) || !entry.roles?.includes('photo')) { updated.push(entry); continue }
+    const roles = entry.roles.filter(role => role !== 'photo')
+    if (roles.includes('design') || designIds.has(entry.assetId)) updated.push({ ...entry, roles: [...new Set([...roles, 'design'])] })
+  }
+  persist(updated)
+}
 
 /** 全部标签（供筛选器用），按使用次数倒序。 */
 function listTags() {
@@ -400,6 +415,13 @@ function referencedAssetIds(options = {}) {
   }
   for (const state of loadJson('photo-processing', { expect: 'array' }) || []) {
     for (const id of Object.values(state.items || {})) if (ASSET_ID.test(id)) refs.add(id)
+  }
+  // Single-person posters pin historical revisions just like templates.
+  for (const item of loadJson('record-designs', { expect: 'array' }) || []) {
+    const ref = item.designRef
+    if (!ref?.id || !Number.isSafeInteger(ref.revision) || ref.revision < 1) throw new Error('单人底图版本引用无效，已停止素材清理')
+    const doc = designs.getDesign(ref.id, ref.revision)
+    for (const id of Object.keys(doc.assets || {})) refs.add(id)
   }
   const staging = resolveInsideDataDir('photo-import-staging')
   if (fs.existsSync(staging)) {
@@ -615,7 +637,7 @@ function discardIfEphemeral(assetId, options = {}) {
 
 module.exports = {
   listLibrary, getEntry, snapshotImportEntry, restoreImportEntry, listTags, upsert, adopt, updateMetadata, archive, restore, rebuildThumbnail,
-  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, removeImportAssetIfUnreferenced, discardIfEphemeral, originalsDir,
+  referencedAssetIds, findOrphanOriginals, purgeOrphanOriginals, removeImportAssetIfUnreferenced, discardIfEphemeral, originalsDir, releasePhotoEntries,
   resourceUsage,
   THUMB_MAX_SIDE, LIMITS,
 }

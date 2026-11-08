@@ -30,7 +30,8 @@ const DESIGN_ID = /^design_[a-f0-9]{24}$/
  */
 const POOL_MANAGED = 'design-assets'
 const POOL_EPHEMERAL = 'ephemeral-assets'
-const ASSET_POOLS = [POOL_MANAGED, POOL_EPHEMERAL]
+const POOL_PHOTO = 'photo-assets'
+const ASSET_POOLS = [POOL_MANAGED, POOL_EPHEMERAL, POOL_PHOTO]
 function poolOfSource(source) {
   return normalizeSource(source) === 'ephemeral' ? POOL_EPHEMERAL : POOL_MANAGED
 }
@@ -153,7 +154,7 @@ function atomicFile(file, bytes, root = DATA_DIR) {
   // 导入素材这条路径不持锁（importBuffer 不做 withLock），不能依赖 withLock 建目录：
   // 否则全新数据目录下第一次导入会抛原生 ENOENT。
   fs.mkdirSync(root, { recursive: true })
-  if (path.resolve(root) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(root)
+  if ([assetStorage.legacyManagedDir(), assetStorage.poolDir(POOL_EPHEMERAL), assetStorage.poolDir(POOL_PHOTO)].some(dir => path.resolve(root) === path.resolve(dir))) assertRealDataPath(root)
   let existing = path.dirname(file)
   while (!fs.existsSync(existing)) existing = path.dirname(existing)
   assertRealStoragePath(existing, root)
@@ -167,14 +168,16 @@ function atomicFile(file, bytes, root = DATA_DIR) {
     if (fs.existsSync(temp)) fs.unlinkSync(temp)
   }
 }
-function revisionPath(id, revision) {
+function revisionPath(id, revision, directory = 'designs') {
   projectId(id)
   if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('底图版本无效')
-  return resolveInsideDataDir(`designs/${id}/${revision}.json`)
+  if (!['designs', 'individual-designs'].includes(directory)) throw new Error('底图工程存储位置无效')
+  return resolveInsideDataDir(`${directory}/${id}/${revision}.json`)
 }
 function readRevision(id, revision) {
-  revisionPath(id, revision)
-  const file = guardedFile(`designs/${id}/${revision}.json`, 'designs')
+  const directory = index().find(item => item.id === id)?.storage === 'individual-designs' ? 'individual-designs' : 'designs'
+  revisionPath(id, revision, directory)
+  const file = guardedFile(`${directory}/${id}/${revision}.json`, directory)
   return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
 function guardedFile(relative, directory) {
@@ -196,7 +199,7 @@ function guardedAssetFile(relative) {
   if (!ASSET_POOLS.includes(pool)) throw pathGuardError('素材路径不在素材目录内')
   const absolute = assetStorage.resolveAssetPath(relative)
   const root = assetStorage.poolDir(pool)
-  if (pool === POOL_EPHEMERAL || path.resolve(root) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(root)
+  if (pool === POOL_EPHEMERAL || pool === POOL_PHOTO || path.resolve(root) === path.resolve(assetStorage.legacyManagedDir())) assertRealDataPath(root)
   const real = fs.realpathSync(absolute)
   const realRoot = fs.realpathSync(root)
   const inside = path.relative(realRoot, real)
@@ -341,7 +344,19 @@ function canonicalFonts(doc, previous = {}) {
   return doc
 }
 function listDesigns() {
-  return index().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+  const legacy = new Map((loadJson('record-designs', { expect:'array' }) || []).map(item => [item.designRef?.id, { datasetId:item.datasetId, templateId:item.templateId, rowId:item.rowId }]))
+  return index().map(item => item.recordOwner || !legacy.has(item.id) ? item : { ...item, recordOwner:legacy.get(item.id) }).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+}
+
+const sameRecordOwner = (a, b) => a && b && a.datasetId === b.datasetId && a.templateId === b.templateId && a.rowId === b.rowId
+function markRecordDesign(id, owner) {
+  return withLock(() => {
+    const all = index(), head = all.find(item => item.id === projectId(id))
+    if (!head) throw new Error('单人底图工程不存在')
+    if (head.recordOwner && !sameRecordOwner(head.recordOwner, owner)) throw new Error('单人底图属于其他人员')
+    if ((loadJson('templates', {expect:'array'}) || []).some(item => item.backgroundDesign?.id === id)) throw new Error('批量模板使用的底图不能作为单人底图，请另存副本')
+    if (!head.recordOwner) saveJson('designs', all.map(item => item.id === id ? { ...item, recordOwner:owner } : item))
+  })
 }
 /**
  * 记一次「使用」（打开工程、按预设新建后落库等），只更新摘要里的 `lastUsedAt`。
@@ -420,6 +435,8 @@ function saveDesign(input, options) {
   return withLock(() => {
     const all = index()
     const head = doc.id ? all.find(d => d.id === projectId(doc.id)) : null
+    const recordOwner = options?.recordOwner || head?.recordOwner || null
+    if (options?.recordOwner && head && !sameRecordOwner(head.recordOwner || (loadJson('record-designs', {expect:'array'}) || []).find(item => item.designRef?.id === head.id), options.recordOwner)) throw new Error('请选择此人的独立底图，或另存副本')
     if (doc.id && !head) throw new Error('底图工程不存在，若要恢复副本请使用另存为')
     if (head && doc.revision !== head.revision) {
       const err = new Error(`底图已更新至版本 ${head.revision}，当前版本 ${doc.revision} 不能覆盖，请重新打开或另存副本`)
@@ -433,6 +450,7 @@ function saveDesign(input, options) {
     const id = head ? head.id : `design_${crypto.randomBytes(12).toString('hex')}`
     return publishRevisionLocked(doc, {
       id, revision: head ? head.revision + 1 : 1, createdAt: head ? head.createdAt : now, recordUse,
+      recordOwner, storage:head ? head.storage : (recordOwner ? 'individual-designs' : undefined),
     })
   })
 }
@@ -449,15 +467,15 @@ function saveDesign(input, options) {
  * 顺序是刻意的：**先写版本文件，最后写索引**。中途崩溃只会留下一个索引里看不见的
  * 孤儿目录（由恢复程序或 purgeOrphanDirs 回收），绝不会出现「索引里有、文件却不存在」。
  */
-function publishRevisionLocked(doc, { id, revision, createdAt, recordUse }) {
+function publishRevisionLocked(doc, { id, revision, createdAt, recordUse, recordOwner, storage }) {
   const now = new Date().toISOString()
   const saved = { ...doc, id, revision, createdAt, updatedAt: now }
-  const target = revisionPath(saved.id, saved.revision)
+  const target = revisionPath(saved.id, saved.revision, storage || 'designs')
   // An uncommitted orphan from a terminated write may be replaced; committed files never are.
   atomicFile(target, JSON.stringify(saved, null, 2))
   // lastUsedAt = 「用户最近一次用它的时间」，供界面上的「常用」列表排序。
   // 用户主动保存本身就是一次使用 ⇒ 刷成 now；系统按预设自动建的工程不记（见 saveDesign 头注）。
-  const summary = { id, revision, name: saved.name, artboard: saved.artboard, layerCount: saved.layers.length, createdAt, updatedAt: now, lastUsedAt: recordUse ? now : null }
+  const summary = { id, revision, name: saved.name, artboard: saved.artboard, layerCount: saved.layers.length, createdAt, updatedAt: now, lastUsedAt: recordUse ? now : null, ...(recordOwner ? { recordOwner } : {}), ...(storage ? { storage } : {}) }
   const updated = index().filter(d => d.id !== id).concat(summary)
   try { saveJson('designs', updated) } catch (err) {
     try { fs.unlinkSync(target) } catch { /* Orphan is unreachable until a successful retry. */ }
@@ -472,6 +490,7 @@ function deleteDesign(id) {
     if (!all.some(d => d.id === id)) throw new Error('底图工程不存在或已删除')
     const used = (loadJson('templates', { expect: 'array' }) || []).filter(t => t.backgroundDesign && t.backgroundDesign.id === id)
     if (used.length) throw new Error(`底图正在被模板使用：${used.map(t => t.name).join('、')}，请先移除引用`)
+    if ((loadJson('record-designs', { expect: 'array' }) || []).some(item => item.designRef?.id === id)) throw new Error('底图正在被单人海报使用，请先恢复该人员的模板默认底图')
     saveJson('designs', all.filter(d => d.id !== id))
     // Keep source bytes and revision documents for unsaved drafts and undo history.
     // 这些目录不会自己消失 —— 由 purgeOrphanDirs()（「关于 → 清理缓存与残留」）统一回收。
@@ -510,11 +529,12 @@ function dirBytes(dir) {
  */
 function purgeOrphanDirs() {
   const root = resolveInsideDataDir('designs')
-  if (!fs.existsSync(root)) return { removed: [], freed: 0, skipped: [] }
+  const individualRoot = resolveInsideDataDir('individual-designs')
+  if (!fs.existsSync(root) && !fs.existsSync(individualRoot)) return { removed: [], freed: 0, skipped: [] }
   const removed = []
   const skipped = []
   let freed = 0
-  for (const name of fs.readdirSync(root)) {
+  for (const name of fs.existsSync(root) ? fs.readdirSync(root) : []) {
     if (!DESIGN_ID.test(name)) continue
     const abs = resolveInsideDataDir(`designs/${name}`)
     let stat
@@ -529,6 +549,19 @@ function purgeOrphanDirs() {
       freed += size
     } catch {
       skipped.push(name)
+    }
+  }
+  if (fs.existsSync(individualRoot)) {
+    assertRealDataPath(individualRoot)
+    for (const name of fs.readdirSync(individualRoot)) {
+      if (!DESIGN_ID.test(name)) continue
+      const abs = resolveInsideDataDir(`individual-designs/${name}`)
+      let stat
+      try { stat = fs.lstatSync(abs) } catch { continue }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue
+      if (index().some((d) => d.id === name)) continue
+      const size = dirBytes(abs)
+      try { fs.rmSync(abs, { recursive:true, force:true }); removed.push(name); freed += size } catch { skipped.push(name) }
     }
   }
   return { removed, freed, skipped }
@@ -643,8 +676,11 @@ function importBuffer(buf, name, source) {
   const id = `asset_${hash}`
   // 同内容已在任一池子 → 直接返回既有记录：内容寻址去重（I-31 原则①）。
   // 绝不因为这次传了别的 source 就再存一份字节——升级 / 降级只改边车标记（见 setAssetSource）。
-  if (locateAsset(hash)) return readAsset(id).asset
-  const pool = poolOfSource(source)
+  const existing = locateAsset(hash)
+  const photoImport = source === 'photo'
+  const photoMeta = assetStorage.resolveAssetPath(`${POOL_PHOTO}/${hash}.json`)
+  if (photoImport ? fs.existsSync(photoMeta) : existing && existing !== POOL_PHOTO) return readAsset(id).asset
+  const pool = photoImport ? POOL_PHOTO : poolOfSource(source)
   const relative = `${pool}/${hash}${size.ext}`
   const asset = { id, path: relative, width: size.width, height: size.height, mime: size.mime, name: path.basename(String(name || '图片')).replace(/[\x00-\x1f]/g, '').slice(0, 200) || '图片', source: normalizeSource(source) }
   const target = assetStorage.resolveAssetPath(relative)
@@ -697,8 +733,12 @@ function setAssetSource(id, source) {
     asset.path = nextRelative
     asset.source = next
     atomicFile(assetStorage.resolveAssetPath(`${targetPool}/${hash}.json`), JSON.stringify(asset, null, 2), assetStorage.poolDir(targetPool))
-    try { fs.unlinkSync(metaPath) } catch { /* 旧边车删不掉只是残留：locateAsset 仍读到新池那份 */ }
-    try { fs.unlinkSync(oldImage) } catch { /* 旧图沦为孤儿，由 asset:listOrphans / purge 收 */ }
+    // A photo and an ordinary layer can share the same bytes; adopting a photo
+    // creates a design copy but must keep the separate photo original intact.
+    if (pool !== POOL_PHOTO) {
+      try { fs.unlinkSync(metaPath) } catch { /* 旧边车删不掉只是残留 */ }
+      try { fs.unlinkSync(oldImage) } catch { /* 旧图由清理入口回收 */ }
+    }
     return asset
   }
   asset.source = next
@@ -804,5 +844,5 @@ function fontUsedBy(family) {
   return [...names]
 }
 
-module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetGeometry, assetSource, assetBytes, setAssetSource, jpegOrientation, withDesignLock: withLock, publishRevisionLocked, migrateEphemeralOriginals, migrateManagedOriginals,
-  POOL_MANAGED, POOL_EPHEMERAL, ASSET_POOLS, originalExists }
+module.exports = { listDesigns, getDesign, resolveDesign, resolveDraft, saveDesign, markRecordDesign, deleteDesign, purgeOrphanDirs, touchDesign, importImageBytes, importImageFile, importImageBuffer: importBuffer, importLegacyBackground, fontUsedBy, assetInfo, assetGeometry, assetSource, assetBytes, setAssetSource, jpegOrientation, withDesignLock: withLock, publishRevisionLocked, migrateEphemeralOriginals, migrateManagedOriginals,
+  POOL_MANAGED, POOL_EPHEMERAL, POOL_PHOTO, ASSET_POOLS, originalExists }

@@ -10,6 +10,7 @@ const fs = require('fs')
 const fonts = require('./fonts.cjs')
 const { resolveInsideDataDir } = require('./store.cjs')
 const { PAGE_SIZES } = require('./templates.cjs')
+const { fieldDirection, graphemes } = require('./field-text.cjs')
 
 // 媒体根目录（主进程启动即设定；测试也会注入）。文件缺失时回退到 pp://。
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
@@ -41,7 +42,7 @@ function readMediaFile(rel) {
   if (!DATA_DIR || !rel) return null
   try {
     const relative = String(rel).replace(/\\/g, '/')
-    const abs = /^(design-assets|ephemeral-assets)\//.test(relative)
+    const abs = /^(design-assets|ephemeral-assets|photo-assets)\//.test(relative)
       ? require('./asset-storage.cjs').resolveAssetPath(relative)
       : resolveInsideDataDir(relative)
     if (!fs.existsSync(abs)) return null
@@ -130,6 +131,8 @@ function fieldStyle(f) {
   const rawAlign = f.align || 'left'
   const align = ['left', 'center', 'right'].includes(rawAlign) ? rawAlign : 'left'
   const parts = [`left:${x}%;`, `top:${y}%;`]
+  if (Number.isFinite(Number(f.boxWidth)) && Number(f.boxWidth) > 0) parts.push(`width:${clampNum(f.boxWidth, 0.1, 1000, 1)}%;`)
+  if (Number.isFinite(Number(f.boxHeight)) && Number(f.boxHeight) > 0) parts.push(`height:${clampNum(f.boxHeight, 0.1, 1000, 1)}%;`)
   if (align === 'center') parts.push('transform:translateX(-50%);')
   else if (align === 'right') parts.push('transform:translateX(-100%);')
   const fontSize = clampNum(f.fontSize, 1, 500, 12)
@@ -225,7 +228,7 @@ function prepareTemplateDesign(template, photos = null, options = {}) {
     : outputDpi.readFixedBakes({ design, dpi: options.outputDpi })
   const assetUrls = new Map()
   const renderOptions = {
-    classPrefix: 'print-design',
+    classPrefix: options.classPrefix || 'print-design',
     fontFamily: normalizeFamily,
     assetUrl: (asset) => {
       if (assetUrls.has(asset.path)) return assetUrls.get(asset.path)
@@ -395,7 +398,12 @@ function buildHtml(template, records, { withToolbar = true, preparedDesign } = {
   const designOutput = preparedDesign || prepareTemplateDesign(template)
 
   const fieldsHtml = (rec) => (designOutput.renderInstance ? designOutput.renderInstance(rec) : designOutput.html) + fields
-    .map((f) => `<div class="pf" style="${fieldStyle(f)}">${escapeHtml(rec[f.column || f.key])}</div>`)
+    .map((f) => {
+      const value = rec[f.column || f.key]
+      const direction = fieldDirection(f)
+      const content = direction === 'horizontal' ? escapeHtml(value) : `<span class="field-vertical">${graphemes(value).map(char => `<span class="field-glyph"><span class="${direction}">${escapeHtml(char)}</span></span>`).join('')}</span>`
+      return `<div class="pf" style="${fieldStyle(f)}">${content}</div>`
+    })
     .join('')
 
   let pages
@@ -468,6 +476,7 @@ function buildHtml(template, records, { withToolbar = true, preparedDesign } = {
     '.fold-line { position: absolute; left: 0; top: 50%; width: 100%; '
       + 'border-top: 0.3mm dashed rgba(0,0,0,0.35); }\n',
     '.pf { position: absolute; white-space: nowrap; }\n',
+    '.field-vertical { display:inline-flex; flex-direction:column; vertical-align:top; } .field-glyph { display:flex; align-items:center; justify-content:center; width:1em; height:1em; line-height:1; } .field-glyph > span { display:block; } .field-glyph > .vertical-left { transform:rotate(-90deg); } .field-glyph > .vertical-right { transform:rotate(90deg); }\n',
     '@media print { body { background: #fff; } .no-print { display: none !important; } }\n',
     '</style>\n</head>\n<body>\n',
     withToolbar

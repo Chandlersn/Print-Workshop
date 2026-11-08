@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import DesignImageEditor from './DesignImageEditor.vue'
+import PhotoSubjectLasso from './PhotoSubjectLasso.vue'
 import { normalizeRecipe } from '../../electron/photo-processing-pixels.cjs'
 import { photoProcessingChanged, photoProcessingDrafts, photoProcessingSample } from '../lib/photo-processing.js'
 import { toUserMessage } from '../../electron/user-error.cjs'
@@ -9,11 +10,13 @@ import { toUserMessage } from '../../electron/user-error.cjs'
 const props = defineProps({ datasetId: { type: String, required: true }, rowId: { type: String, default: '' }, refreshKey: { type: Number, default: 0 }, expanded: Boolean })
 const emit = defineEmits(['preview', 'applied', 'navigate'])
 const opened = ref(props.expanded), loading = ref(false), previewing = ref(false), applying = ref(false), canceling = ref(false)
-const error = ref(''), notice = ref(''), samples = ref([]), sampleId = ref(''), state = ref(null), modelReady = ref(false)
+const error = ref(''), notice = ref(''), samples = ref([]), sampleId = ref(''), state = ref(null), modelReady = ref(false), qualityReady = ref(false)
+const previewModel = ref('quality'), batchModel = ref('fast')
 const recipe = ref(normalizeRecipe()), previewAsset = ref(null), progress = ref(null)
 const photoColumn = ref('')
 const presets = ref([]), presetId = ref(''), presetName = ref(''), automatic = ref(false), job = ref(null), faceReady = ref(false)
 const restoreAsset = ref(null), analysis = ref(null), singleSaved = ref(null), pixelEdit = ref(null)
+const subjectPolygon = ref(null), legacyProtectPolygon = ref(null), lassoOpen = ref(false), regenerateSingle = ref(false)
 const query = () => ({ datasetId: props.datasetId, ...(props.rowId ? { rowId: props.rowId } : {}) })
 const draftKey = computed(() => `${props.datasetId}:${props.rowId}`)
 let alive = true, generation = 0, revision = 0, previewTimer, queued = false, taskId = '', initialized = false
@@ -27,18 +30,23 @@ const off = window.printpress.onPhotoProcessingProgress(payload => {
   if (!alive || payload.datasetId !== props.datasetId) return
   if (payload.automatic) {
     job.value = payload
-    if (payload.phase === 'completed') { refresh(); emit('applied', null) }
+    if (payload.phase === 'completed') {
+      if (payload.bootstrap && !opened.value && !props.rowId) { initialized = false; delete photoProcessingDrafts[draftKey.value] }
+      refresh(); emit('applied', null)
+    }
   } else if (payload.taskId === taskId) progress.value = payload
 })
 function invalidate() {
   revision++; previewAsset.value = null; notice.value = ''
   if (!props.rowId && photoProcessingSample.value?.datasetId === props.datasetId) photoProcessingSample.value = null
   clearTimeout(previewTimer)
-  if (initialized) photoProcessingDrafts[draftKey.value] = { recipe: JSON.parse(JSON.stringify(recipe.value)), sampleAssetId: sampleId.value }
+  if (initialized) photoProcessingDrafts[draftKey.value] = { recipe: JSON.parse(JSON.stringify(recipe.value)), sampleAssetId: sampleId.value, subjectPolygon: subjectPolygon.value ? JSON.parse(JSON.stringify(subjectPolygon.value)) : null, protectPolygon: legacyProtectPolygon.value ? JSON.parse(JSON.stringify(legacyProtectPolygon.value)) : null }
   if (opened.value && initialized) previewTimer = setTimeout(preview, 500)
 }
 watch(recipe, invalidate, { deep: true })
+watch([subjectPolygon, legacyProtectPolygon], invalidate)
 watch(sampleId, invalidate)
+watch(previewModel, () => { if (initialized && props.rowId) regenerateSingle.value = true; invalidate() }, { flush: 'sync' })
 watch(opened, value => { if (value && !previewAsset.value) preview() })
 async function refresh() {
   const token = ++generation
@@ -51,15 +59,22 @@ async function refresh() {
     photoColumn.value = detail.photoMatchColumn || ''
     const files = new Map(report.files.map(item => [item.assetId, item]))
     samples.value = report.results.filter(row => row.status === 'matched' && (!props.rowId || detail.recordIds[row.rowIndex] === props.rowId)).map(row => ({ ...row, ...files.get(row.assetId) }))
-    state.value = processing.state; modelReady.value = processing.model.ready
+    state.value = processing.state; modelReady.value = processing.model.ready; qualityReady.value = Boolean(processing.model.qualityReady)
     presets.value = processing.presets || []; automatic.value = Boolean(processing.options?.autoProcess); job.value = processing.job; faceReady.value = Boolean(processing.model.faceReady)
     singleSaved.value = processing.single
     if (!selected.value) sampleId.value = processing.state?.sampleAssetId && samples.value.some(row => row.assetId === processing.state.sampleAssetId) ? processing.state.sampleAssetId : samples.value[0]?.assetId || ''
     if (!initialized) {
       const draft = photoProcessingDrafts[draftKey.value]
+      if (props.rowId && processing.single?.override) previewModel.value = processing.single.override.model || 'fast'
+      if (!props.rowId && processing.state?.model) batchModel.value = processing.state.model
       if (draft?.sampleAssetId && samples.value.some(row => row.assetId === draft.sampleAssetId)) sampleId.value = draft.sampleAssetId
       if (draft?.recipe || processing.single?.override?.recipe || processing.state?.recipe) recipe.value = normalizeRecipe(draft?.recipe || processing.single?.override?.recipe || processing.state.recipe)
       else if (selected.value) useSampleSize()
+      if (props.rowId) {
+        const saved = draft?.sampleAssetId === sampleId.value ? draft : processing.single?.override
+        subjectPolygon.value = saved?.subjectPolygon || null
+        legacyProtectPolygon.value = saved?.protectPolygon || null
+      }
       initialized = true
     }
     if (opened.value && selected.value) { clearTimeout(previewTimer); previewTimer = setTimeout(preview, 0) }
@@ -78,12 +93,12 @@ async function preview() {
   const token = revision, sourceId = sampleId.value
   let normalized
   try { normalized = normalizeRecipe(recipe.value) } catch (err) { error.value = toUserMessage(err); return }
-  if (props.rowId && singleSaved.value?.asset && singleSaved.value?.override && JSON.stringify(normalized) === JSON.stringify(normalizeRecipe(singleSaved.value.override.recipe))) {
+  if (props.rowId && !regenerateSingle.value && singleSaved.value?.asset && singleSaved.value?.override && JSON.stringify(normalized) === JSON.stringify(normalizeRecipe(singleSaved.value.override.recipe)) && JSON.stringify(subjectPolygon.value) === JSON.stringify(singleSaved.value.override.subjectPolygon || null) && JSON.stringify(legacyProtectPolygon.value) === JSON.stringify(singleSaved.value.override.protectPolygon || null)) {
     previewAsset.value = singleSaved.value.asset; restoreAsset.value = singleSaved.value.restoreAsset; analysis.value = singleSaved.value.override.analysis; return
   }
   previewing.value = true; error.value = ''; queued = false
   try {
-    const result = await window.printpress.previewPhotoProcessing({ datasetId: props.datasetId, assetId: sourceId, recipe: normalized })
+    const result = await window.printpress.previewPhotoProcessing({ datasetId: props.datasetId, assetId: sourceId, recipe: normalized, model: previewModel.value, ...(props.rowId && subjectPolygon.value ? { subjectPolygon: JSON.parse(JSON.stringify(subjectPolygon.value)) } : {}), ...(props.rowId && legacyProtectPolygon.value ? { protectPolygon: JSON.parse(JSON.stringify(legacyProtectPolygon.value)) } : {}) })
     if (alive && token === revision && sourceId === sampleId.value) {
       previewAsset.value = result.asset; restoreAsset.value = result.restoreAsset; analysis.value = result.analysis
       if (!props.rowId) photoProcessingSample.value = { datasetId: props.datasetId, sourceAssetId: sourceId, column: photoColumn.value, assetId: result.asset.id }
@@ -100,7 +115,7 @@ async function applyAll() {
   applying.value = true; error.value = ''; notice.value = ''; progress.value = null
   taskId = `photos-${Date.now()}-${Math.random().toString(36).slice(2)}`
   try {
-    const result = await window.printpress.applyPhotoProcessing({ datasetId: props.datasetId, sampleAssetId: sampleId.value, recipe: normalized, taskId })
+    const result = await window.printpress.applyPhotoProcessing({ datasetId: props.datasetId, sampleAssetId: sampleId.value, recipe: normalized, model: batchModel.value, taskId })
     if (!alive) return
     if (result.canceled) { notice.value = '已取消本次处理，之前的应用结果仍有效。'; return }
     if (!result.applied) { error.value = `有 ${result.failures.length} 张照片处理失败，本次设置尚未应用。${result.failures[0]?.message ? toUserMessage(result.failures[0].message) : ''}`; return }
@@ -119,7 +134,7 @@ async function reset() {
   if (applying.value) return
   if (props.rowId) {
     try {
-      await window.printpress.clearSinglePhotoProcessing(query()); singleSaved.value = null; initialized = false; delete photoProcessingDrafts[draftKey.value]
+      await window.printpress.clearSinglePhotoProcessing(query()); singleSaved.value = null; subjectPolygon.value = null; legacyProtectPolygon.value = null; regenerateSingle.value = false; initialized = false; delete photoProcessingDrafts[draftKey.value]
       photoProcessingChanged(); emit('applied', null); await refresh(); notice.value = '此人已恢复统一样板。'
     } catch (err) { error.value = toUserMessage(err) }
     return
@@ -143,26 +158,39 @@ async function setAutomatic(event) {
   try { const result = await window.printpress.setPhotoProcessingOptions({ datasetId: props.datasetId, autoProcess: event.target.checked }); automatic.value = result.autoProcess }
   catch (err) { error.value = toUserMessage(err) }
 }
+async function retryAutomatic() {
+  try { const result = await window.printpress.setPhotoProcessingOptions({ datasetId: props.datasetId, autoProcess: true }); automatic.value = result.autoProcess; notice.value = '已重新开始统一处理。' }
+  catch (err) { error.value = toUserMessage(err) }
+}
 async function openPixelEdit() {
   if (!props.rowId || applying.value || previewing.value) return
   if (!previewAsset.value) await preview()
   if (previewAsset.value) pixelEdit.value = { asset: previewAsset.value, restoreAsset: restoreAsset.value, layer: { id: 'single-photo', type: 'image', x: 0, y: 0, w: 100, h: 100, crop: { x: 0, y: 0, w: 1, h: 1 } } }
 }
+function applyLasso(polygon) {
+  lassoOpen.value = false
+  regenerateSingle.value = true
+  legacyProtectPolygon.value = null
+  subjectPolygon.value = polygon
+  recipe.value.cutout = true
+  notice.value = '人物范围已设置，正在重新抠图；检查效果后点击“仅应用此人的设置”。'
+}
 async function applySingle(edit) {
   if (!props.rowId || applying.value) return
   applying.value = true; error.value = ''
   try {
-    const result = await window.printpress.setSinglePhotoProcessing({ ...query(), assetId: sampleId.value, recipe: JSON.parse(JSON.stringify(recipe.value)),
+    const result = await window.printpress.setSinglePhotoProcessing({ ...query(), assetId: sampleId.value, recipe: JSON.parse(JSON.stringify(recipe.value)), model: previewModel.value, subjectPolygon: subjectPolygon.value ? JSON.parse(JSON.stringify(subjectPolygon.value)) : null, protectPolygon: legacyProtectPolygon.value ? JSON.parse(JSON.stringify(legacyProtectPolygon.value)) : null,
       ...(edit ? { edit: JSON.parse(JSON.stringify({ ...edit, baseAssetId: pixelEdit.value.asset.id })) } : {}) })
     if (!alive) return
     singleSaved.value = { override: result.entry, asset: result.asset, restoreAsset: result.restoreAsset }
+    regenerateSingle.value = false
     previewAsset.value = result.asset; restoreAsset.value = result.restoreAsset; pixelEdit.value = null
     delete photoProcessingDrafts[draftKey.value]; photoProcessingChanged(); emit('applied', result.entry)
     notice.value = '仅此人的照片已更新，其他记录继续使用统一样板。'
   } catch (err) { if (alive) error.value = toUserMessage(err) }
   finally { if (alive) applying.value = false }
 }
-defineExpose({ refresh })
+defineExpose({ refresh, applying })
 onBeforeUnmount(() => { alive = false; generation++; clearTimeout(previewTimer); off(); if (taskId) window.printpress.cancelPhotoProcessing({ datasetId: props.datasetId, taskId }).catch(() => {}) })
 </script>
 
@@ -171,18 +199,28 @@ onBeforeUnmount(() => { alive = false; generation++; clearTimeout(previewTimer);
     <header class="processing-heading"><div><h2><AppIcon name="portrait" /> {{ rowId ? '单张照片编辑' : '变量照片自动处理' }}</h2><p>{{ rowId ? '仅修改当前记录，其他人继续使用统一样板。' : '选一张照片制作样板，将适配、抠图和柔边规则应用到整份名单。' }}</p></div><button class="btn-ghost" data-testid="photo-processing-toggle" :aria-expanded="opened" @click="opened = !opened">{{ opened ? '收起设置' : '制作样板' }}</button></header>
     <p v-if="loading" role="status">正在读取可用照片…</p>
     <p v-else-if="!samples.length" class="muted">导入并匹配照片后，即可选择样板。</p>
-    <p v-if="state?.enabled && !rowId" class="applied-status">已应用自动处理 · {{ state.recipe.width }} × {{ state.recipe.height }} px <span v-if="pendingCount"> · 有 {{ pendingCount }} 张新增或更换的照片待应用</span></p>
+    <p v-if="state?.enabled && !rowId" class="applied-status">已应用自动处理 · {{ state.recipe.width }} × {{ state.recipe.height }} px <span v-if="state.recipe.faceAlign"> · 人脸自动居中</span><span v-if="pendingCount"> · 有 {{ pendingCount }} 张新增或更换的照片待应用</span></p>
+    <p v-if="state?.bootstrapReference && !state.bootstrapReference.centered && !rowId" class="processing-error">首张匹配照片未识别到单个人脸或本地模型不可用，已统一画布并等比居中；人物位置请在批量检查中确认。</p>
+    <p v-else-if="state?.bootstrapReference?.clamped && !rowId" class="processing-error">首张照片的人脸位置接近画面边缘，自动对齐使用了可调范围内的数值，请检查效果。</p>
     <label v-if="!rowId" class="check automatic-setting"><input data-testid="photo-processing-automatic" type="checkbox" :checked="automatic" @change="setAutomatic">新增或更换照片后自动沿用已应用样板（只处理变化的照片）</label>
-    <p v-if="job?.phase === 'processing'" class="processing-notice" role="status">自动处理 {{ job.index || 0 }} / {{ job.total || 0 }}，完成后更新整批结果。</p>
-    <p v-if="job?.phase === 'failed'" class="processing-error">自动处理未完成：{{ toUserMessage(job.message || job.failures?.[0]?.message || '照片处理失败') }}。可点击应用样板重试，已完成的计算会复用。</p>
+    <p v-if="job?.phase === 'processing'" class="processing-notice" role="status">{{ job.bootstrap ? '正在以首张匹配照片为基准统一尺寸和人物位置' : '自动处理' }} {{ job.index || 0 }} / {{ job.total || 0 }}，完成后更新整批结果。</p>
+    <p v-if="job?.phase === 'failed'" class="processing-error">自动处理未完成：{{ toUserMessage(job.message || job.failures?.[0]?.message || '照片处理失败') }}。<button class="btn-ghost" data-testid="photo-processing-retry" @click="retryAutomatic">重试统一处理</button></p>
     <div v-if="opened && samples.length" class="processing-editor">
       <div class="sample-area">
         <label>样板照片<select v-model="sampleId" data-testid="photo-processing-sample" :disabled="!canEdit"><option v-for="item in samples" :key="item.rowIndex" :value="item.assetId">第 {{ item.rowIndex + 1 }} 行 · {{ item.name }}</option></select></label>
+        <div v-if="recipe.cutout" class="model-options">
+          <label class="model-option">{{ rowId ? '单张抠图' : '样板预览' }}<select v-model="previewModel" data-testid="photo-processing-preview-model" :disabled="!canEdit"><option value="quality" :disabled="!qualityReady">精细 · 约 10～16 秒/张{{ qualityReady ? '' : '（模型缺失）' }}</option><option value="fast" :disabled="!modelReady">快速 · 约 1～4 秒/张</option></select></label>
+          <label v-if="!rowId" class="model-option">批量抠图<select v-model="batchModel" data-testid="photo-processing-batch-model" :disabled="!canEdit"><option value="fast" :disabled="!modelReady">快速 · 约 1～4 秒/张</option><option value="quality" :disabled="!qualityReady">精细 · 约 10～16 秒/张{{ qualityReady ? '' : '（模型缺失）' }}</option></select></label>
+        </div>
+        <p v-if="recipe.cutout" class="muted">时间为本机试验参考，实际取决于电脑和照片，首次加载模型需额外等待{{ !rowId && previewModel !== batchModel ? '；样板和批量使用不同模式，抠图边缘可能不同' : '' }}。</p>
+        <p v-if="recipe.cutout && previewModel === 'quality' && !qualityReady" class="processing-error">精细模型缺失，请选择快速模式或安装完整安装包。</p>
         <div class="comparison"><figure><figcaption>原始照片</figcaption><div class="sample-frame" :style="{ aspectRatio: `${recipe.width} / ${recipe.height}` }"><img :src="originalUrl" alt="样板原始照片"></div></figure><figure><figcaption>处理效果 <span v-if="previewing" role="status">· 正在生成…</span></figcaption><div class="sample-frame" :style="{ aspectRatio: `${recipe.width} / ${recipe.height}` }"><img v-if="resultUrl" :src="resultUrl" alt="样板处理效果" data-testid="photo-processing-preview"><span v-else>{{ previewing ? '正在处理样板…' : '调整设置后预览' }}</span></div></figure></div>
         <p class="muted">{{ rowId ? '单张修改按人员记录保存；换了原照片会停用旧修改，避免套错人。' : '每张照片分别生成自己的蒙版；开启人物对齐后可统一脸部大小和眼睛高度。' }}</p>
         <p v-if="rowId && singleSaved?.override?.edited" class="muted">这张照片已有手工修补；继续打开图片编辑可接着修改，重新应用设置会按参数重新生成照片。</p>
         <button v-if="!rowId" class="btn-ghost" :disabled="!canEdit || previewing" @click="emit('navigate', 'designer')">前往底图编辑参考样图</button>
         <button v-else class="btn-primary" data-testid="photo-processing-pixel-edit" :disabled="!canEdit || previewing || !previewAsset" @click="openPixelEdit">图片编辑 · 抠图边缘修补</button>
+        <template v-if="rowId"><button class="btn-ghost" data-testid="photo-processing-lasso" :disabled="!canEdit || previewing || (!modelReady && !qualityReady)" @click="lassoOpen = true">自由拉索 · 圈定人物并抠图</button><button v-if="subjectPolygon || legacyProtectPolygon" class="btn-ghost" data-testid="photo-processing-lasso-clear" :disabled="!canEdit || previewing" @click="subjectPolygon = null; legacyProtectPolygon = null">清除人物范围</button><p class="muted">范围仅用于此人的当前原图；重新抠图会替换此人之前的手工修补，确认效果后再应用。</p><p v-if="legacyProtectPolygon" class="muted">此照片仍使用旧版圈内保留效果；重新圈选后将使用新版模型抠图。</p></template>
+        <p v-else class="muted">衣服与背景相近时，可在下方“批量效果检查”打开对应照片的单张编辑，用自由拉索圈定人物范围。</p>
         <p v-if="analysis?.issues?.length" class="processing-error">这张照片建议在批量检查中复核：{{ analysis.issues.includes('no-face') ? '未识别人脸' : analysis.issues.includes('multiple-faces') ? '检测到多人' : '存在裁切或放大提示' }}。</p>
       </div>
       <fieldset :disabled="!canEdit" class="processing-controls">
@@ -196,8 +234,8 @@ onBeforeUnmount(() => { alive = false; generation++; clearTimeout(previewTimer);
         <div class="control-pair"><label>宽度 px<input v-model.number="recipe.width" data-testid="photo-processing-width" type="number" min="64" max="4096" step="1"></label><label>高度 px<input v-model.number="recipe.height" data-testid="photo-processing-height" type="number" min="64" max="4096" step="1"></label></div>
         <button class="btn-ghost" data-testid="photo-processing-use-size" @click="useSampleSize">使用这张照片的尺寸</button>
         <label>适配方式<select v-model="recipe.fit"><option value="contain">等比完整显示</option><option value="cover">等比铺满裁切</option></select></label>
-        <label class="check"><input v-model="recipe.cutout" data-testid="photo-processing-cutout" type="checkbox" :disabled="!modelReady"> 人像自动抠图</label>
-        <p v-if="!modelReady" class="muted">本地抠图组件缺失，请安装完整安装包。</p>
+        <label class="check"><input v-model="recipe.cutout" data-testid="photo-processing-cutout" type="checkbox" :disabled="!modelReady && !qualityReady"> 人像自动抠图</label>
+        <p v-if="!modelReady && !qualityReady" class="muted">本地抠图组件缺失，请安装完整安装包。</p>
         <label class="check"><input v-model="recipe.subjectFit" type="checkbox"> 按可见主体适配尺寸</label>
         <label class="check"><input v-model="recipe.faceAlign" data-testid="photo-processing-face-align" type="checkbox" :disabled="!faceReady"> 人物大小与眼睛高度自动对齐</label>
         <template v-if="recipe.faceAlign"><label>脸部高度占画面 {{ Math.round(recipe.faceHeight * 100) }}%<input v-model.number="recipe.faceHeight" data-testid="photo-processing-face-height" type="range" min=".08" max=".8" step=".01"></label><label>眼睛距顶部 {{ Math.round(recipe.eyeY * 100) }}%<input v-model.number="recipe.eyeY" data-testid="photo-processing-eye-y" type="range" min=".1" max=".75" step=".01"></label><p class="muted">仅自动对齐单人照片；无人脸或多人照片保留普通适配并标记检查。</p></template>
@@ -212,6 +250,7 @@ onBeforeUnmount(() => { alive = false; generation++; clearTimeout(previewTimer);
     <div v-if="opened && samples.length" class="processing-actions"><button class="btn-primary" data-testid="photo-processing-apply" :disabled="!canEdit || previewing || !previewAsset" @click="applyAll">{{ rowId ? '仅应用此人的设置' : `应用到全部 ${uniqueCount} 张照片` }}</button><button v-if="state?.enabled || singleSaved?.override" data-testid="photo-processing-reset" class="btn-ghost" :disabled="applying" @click="reset">{{ rowId ? '恢复统一样板' : '恢复全部原始照片' }}</button><span v-if="applying" role="status">{{ progress ? `${progress.index} / ${progress.total}` : '准备中…' }}</span><button v-if="applying && !rowId" class="btn-ghost" :disabled="canceling" @click="cancel">{{ canceling ? '当前照片完成后停止…' : '取消处理' }}</button></div>
     <p v-if="error" class="processing-error" role="alert">{{ error }}</p><p v-if="notice" class="processing-notice" role="status">{{ notice }}</p>
     <DesignImageEditor v-if="pixelEdit" :layer="pixelEdit.layer" :asset="pixelEdit.asset" :restore-asset="pixelEdit.restoreAsset" mode="mask" :busy="applying" :apply-error="error" @apply="applySingle" @cancel="!applying && (pixelEdit = null)" />
+    <PhotoSubjectLasso v-if="lassoOpen" :src="originalUrl" :initial="subjectPolygon || legacyProtectPolygon" @apply="applyLasso" @cancel="lassoOpen = false" />
   </section>
 </template>
 
@@ -222,6 +261,9 @@ h2 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 16px; }
 .processing-heading p, .muted { margin: 6px 0; color: var(--stone); font-size: 12px; line-height: 1.6; }
 .processing-editor { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 22px; margin-top: 18px; }
 .sample-area { min-width: 0; }
+.model-options { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; margin-top:10px; }
+.model-option { flex-direction:row; align-items:center; gap:7px; }
+.model-option select { width:auto; max-width:100%; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--ink-2); }
 input:not([type="checkbox"]), select { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--input-bg); color: var(--ink); font: inherit; }
 input[type="range"] { padding: 0; accent-color: var(--cinnabar); }

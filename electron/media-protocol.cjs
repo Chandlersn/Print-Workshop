@@ -41,7 +41,7 @@ function registerMediaProtocol(targetSession) {
        *
        * 边车缺失 / 损坏时退回「按给定路径直读」——与加这条之前的行为完全一致。
        */
-      const poolMatch = /^(design-assets|ephemeral-assets)\/([a-f0-9]{64})\.(png|jpe?g)$/i.exec(rel)
+      const poolMatch = /^(design-assets|ephemeral-assets|photo-assets)\/([a-f0-9]{64})\.(png|jpe?g)$/i.exec(rel)
       if (poolMatch) {
         try {
           const asset = require('./designs.cjs').assetInfo(`asset_${poolMatch[2]}`)

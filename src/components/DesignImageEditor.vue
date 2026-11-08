@@ -11,7 +11,7 @@ const dialog = ref(null), board = ref(null), imageViewport = ref(null), sourceIm
 const tool = ref(props.mode === 'mask' ? 'maskErase' : props.mode === 'erase' ? 'brush' : 'crop')
 const restoreImage = ref(null), restoreLoaded = ref(false), maskSoftness = ref(.5)
 const maskTool = computed(() => tool.value === 'maskErase' || tool.value === 'maskRestore')
-const editTitle = computed(() => maskTool.value ? '抠图边缘修补' : tool.value === 'crop' ? '裁剪图片' : tool.value === 'clone' ? '仿制图章' : '魔法擦除')
+const editTitle = computed(() => tool.value === 'maskErase' ? '精细擦除' : tool.value === 'maskRestore' ? '恢复主体' : tool.value === 'crop' ? '裁剪图片' : tool.value === 'clone' ? '仿制图章' : '魔法擦除')
 const redraw = ref(true)
 const pendingCrop = ref(copy(props.layer.crop))
 // Previous transparent edits stay independent of the new repair selection.
@@ -43,6 +43,7 @@ let disposed = false, repairRevision = 0, applyAfterPreview = false, refreshRequ
 const rect = ref({ x: props.layer.crop.x * props.asset.width, y: props.layer.crop.y * props.asset.height, w: props.layer.crop.w * props.asset.width, h: props.layer.crop.h * props.asset.height })
 const zoom = ref(1), size = ref(Math.min(8, Math.max(props.asset.width, props.asset.height)))
 const cursor = ref(null), error = ref(''), loaded = ref(false)
+const recognizing = ref(props.mode === 'erase')
 const viewport = ref({ w: window.innerWidth, h: window.innerHeight })
 const fit = computed(() => Math.min(1, Math.max(1, viewport.value.w) / props.asset.width, Math.max(1, viewport.value.h) / props.asset.height))
 const scale = computed(() => fit.value * zoom.value)
@@ -54,6 +55,34 @@ const pointCount = computed(() => erasures.value.reduce((n, s) => n + (s.points?
 let drag = null, capturedPointer = null
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n))
 const round = n => Math.round(n * 1000) / 1000
+async function imageLoaded() {
+  if (props.mode !== 'erase') { loaded.value = true; return }
+  try {
+    // Earlier non-destructive erasures already make an opaque original transparent.
+    let transparent = previousErasures.value.length > 0
+    if (!transparent && props.asset.mime !== 'image/jpeg') {
+      const canvas = document.createElement('canvas'), side = 1024
+      const ctx = canvas.getContext('2d', { willReadFrequently:true })
+      if (!ctx) throw new Error('无法读取图片透明度')
+      for (let y = 0; y < props.asset.height && !transparent; y += side) {
+        for (let x = 0; x < props.asset.width && !transparent; x += side) {
+          if (disposed) return
+          canvas.width = Math.min(side, props.asset.width-x); canvas.height = Math.min(side, props.asset.height-y)
+          ctx.drawImage(sourceImage.value, x, y, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height)
+          const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+          for (let i = 3; i < pixels.length; i += 4) if (pixels[i] < 255) { transparent = true; break }
+          // Yield between tiles so large opaque PNGs do not freeze the editor.
+          if (!transparent) await new Promise(resolve => setTimeout(resolve, 0))
+        }
+      }
+    }
+    if (!disposed) tool.value = transparent ? 'maskErase' : 'brush'
+  } catch {
+    if (!disposed) error.value = '无法自动识别图片透明度，请手动选择魔法擦除或精细擦除。'
+  } finally {
+    if (!disposed) { recognizing.value = false; loaded.value = true }
+  }
+}
 function point(event) {
   const r = board.value.getBoundingClientRect()
   return { x: round(clamp((event.clientX - r.left) * props.asset.width / r.width, 0, props.asset.width)), y: round(clamp((event.clientY - r.top) * props.asset.height / r.height, 0, props.asset.height)) }
@@ -436,12 +465,12 @@ onBeforeUnmount(() => { disposed = true; cancelDrag(); invalidatePreview(); obse
       <header><h3 id="image-edit-title"><AppIcon :name="tool === 'crop' ? 'crop' : 'brush'" :size="20" /> {{ editTitle }}</h3><button class="icon-only" aria-label="&#x5173;&#x95ED;&#x56FE;&#x7247;&#x7F16;&#x8F91;" title="&#x5173;&#x95ED;" @click="$emit('cancel')"><AppIcon name="close" /></button></header>
       <div class="image-tools">
         <div class="tool-switch" role="group" aria-label="图片编辑工具">
-          <button v-if="restoreAsset" data-testid="image-tool-mask-erase" :aria-pressed="tool === 'maskErase'" @click="changeTool('maskErase')">擦除背景</button>
-          <button v-if="restoreAsset" data-testid="image-tool-mask-restore" :aria-pressed="tool === 'maskRestore'" :disabled="!restoreLoaded" @click="changeTool('maskRestore')">恢复主体</button>
-          <button :aria-pressed="tool === 'crop'" title="裁剪图片" @click="changeTool('crop')"><AppIcon name="crop" /> 裁剪</button>
-          <button data-testid="image-tool-brush" :aria-pressed="tool === 'brush'" title="拖动画笔擦除" @click="changeTool('brush')"><AppIcon name="brush" /> 画笔</button>
-          <button data-testid="image-tool-clone" :aria-pressed="tool === 'clone'" title="&#x70B9;&#x9009;&#x6E90;&#x533A;&#x57DF;&#xFF0C;&#x5728;&#x76EE;&#x6807;&#x4F4D;&#x7F6E;&#x6D82;&#x62B9;&#x590D;&#x5236;" @click="changeTool('clone')">&#x4EFF;&#x5236;&#x56FE;&#x7AE0;</button>
-          <button data-testid="image-tool-rect" :aria-pressed="tool === 'rect'" title="框选矩形区域擦除" @click="changeTool('rect')"><AppIcon name="rect" /> 矩形</button>
+          <button data-testid="image-tool-mask-erase" :disabled="!loaded" :aria-pressed="tool === 'maskErase'" @click="changeTool('maskErase')">精细擦除</button>
+          <button v-if="restoreAsset" data-testid="image-tool-mask-restore" :aria-pressed="tool === 'maskRestore'" :disabled="!loaded || !restoreLoaded" @click="changeTool('maskRestore')">恢复主体</button>
+          <button :disabled="!loaded" :aria-pressed="tool === 'crop'" title="裁剪图片" @click="changeTool('crop')"><AppIcon name="crop" /> 裁剪</button>
+          <button data-testid="image-tool-brush" :disabled="!loaded" :aria-pressed="tool === 'brush'" title="用周围画面修补涂抹区域" @click="changeTool('brush')"><AppIcon name="brush" /> 魔法擦除</button>
+          <button data-testid="image-tool-clone" :disabled="!loaded" :aria-pressed="tool === 'clone'" title="&#x70B9;&#x9009;&#x6E90;&#x533A;&#x57DF;&#xFF0C;&#x5728;&#x76EE;&#x6807;&#x4F4D;&#x7F6E;&#x6D82;&#x62B9;&#x590D;&#x5236;" @click="changeTool('clone')">&#x4EFF;&#x5236;&#x56FE;&#x7AE0;</button>
+          <button data-testid="image-tool-rect" :disabled="!loaded" :aria-pressed="tool === 'rect'" title="框选矩形区域修补" @click="changeTool('rect')"><AppIcon name="rect" /> 矩形修补</button>
         </div>
         <button v-if="tool === 'crop'" :aria-pressed="redraw" title="重新绘制裁剪框" @click="redraw = true"><AppIcon name="rect" /> 重画</button>
         <label v-if="tool === 'brush' || tool === 'clone' || maskTool">画笔直径 px <input v-model="size" data-testid="image-brush-size" type="number" min="1" step="1" :max="Math.max(asset.width, asset.height)" @change="size = brushDiameter"></label>
@@ -452,11 +481,12 @@ onBeforeUnmount(() => { disposed = true; cancelDrag(); invalidatePreview(); obse
         </div>
         <label>缩放 <select v-model.number="zoom" data-testid="image-edit-zoom"><option :value="1">适合窗口</option><option :value="2">放大 2 倍</option><option :value="4">放大 4 倍</option><option :value="8">放大 8 倍</option><option :value="16">放大 16 倍</option></select></label>
       </div>
-      <p v-if="maskTool" class="hint">{{ tool === 'maskRestore' ? '从同位置的原色图恢复误删内容。' : '涂抹区域变透明，可清理抠图残留。' }}柔边控制笔触边缘；可以撤销并与裁剪、图章交替使用。</p>
-      <p v-if="!maskTool" class="hint">原图 {{ asset.width }} × {{ asset.height }} px（按原图方向编辑） · {{ tool === 'crop' ? '\u62d6\u52a8\u88c1\u526a\u6846\uff0c\u6309 Enter \u786e\u8ba4\uff1bEsc \u53d6\u6d88\u3002' : tool === 'clone' ? (pickingCloneSource ? '\u5148\u70b9\u9009\u53d6\u6837\u6e90\uff1b\u53ef\u8f93\u5165\u5750\u6807\u7cbe\u786e\u8bbe\u7f6e\u3002' : '\u5728\u76ee\u6807\u4f4d\u7f6e\u62d6\u52a8\u6d82\u62b9\u590d\u5236\uff1bEnter \u5e94\u7528\u3002') : '\u62d6\u52a8\u64e6\u9664\uff0c\u677e\u5f00\u9f20\u6807\u81ea\u52a8\u4fee\u590d\uff1bEnter \u5e94\u7528\uff0cEsc \u53d6\u6d88\u3002' }}</p>
+      <p v-if="recognizing" class="hint">正在识别图片透明区域…</p>
+      <p v-else-if="maskTool" class="hint">{{ tool === 'maskRestore' ? '从同位置的原色图恢复误删内容。' : '涂抹区域变透明，可清理抠图残留。' }}柔边控制笔触边缘；可以撤销并与裁剪、图章交替使用。</p>
+      <p v-else class="hint">原图 {{ asset.width }} × {{ asset.height }} px（按原图方向编辑） · {{ tool === 'crop' ? '\u62d6\u52a8\u88c1\u526a\u6846\uff0c\u6309 Enter \u786e\u8ba4\uff1bEsc \u53d6\u6d88\u3002' : tool === 'clone' ? (pickingCloneSource ? '\u5148\u70b9\u9009\u53d6\u6837\u6e90\uff1b\u53ef\u8f93\u5165\u5750\u6807\u7cbe\u786e\u8bbe\u7f6e\u3002' : '\u5728\u76ee\u6807\u4f4d\u7f6e\u62d6\u52a8\u6d82\u62b9\u590d\u5236\uff1bEnter \u5e94\u7528\u3002') : '\u62d6\u52a8\u64e6\u9664\uff0c\u677e\u5f00\u9f20\u6807\u81ea\u52a8\u4fee\u590d\uff1bEnter \u5e94\u7528\uff0cEsc \u53d6\u6d88\u3002' }}</p>
       <div ref="imageViewport" class="image-viewport">
         <div ref="board" class="image-board" :style="{ width: `${asset.width * scale}px`, height: `${asset.height * scale}px` }" @pointerdown="down" @pointermove="cursor = point($event)" @pointerleave="cursor = null" @lostpointercapture="lostCapture" @contextmenu.prevent>
-          <img ref="sourceImage" v-show="!previewUrl" :src="source" :style="maskStyle" crossorigin="anonymous" draggable="false" alt="待编辑原图" @load="loaded = true" @error="error = '图片无法加载，请检查原图文件。'; loaded = false">
+          <img ref="sourceImage" v-show="!previewUrl" :src="source" :style="maskStyle" crossorigin="anonymous" draggable="false" alt="待编辑原图" @load="imageLoaded" @error="error = '图片无法加载，请检查原图文件。'; loaded = false; recognizing = false">
           <img v-if="restoreAsset" ref="restoreImage" :src="`pp://media/${restoreAsset.path.split('/').map(encodeURIComponent).join('/')}`" style="display:none" crossorigin="anonymous" alt="" @load="restoreLoaded = true" @error="error = '可恢复的原色图无法加载'; restoreLoaded = false">
           <img v-if="previewUrl" :src="previewUrl" :style="maskStyle" draggable="false" alt="修复效果预览">
           <svg :viewBox="`0 0 ${asset.width} ${asset.height}`" :width="asset.width * scale" :height="asset.height * scale" data-testid="image-edit-overlay">

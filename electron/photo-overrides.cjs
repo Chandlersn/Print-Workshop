@@ -10,13 +10,24 @@ const entries = () => loadJson('photo-overrides', { expect: 'array' }) || []
 const same = (entry, query) => entry.datasetId === query.datasetId && entry.rowId === query.rowId
   && entry.templateId === query.templateId && entry.layerId === query.layerId
 
+function designFor(ds, tpl, rowId) {
+  const index = ds.recordIds.indexOf(String(rowId))
+  if (index < 0) throw new Error('人员记录已不存在')
+  const individual = require('./record-designs.cjs').forRows(ds, tpl, [index]).get(String(rowId))
+  return { design: individual?.design || require('./render-engine.cjs').resolveTemplateDesign(tpl), individual: individual?.entry || null }
+}
+
+function isAbsorbed(individual, entry) {
+  return !!entry && individual?.absorbedPhotoOverrides?.[entry.layerId] === crypto.createHash('sha256').update(JSON.stringify(entry)).digest('hex')
+}
+
 function context({ datasetId, templateId, rowId, layerId }) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
   if (tpl.datasetId && tpl.datasetId !== ds.id) throw new Error('模板已关联其他名单')
   const index = ds.recordIds.indexOf(String(rowId))
   if (index < 0) throw new Error('人员记录已不存在')
-  const design = require('./render-engine.cjs').resolveTemplateDesign(tpl)
+  const { design } = designFor(ds, tpl, rowId)
   const layer = design?.layers.find(item => item.id === layerId && item.type === 'image' && item.variable && item.visible && !item.editorOnly)
   if (!layer) throw new Error('变量图框已不存在')
   const column = ds.photoMatchColumn
@@ -35,7 +46,7 @@ function entriesForDataset(datasetId) {
 function inspect(query) {
   const ds = dataset.getDataset(String(query.datasetId))
   const tpl = templates.getTemplate(String(query.templateId))
-  const design = require('./render-engine.cjs').resolveTemplateDesign(tpl)
+  const { design, individual } = designFor(ds, tpl, query.rowId)
   const layer = design?.layers.find(item => item.id === query.layerId && item.type === 'image' && item.variable)
   if (!layer) throw new Error('变量图框已不存在')
   const old = entries().find(entry => same(entry, query)) || null
@@ -43,9 +54,14 @@ function inspect(query) {
   try { current = context(query) } catch { current = null }
   const active = Boolean(old && current && old.matchColumn === current.column
     && old.photoKey === current.photoKey && old.assetId === current.match.assetId)
+  const applied = active && !isAbsorbed(individual, old)
   return {
     state: old ? (active ? 'active' : 'stale') : 'none',
-    fit: active ? old.fit : layer.fit, focal: active ? old.focal : layer.focal,
+    fit: applied ? old.fit : layer.fit, focal: applied ? old.focal : layer.focal,
+    position: applied && old.position ? old.position : { x: layer.x, y: layer.y },
+    size: applied && old.size ? old.size : { w: layer.w, h: layer.h },
+    rotation: layer.rotation,
+    defaultPosition: { x: layer.x, y: layer.y },
     defaultFit: layer.fit, defaultFocal: layer.focal,
     assetId: current?.match.assetId || null,
     displayAssetId: current ? require('./photo-processing.cjs').resolver(ds)(current.match.assetId, String(query.rowId)) : null,
@@ -58,11 +74,16 @@ function set(query) {
   const focal = query.focal
   if (!focal || !Number.isFinite(focal.x) || !Number.isFinite(focal.y)
     || focal.x < 0 || focal.x > 1 || focal.y < 0 || focal.y > 1) throw new Error('照片焦点必须在图框内')
+  const position = query.position
+  if (position !== undefined && (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)
+    || Math.abs(position.x) > 10000 || Math.abs(position.y) > 10000)) throw new Error('照片位置必须在有效范围内')
+  const size = query.size
+  if (size !== undefined && (!size || !Number.isFinite(size.w) || !Number.isFinite(size.h) || size.w < .01 || size.h < .01 || size.w > 10000 || size.h > 10000)) throw new Error('照片大小必须在有效范围内')
   const entry = {
     datasetId: current.ds.id, rowId: current.ds.recordIds[current.index], templateId: current.tpl.id,
     layerId: current.layer.id, matchColumn: current.column, photoKey: current.photoKey,
     assetId: current.match.assetId, fit: query.fit,
-    focal: { x: focal.x, y: focal.y }, updatedAt: new Date().toISOString(),
+    focal: { x: focal.x, y: focal.y }, ...(position ? { position: { x: position.x, y: position.y } } : {}), ...(size ? {size:{w:size.w,h:size.h}} : {}), updatedAt: new Date().toISOString(),
   }
   saveJson('photo-overrides', [...entries().filter(item => !same(item, entry)), entry])
   return inspect(entry)
@@ -102,7 +123,11 @@ function forRecords(ds, templateId, records, rowIndexes, matchResult) {
       if (!['cover', 'contain'].includes(entry.fit) || !entry.focal
         || !Number.isFinite(entry.focal.x) || !Number.isFinite(entry.focal.y)
         || entry.focal.x < 0 || entry.focal.x > 1 || entry.focal.y < 0 || entry.focal.y > 1) continue
-      styles[entry.layerId] = { fit: entry.fit, focal: entry.focal }
+      const position = entry.position
+      if (position && (!Number.isFinite(position.x) || !Number.isFinite(position.y) || Math.abs(position.x) > 10000 || Math.abs(position.y) > 10000)) continue
+      const size = entry.size
+      if (size && (!Number.isFinite(size.w) || !Number.isFinite(size.h) || size.w < .01 || size.h < .01 || size.w > 10000 || size.h > 10000)) continue
+      styles[entry.layerId] = { fit: entry.fit, focal: entry.focal, ...(position ? { position } : {}), ...(size ? { size } : {}) }
     }
     if (Object.keys(styles).length) result.set(records[item.rowIndex], styles)
   }

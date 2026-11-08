@@ -4,6 +4,7 @@ import PageHeader from '../components/PageHeader.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import DesignImageEditor from '../components/DesignImageEditor.vue'
 import DesignTextColorPicker from '../components/DesignTextColorPicker.vue'
+import TemplateFieldText from '../components/TemplateFieldText.vue'
 import { photoProcessingRevision, photoProcessingSample } from '../lib/photo-processing.js'
 import AppIcon from '../components/AppIcon.vue'
 import { cropImageLayer, referenceImageLayer } from '../../electron/design-image-edit.cjs'
@@ -63,6 +64,12 @@ async function refreshVariablePhotoSample() {
     if (!ds.photoMatchColumn || request !== photoSampleRequest) return
     const report = await window.printpress.photoReport({ datasetId, column: ds.photoMatchColumn })
     if (request !== photoSampleRequest) return
+    if (context.value?.origin === 'print') {
+      const rowIndex = ds.recordIds.indexOf(context.value.rowId)
+      const row = report.results.find(item => item.rowIndex === rowIndex && item.status === 'matched')
+      variablePhotoSample.value = row && !row.processingError ? `pp://media/${row.processedAssetId || row.assetId}` : ''
+      return
+    }
     const rows = report.results.filter(row => row.status === 'matched'), sample = rows.find(row => row.assetId === processing.state?.sampleAssetId) || rows[0]
     const preview = photoProcessingSample.value
     if (preview?.datasetId === datasetId && preview.column === ds.photoMatchColumn && rows.some(row => row.assetId === preview.sourceAssetId)) { variablePhotoSample.value = `pp://media/${preview.assetId}`; return }
@@ -151,6 +158,8 @@ const design = ref(normalizeDesign(blank()))
 const savedFingerprint = ref(fingerprint(design.value))
 const dirty = computed(() => fingerprint(design.value) !== savedFingerprint.value)
 const projects = ref([])
+const sharedProjects = computed(() => projects.value.filter(project => !project.recordOwner))
+const individualProjects = computed(() => projects.value.filter(project => project.recordOwner))
 const presets = ref([])
 const selectedIds = ref([])
 const inspectorPanel = ref(null)
@@ -532,6 +541,15 @@ const inputEpoch = ref(0)
 const canvasWidth = computed(() => 720 * zoom.value)
 const pxPerMm = computed(() => canvasWidth.value / design.value.artboard.w)
 const canvasHeight = computed(() => design.value.artboard.h * pxPerMm.value)
+function recordFieldStyle(field) {
+  const align = ['center','right'].includes(field.align) ? field.align : 'left'
+  const family = fonts.value.uploaded.find(font => font.family === field.fontFamily)?.cssFamily || field.fontFamily
+  const size = Math.max(1, Math.min(500, Number(field.fontSize) || 12))
+  return { left:`${field.x}%`, top:`${field.y}%`, transform:align === 'center' ? 'translateX(-50%)' : align === 'right' ? 'translateX(-100%)' : 'none',
+    width:Number(field.boxWidth)>0 ? `${field.boxWidth}%` : undefined, height:Number(field.boxHeight)>0 ? `${field.boxHeight}%` : undefined,
+    fontSize:`${size * 25.4 / 72 * pxPerMm.value}px`, color:/^#[0-9a-f]{3,8}$/i.test(field.color || '') ? field.color : undefined,
+    fontFamily:family ? JSON.stringify(family) : 'inherit', fontWeight:field.bold ? 700 : 400, textAlign:align }
+}
 watch([zoom, focusCanvas, canvasWidth, canvasHeight], () => nextTick(updateNavigator))
 /**
  * 标尺刻度与网格线的位置（毫米）。
@@ -663,7 +681,7 @@ function cancelPending() {
 }
 function returnToTemplate(request = context.value) {
   if (!request) return
-  designerNav.result = { nonce: request.nonce, templateKey: request.templateKey, canceled: true }
+  designerNav.result = { nonce: request.nonce, templateKey: request.templateKey, origin:request.origin, datasetId:request.datasetId, templateId:request.templateId, rowId:request.rowId, canceled: true }
   if (request === context.value) context.value = null
 }
 function newDesign() {
@@ -707,7 +725,7 @@ const recentDesigns = computed(() => {
    *    只在「常用」里折叠，工程库仍列全部（那是真实清单，不能替用户藏工程）。
    */
   const seen = new Set()
-  return [...projects.value]
+  return [...sharedProjects.value]
     .filter((item) => item.lastUsedAt !== null)
     .sort((a, b) => String(b.lastUsedAt || b.updatedAt).localeCompare(String(a.lastUsedAt || a.updatedAt)))
     .filter((item) => (seen.has(item.name) ? false : (seen.add(item.name), true)))
@@ -791,13 +809,39 @@ async function loadProject(project) {
   return protectDraft(async () => {
     busy.value = true
     try {
-      replaceDesign(await window.printpress.getDesign(project.id), context.value)
+      let loaded = await window.printpress.getDesign(project.id)
+      if (context.value?.origin === 'print') { loaded = clone(loaded); delete loaded.id; loaded.revision = 0; loaded.name = `${loaded.name} · 单人副本` }
+      replaceDesign(loaded, context.value, context.value?.origin !== 'print')
       // 先记使用、再刷列表：反过来的话下拉里拿到的还是记录前的顺序。
       await markUsed(project.id)
       await refreshProjects()
     }
     catch (err) { fail(err) }
     finally { busy.value = false }
+  })
+}
+function canOpenIndividual(project) {
+  if (context.value?.origin !== 'print') return true
+  const owner = project.recordOwner
+  return owner?.datasetId === context.value.datasetId && owner?.templateId === context.value.templateId && owner?.rowId === context.value.rowId
+}
+async function loadIndividualProject(project) {
+  if (!project?.id || !canOpenIndividual(project) || busy.value) return
+  return protectDraft(async () => {
+    busy.value = true
+    try {
+      const loaded = clone(await window.printpress.getDesign(project.id))
+      const request = context.value?.origin === 'print' ? context.value : null
+      if (request) for (const layer of loaded.layers || []) if (layer.variable && request.photoStyles?.[layer.id]) {
+        const style = request.photoStyles[layer.id]
+        layer.fit = style.fit; layer.focal = clone(style.focal)
+        if (style.position) { layer.x = style.position.x; layer.y = style.position.y }
+        if (style.size) { layer.w = style.size.w; layer.h = style.size.h }
+      }
+      replaceDesign(loaded, request, !request || !Object.keys(request.photoStyles || {}).length)
+      await markUsed(project.id); await refreshProjects()
+      if (!request) message.value = '已打开单人海报工程；如需应用，请从打印中心选择对应人员后打开。'
+    } catch (err) { fail(err) } finally { busy.value = false }
   })
 }
 async function save(copy = false, apply = false) {
@@ -809,7 +853,9 @@ async function save(copy = false, apply = false) {
     const submitted = normalizeDesign(clone(design.value))
     if (copy) { delete submitted.id; submitted.revision = 0; submitted.name = `${submitted.name} 副本` }
     const contentBeforeCopy = fingerprint(design.value)
-    const saved = await window.printpress.saveDesign(submitted)
+    const ownerSource = context.value?.origin === 'print' ? context.value : projects.value.find(project => project.id === design.value.id)?.recordOwner
+    const owner = ownerSource ? {datasetId:ownerSource.datasetId,templateId:ownerSource.templateId,rowId:ownerSource.rowId} : undefined
+    const saved = await window.printpress.saveDesign(submitted, owner)
     // Edits made while the write is in flight are retained and remain dirty.
     if (fingerprint(design.value) === contentBeforeCopy) { design.value = normalizeDesign(saved); sessionToken.value++ }
     else {
@@ -824,7 +870,8 @@ async function save(copy = false, apply = false) {
     await refreshProjects()
     persistDraft()
     if (apply && context.value) {
-      designerNav.result = { nonce: context.value.nonce, templateKey: context.value.templateKey, designRef: { id: saved.id, revision: saved.revision } }
+      if (context.value.origin === 'print') await window.printpress.setRecordDesign({ datasetId:context.value.datasetId, templateId:context.value.templateId, rowId:context.value.rowId, baseKey:context.value.baseKey, photoRevision:context.value.photoRevision, recordRevision:context.value.recordRevision, overrideRevision:context.value.overrideRevision, designRef:{ id:saved.id, revision:saved.revision } })
+      designerNav.result = { nonce: context.value.nonce, templateKey: context.value.templateKey, origin:context.value.origin, datasetId:context.value.datasetId, templateId:context.value.templateId, rowId:context.value.rowId, designRef: { id: saved.id, revision: saved.revision } }
       if (dirty.value) message.value += '模板使用刚刚保存的版本。'
     }
   } catch (err) { fail(err) }
@@ -856,7 +903,17 @@ async function consumeRequest(request) {
       if (request.designRef) value = await window.printpress.getDesign(request.designRef.id, request.designRef.revision)
       else if (request.background) value = await window.printpress.importDesignBackground({ background: request.background, w: request.artboard.w, h: request.artboard.h, name: request.name || '模板底图' })
       else value = { ...blank(request.artboard.w, request.artboard.h), name: request.name || '模板底图' }
-      replaceDesign(value, clone(request), !!request.designRef)
+      if (request.origin === 'print') {
+        value = clone(value)
+        if (!request.hasOverride) { delete value.id; value.revision = 0; value.name = `${String(value.name || '底图').slice(0, 80)} · 第 ${request.rowIndex + 1} 行` }
+        for (const layer of value.layers || []) if (layer.variable && request.photoStyles?.[layer.id]) {
+          layer.fit = request.photoStyles[layer.id].fit; layer.focal = clone(request.photoStyles[layer.id].focal)
+          if (request.photoStyles[layer.id].position) { layer.x = request.photoStyles[layer.id].position.x; layer.y = request.photoStyles[layer.id].position.y }
+          if (request.photoStyles[layer.id].size) { layer.w = request.photoStyles[layer.id].size.w; layer.h = request.photoStyles[layer.id].size.h }
+        }
+      }
+      replaceDesign(value, clone(request), !!request.designRef && (request.origin !== 'print' || request.hasOverride) && !Object.keys(request.photoStyles || {}).length)
+      if (request.origin === 'print') { await refreshPortraitAvailability(); await refreshVariablePhotoSample() }
     } catch (err) { fail(err) }
     finally { busy.value = false }
   }, () => returnToTemplate(request))
@@ -2225,7 +2282,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           </div>
         </details>
         <button data-testid="design-save" class="primary" :disabled="busy" @click="save()"><AppIcon name="save" /> {{ busy ? '处理中…' : '保存工程' }}</button>
-        <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">保存并应用到模板</button>
+        <button v-if="context" data-testid="design-apply" class="primary" :disabled="busy || dimensionMismatch" @click="save(false, true)">{{ context.origin === 'print' ? '保存并应用到此人' : '保存并应用到模板' }}</button>
       </template>
     </PageHeader>
     <div v-if="error" class="notice error" role="alert">{{ error }}<button @click="error = ''">关闭</button></div>
@@ -2242,8 +2299,8 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
       <button data-testid="design-export-done-close" title="只关掉这条提示，不影响已导出的文件" @click="lastExport = null">关闭</button>
     </div>
     <div v-if="context" class="notice context-note">
-      正在编辑模板“{{ context.name || '当前模板' }}”的底图 · 成品 {{ context.artboard.w }} × {{ context.artboard.h }} mm
-      <button :disabled="busy" @click="returnToTemplate()">返回模板（不应用）</button>
+      <template v-if="context.origin === 'print'">正在编辑第 {{ context.rowIndex + 1 }} 行的独立底图，只应用于此人；名单字段仅供参考，在模板页调整<span v-if="context.stale">；共用底图已更新，请仔细核对</span></template><template v-else>正在编辑模板“{{ context.name || '当前模板' }}”的底图 · 成品 {{ context.artboard.w }} × {{ context.artboard.h }} mm</template>
+      <button :disabled="busy" @click="returnToTemplate()">{{ context.origin === 'print' ? '返回打印中心（不应用）' : '返回模板（不应用）' }}</button>
       <button @click="context = null">转为独立制作</button>
     </div>
     <div v-if="dimensionMismatch" class="notice error">当前画布尺寸与模板不同，应用前请调整。<button @click="adoptTemplateSize">采用模板尺寸（图层不缩放）</button></div>
@@ -2259,16 +2316,26 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <button @click="add('line')"><AppIcon name="line" /> 直线</button>
         </div>
         <details class="projects-panel" data-testid="designer-projects">
-        <summary><span><AppIcon name="folder" :size="16" /> 工程库</span><span class="panel-count">{{ projects.length }}</span></summary>
-        <p v-if="!projects.length" class="muted">保存后可在这里重新打开。</p>
+        <summary><span><AppIcon name="folder" :size="16" /> 批量底图工程</span><span class="panel-count">{{ sharedProjects.length }}</span></summary>
+        <p v-if="!sharedProjects.length" class="muted">保存后可在这里重新打开。</p>
         <div class="project-list">
-          <div v-for="project in projects" :key="project.id" class="project-row" :class="{ current: project.id === design.id }">
+          <div v-for="project in sharedProjects" :key="project.id" class="project-row" :class="{ current: project.id === design.id }">
             <button class="project-open" :disabled="busy" :title="project.name" @click="loadProject(project)">
               <b>{{ project.name }}</b><small>{{ project.artboard?.w }} × {{ project.artboard?.h }} mm · v{{ project.revision }}</small>
             </button>
             <button class="icon-button" :disabled="busy" :aria-label="`删除工程 ${project.name}`" :title="`删除工程 ${project.name}`" @click="deleteProject(project)"><AppIcon name="trash" :size="15" /></button>
           </div>
         </div>
+        </details>
+        <details class="projects-panel" data-testid="designer-individual-projects">
+          <summary><span><AppIcon name="folder" :size="16" /> 单人海报工程</span><span class="panel-count">{{ individualProjects.length }}</span></summary>
+          <p class="muted">可打开查看；要应用到人员，请从打印中心选择对应人员后打开。恢复默认后可删除不再使用的工程。</p>
+          <div class="project-list">
+            <div v-for="project in individualProjects" :key="project.id" class="project-row" :class="{ current: project.id === design.id }">
+              <button class="project-open" :disabled="busy || !canOpenIndividual(project)" :title="canOpenIndividual(project) ? project.name : '该工程属于其他人员'" @click="loadIndividualProject(project)"><b>{{ project.name }}</b><small>单人底图 · v{{ project.revision }}</small></button>
+              <button class="icon-button" :disabled="busy" :aria-label="`删除工程 ${project.name}`" :title="`删除工程 ${project.name}`" @click="deleteProject(project)"><AppIcon name="trash" :size="15" /></button>
+            </div>
+          </div>
         </details>
         <h3>图层 <span>{{ design.layers.length }} · 上方在前</span></h3>
         <div class="layer-actions" role="toolbar" aria-label="图层操作">
@@ -2328,6 +2395,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <div ref="canvasScroll" class="canvas-scroll" :class="{ 'drop-active': dropActive }" @scroll.passive="updateNavigator" @pointerdown.self="selectedIds = []" @dragenter.prevent="onDragEnter" @dragover.prevent="onDragOver" @dragleave.prevent="onDragLeave" @drop.prevent="onDrop">
           <div ref="stage" data-testid="design-stage" class="design-stage" :class="{ 'pixel-picking': pickingTextColor }" :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }" @pointerdown.self="selectedIds = []">
             <DesignSurface :design="surfaceDesign" :width="canvasWidth" :height="canvasHeight" :photos="variablePhotoUrls" :show-editor-only="true" @error="fail" />
+            <div v-if="context?.origin === 'print'" class="record-field-overlay" data-testid="design-record-fields" aria-hidden="true"><div v-for="(field, index) in context.previewFields || []" :key="index" class="record-field" :style="recordFieldStyle(field)"><TemplateFieldText :field="field" :text="String(context.previewRecord?.[field.column || field.key] ?? '')" /></div></div>
             <!-- 布局网格：只是画布上的辅助层，不进工程、不进 renderDesign（见 I-45） -->
             <div v-if="gridVisible" data-testid="design-grid-overlay" class="grid-overlay" :style="gridOverlayStyle" aria-hidden="true"></div>
             <div v-if="editingText" class="text-edit-layer" :style="textEditLayerStyle">
@@ -2843,6 +2911,8 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .inline-text-editor { position: absolute; box-sizing: border-box; margin: 0; padding: 0; border: 0; background: transparent; resize: none; overflow: hidden; transform-origin: center center; pointer-events: auto; caret-color: currentColor; outline: 1px dashed var(--cinnabar); outline-offset: 2px; }
 .design-stage.pixel-picking, .design-stage.pixel-picking * { cursor: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2224%22 height=%2224%22 viewBox=%220 0 24 24%22%3E%3Cpath d=%22M4 20l1-4L16 5l3 3L8 19z%22 fill=%22%23fff%22 stroke=%22%231b2730%22 stroke-width=%221.6%22/%3E%3Cpath d=%22M14 7l3 3m-5-5l3-3 5 5-3 3%22 fill=%22%2371d3e8%22 stroke=%22%231b2730%22 stroke-width=%221.6%22/%3E%3C/svg%3E") 3 20, crosshair !important; }
 .design-stage { position: relative; flex-shrink: 0; background: #fff; box-shadow: 0 3px 16px #0003; margin: 0 auto; isolation: isolate; }
+.record-field-overlay { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.record-field { position:absolute; white-space:nowrap; line-height:normal; }
 .layer-hit { position: absolute; cursor: move; touch-action: none; outline: 1px solid transparent; transform-origin: center; user-select: none; }
 .layer-hit:hover { outline-color: #b03a2e88; } .layer-hit.chosen { outline: 1px solid #b03a2e; z-index: 2; }
 .layer-hit.locked { cursor: default; } .layer-hit.locked.chosen { outline: 1px dashed #8c8577; }

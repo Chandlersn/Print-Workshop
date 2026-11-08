@@ -19,6 +19,7 @@ const TASK_HISTORY_ARCHIVE = 'photo-import-tasks-archive'
 const TASK_HISTORY_LIMIT = 100
 const TASK_HISTORY_ARCHIVE_LIMIT = 500
 let importing = false
+let migrationEpoch = 0
 let activeTaskId = null
 const canceledTasks = new Set()
 const bindings = () => loadJson('photo-bindings', { expect: 'array' }) || []
@@ -461,7 +462,7 @@ async function importFolder({ datasetId, column, folder, taskId: requestedTaskId
           ensureTaskDirectory(taskId, 'content')
           fs.writeFileSync(staged, bytes, { flag: 'wx' })
           checkCanceled()
-          const asset = designs.importImageBuffer(fs.readFileSync(staged), path.basename(file.name), 'ephemeral')
+          const asset = designs.importImageBuffer(fs.readFileSync(staged), path.basename(file.name), 'photo')
           library.upsert(asset, { role: 'photo' }, { makeThumbnail })
           merged.set(group.key, [{ name: file.name, assetId: asset.id }])
         }
@@ -495,7 +496,15 @@ async function importFolder({ datasetId, column, folder, taskId: requestedTaskId
       saveJson('photo-bindings', [...bindings().filter(item => item.datasetId !== datasetId), { ...task.binding, taskId }])
     })
     checkpoint('after-publish')
-    for (const file of task.binding.files) if (file.assetId) designs.setAssetSource(file.assetId, 'managed')
+    // Existing bindings from older versions may still point at shared design
+    // storage; copy them into the photo pool without removing the old copy.
+    for (const file of task.binding.files) if (file.assetId) {
+      const meta = require('./asset-storage.cjs').resolveAssetPath(`photo-assets/${file.assetId.slice(6)}.json`)
+      if (!fs.existsSync(meta)) {
+        const { buffer } = designs.assetBytes(file.assetId)
+        designs.importImageBuffer(buffer, file.name, 'photo')
+      }
+    }
     const result = await report({ datasetId, column })
     task.state = 'completed'
     task.counts = result.counts
@@ -536,6 +545,85 @@ function cancelImport(taskId) {
   return { accepted: true }
 }
 
+/** Remove selected file associations; only unreferenced photo-pool originals are reclaimed. */
+function deletePhotos({ datasetId, column, names, all = false, protectedIds = [] }) {
+  const ds = requireColumn(String(datasetId), String(column))
+  if (!ds.photoMatchColumn || ds.photoMatchColumn !== column) throw new Error('配图列已变化，请重新检查照片')
+  if (importing) throw new Error('照片正在导入，请等待完成后再删除')
+  const processing = require('./photo-processing.cjs')
+  processing.assertPhotoChangeIdle(ds.id)
+  const current = bindings().slice().reverse().find(item => item.datasetId === ds.id && item.column === column)
+  if (!current) throw new Error('当前名单没有已导入的照片')
+  if (typeof all !== 'boolean' || (!all && (!Array.isArray(names) || !names.length || names.length > LIMITS.photos))) throw new Error('请先选择要删除的照片')
+  if (!Array.isArray(protectedIds) || protectedIds.length > 5000 || protectedIds.some(id => typeof id !== 'string' || !/^asset_[a-f0-9]{64}$/.test(id))) throw new Error('草稿素材清单无效，请保存底图后重试')
+  const selected = all ? new Set((current.files || []).map(file => file.name)) : new Set(names)
+  if ([...selected].some(name => typeof name !== 'string' || !current.files.some(file => file.name === name))) throw new Error('照片清单已变化，请刷新后重新选择')
+  const removed = current.files.filter(file => selected.has(file.name))
+  if (!removed.length) throw new Error('没有可删除的照片')
+  const remaining = current.files.filter(file => !selected.has(file.name))
+  const remainingIds = new Set(remaining.map(file => file.assetId).filter(Boolean))
+  const removedIds = [...new Set(removed.map(file => file.assetId).filter(id => id && !remainingIds.has(id)))]
+  const matches = matchPhotos(ds.rows, column, current.files).results
+  const rowIds = all ? ds.recordIds : matches.filter(row => row.status === 'matched' && selected.has(row.fileName)).map(row => ds.recordIds[row.rowIndex])
+  migrationEpoch++
+  const candidates = new Set([...removedIds, ...processing.forgetRemovedPhotos(ds.id, rowIds, removedIds, remaining.length === 0)])
+  const rows = new Set(rowIds)
+  const overrides = loadJson('photo-overrides', { expect: 'array' }) || []
+  saveJson('photo-overrides', overrides.filter(entry => entry.datasetId !== ds.id || !rows.has(entry.rowId)))
+  const nextBindings = bindings().map(item => item === current || item.datasetId === ds.id && item.column === column ? { ...item, files: remaining, ignored: all ? [] : item.ignored } : item)
+  const stillBound = new Set(nextBindings.flatMap(binding => (binding.files || []).map(file => file.assetId).filter(Boolean)))
+  const oldCache = loadJson('photo-processing-cache', { expect: 'array' }) || []
+  const nextCache = oldCache.filter(entry => {
+    if (!removedIds.includes(entry.sourceAssetId) || stillBound.has(entry.sourceAssetId)) return true
+    for (const id of [entry.assetId, entry.restoreAssetId]) if (id) candidates.add(id)
+    return false
+  })
+  saveJson('photo-processing-cache', nextCache)
+  saveJson('photo-bindings', nextBindings)
+  let reclaimed = 0, cleanupWarning = ''
+  try {
+    library.releasePhotoEntries(removedIds)
+    const refs = library.referencedAssetIds({ protectedIds }), storage = require('./asset-storage.cjs'), root = storage.poolDir(storage.PHOTO_POOL)
+    if (fs.existsSync(root)) {
+      const rootStat = fs.lstatSync(root), realBase = fs.realpathSync(process.env.PRINTPRESS_DATA_DIR), realRoot = fs.realpathSync(root)
+      const rel = path.relative(realBase, realRoot)
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('照片目录不安全，已保留文件')
+      for (const id of candidates) {
+        if (!/^asset_[a-f0-9]{64}$/.test(id) || refs.has(id)) continue
+        let changed = false
+        for (const ext of ['png', 'jpg', 'jpeg', 'json']) {
+          const target = storage.resolveAssetPath(`photo-assets/${id.slice(6)}.${ext}`)
+          try { const stat = fs.lstatSync(target); if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('照片文件类型无效'); fs.unlinkSync(target); changed = true }
+          catch (error) { if (error.code !== 'ENOENT') throw error }
+        }
+        if (changed) reclaimed++
+      }
+    }
+  } catch (error) { cleanupWarning = error.message }
+  return { removed: removed.length, affectedRows: rowIds.length, reclaimed, cleanupWarning }
+}
+
+/** Copy legacy referenced photos to their own pool; leave old copies intact. */
+async function migrateLegacyPhotoAssets() {
+  const started = migrationEpoch, ids = new Set()
+  for (const binding of bindings()) for (const file of binding.files || []) if (file.assetId) ids.add(file.assetId)
+  for (const state of loadJson('photo-processing', { expect: 'array' }) || []) for (const [source, result] of Object.entries(state.items || {})) { ids.add(source); if (result) ids.add(result) }
+  for (const entry of loadJson('photo-processing-singles', { expect: 'array' }) || []) for (const id of [entry.sourceAssetId, entry.assetId, entry.restoreAssetId]) if (id) ids.add(id)
+  for (const entry of loadJson('photo-processing-cache', { expect: 'array' }) || []) for (const id of [entry.sourceAssetId, entry.assetId, entry.restoreAssetId]) if (id) ids.add(id)
+  let migrated = 0, failed = 0
+  for (const id of ids) {
+    if (started !== migrationEpoch) break
+    if (!/^asset_[a-f0-9]{64}$/.test(id)) { failed++; continue }
+    const meta = require('./asset-storage.cjs').resolveAssetPath(`photo-assets/${id.slice(6)}.json`)
+    if (!fs.existsSync(meta)) {
+      try { const { asset, buffer } = designs.assetBytes(id); designs.importImageBuffer(buffer, asset.name, 'photo'); migrated++ }
+      catch { failed++ }
+    }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  return { migrated, failed, interrupted: started !== migrationEpoch }
+}
+
 function recoverPendingImports() {
   const root = resolveInsideDataDir(STAGING_DIR)
   if (!fs.existsSync(root)) return { recovered: [], rolledBack: [], failed: [] }
@@ -551,7 +639,8 @@ function recoverPendingImports() {
       const published = bindings().some(binding => binding.taskId === task.taskId)
       if (published) {
         for (const file of task.binding.files.filter(item => item.assetId)) {
-          designs.setAssetSource(file.assetId, 'managed')
+          const { buffer } = designs.assetBytes(file.assetId)
+          designs.importImageBuffer(buffer, file.name, 'photo')
           library.upsert(designs.assetInfo(file.assetId), { role: 'photo' }, {})
         }
         rollbackTask({ ...task, assets: task.assets.filter(asset => !task.binding.files.some(file => file.assetId === asset.assetId)) })
@@ -701,7 +790,7 @@ async function exportIssues({ datasetId, column, rows, identifierKey, savePath }
  * （原件 / 降采样派生件），URL 由渲染层按档位决定（见 output-dpi.cjs 与 render-engine）。
  * 存 URL 会让「降采样」变成一个必须在数据层就定死的选择。
  */
-function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateOnly = false, knownGeometry, templateId } = {}) {
+function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateOnly = false, knownGeometry, templateId, needsPhoto } = {}) {
   const ds = dataset.getDataset(datasetId)
   const all = bindings()
   const byRecord = new Map(records.map(row => [row, Object.fromEntries(columns.map(key => [key, null]))]))
@@ -723,6 +812,7 @@ function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateO
   const overrides = templateId ? require('./photo-overrides.cjs').forRecords(ds, templateId, records, rowIndexes, result) : new Map()
   const processedPhoto = require('./photo-processing.cjs').resolver(ds)
     for (const item of result.results) {
+      if (needsPhoto && !needsPhoto.has(rowIndexes?.[item.rowIndex] ?? item.rowIndex)) continue
       if (item.status === 'missing' || item.status === 'empty') continue
       if (item.status !== 'matched') {
         if (estimateOnly) { unresolved++; continue }
@@ -748,4 +838,4 @@ function prepareRows(datasetId, columns, records, rowIndexes = null, { estimateO
   return { byRecord, assets: [...assets], geometry, overrides, unresolved }
 }
 
-module.exports = { importFolder, previewImport, cancelImport, report, preflightRows, exportIssues, scanFolder, prepareRows, recoverPendingImports, listTasks, saveTask, TASK_HISTORY, TASK_HISTORY_ARCHIVE, TASK_HISTORY_LIMIT, TASK_HISTORY_ARCHIVE_LIMIT, LIMITS }
+module.exports = { importFolder, previewImport, cancelImport, deletePhotos, migrateLegacyPhotoAssets, report, preflightRows, exportIssues, scanFolder, prepareRows, recoverPendingImports, listTasks, saveTask, TASK_HISTORY, TASK_HISTORY_ARCHIVE, TASK_HISTORY_LIMIT, TASK_HISTORY_ARCHIVE_LIMIT, LIMITS }

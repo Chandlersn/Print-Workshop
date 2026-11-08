@@ -9,7 +9,7 @@ app.disableHardwareAcceleration(); app.commandLine.appendSwitch('disable-gpu'); 
 app.on('window-all-closed', () => {})
 protocol.registerSchemesAsPrivileged([{ scheme:'pp', privileges:{standard:true,secure:true,supportFetchAPI:true,corsEnabled:true} }])
 let ui, checks = 0
-const timer = setTimeout(() => { console.error('PHOTO_PROCESSING_TIMEOUT'); app.exit(1) }, 180000)
+const timer = setTimeout(() => { console.error('PHOTO_PROCESSING_TIMEOUT'); app.exit(1) }, 360000)
 const ok = (value, label) => { assert.ok(value, label); checks++; console.log('ok - ' + label) }
 const evaluate = code => ui.webContents.executeJavaScript(code)
 async function wait(code, label, timeout = 30000) {
@@ -27,8 +27,23 @@ app.whenReady().then(async () => {
     try { const id = decodeURIComponent(new URL(request.url).pathname.slice(1)); const file = id.startsWith('asset_') ? path.join(process.env.PRINTPRESS_DATA_DIR, designs.assetInfo(id).path) : path.join(process.env.PRINTPRESS_DATA_DIR, id); return net.fetch(pathToFileURL(file).href) }
     catch { return new Response('missing', {status:404}) }
   })
-  const portrait = process.env.PRINTPRESS_PORTRAIT_FIXTURE
-  const originalBytes = fs.readFileSync(portrait || path.join(__dirname, 'fixtures/design-portrait.jpg'))
+  const portrait = process.env.PRINTPRESS_PORTRAIT_FIXTURE, qualityFixture = process.env.PRINTPRESS_QUALITY_FIXTURE
+  const fixtureBytes = fs.readFileSync(portrait || qualityFixture || path.join(__dirname, 'fixtures/design-portrait.jpg'))
+  const originalBytes = portrait || qualityFixture ? fixtureBytes : nativeImage.createFromBuffer(fixtureBytes).resize({ width: 360 }).toPNG()
+  if (!portrait && !qualityFixture) {
+    // The tiny synthetic fixture contains no person; exercise the UI with a deterministic matte.
+    const processReal = host.processPhoto
+    host.processPhoto = async args => {
+      if (!args.recipe?.cutout) return processReal(args)
+      const { width, height } = args.recipe, rgba = new Uint8ClampedArray(width * height * 4), restore = new Uint8ClampedArray(rgba.length)
+      for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4
+        rgba.set([80, 120, 180, x > width * .2 && x < width * .8 ? 255 : 0], i)
+        restore.set([80, 120, 180, 255], i)
+      }
+      return { png: pngFromPixels({ width, height, data: rgba }), restorePng: pngFromPixels({ width, height, data: restore }), analysis: { issues: [] } }
+    }
+  }
   const original = designs.importImageBuffer(originalBytes, 'person.jpg', 'managed')
   for (const crop of [{}, null, {x:0,y:0,w:NaN,h:1}, {x:.9,y:0,w:.5,h:1}]) assert.throws(()=>host.cropPhoto({buffer:originalBytes,crop}), /裁剪/)
   const resized = nativeImage.createFromBuffer(originalBytes).resize({width:480}).toPNG()
@@ -42,6 +57,35 @@ app.whenReady().then(async () => {
   ok(bitmap[2] >= 99 && bitmap[2] <= 101 && bitmap[3] === 128, 'NativeImage decoding uses premultiplied BGRA')
   if (portrait) {
     const start = Date.now()
+    const reference = await host.analyzePhoto({ asset: original, buffer: originalBytes })
+    ok(reference.faceCount === 1 && reference.faceHeight > 0 && reference.eyeY > 0 && reference.eyeY < 1, 'Reference photo face measurements are detected locally for automatic centering')
+    if (require('crypto').createHash('sha256').update(originalBytes).digest('hex') === '6702252f7f2a15d9d68c0101d01ced1d301d8625709b8773a7744da5f7d19242') {
+      const subjectPolygon = [{x:.30,y:.06},{x:.51,y:.06},{x:.57,y:.4},{x:.69,y:.7},{x:.66,y:.99},{x:.18,y:.99},{x:.19,y:.65},{x:.27,y:.38}]
+      const recipe = require('../electron/photo-processing-pixels.cjs').normalizeRecipe({width:768,height:512,cutout:true})
+      const output = await host.processPhoto({asset:original,buffer:originalBytes,recipe,subjectPolygon})
+      const pixels = nativeImage.createFromBuffer(output.png).toBitmap(), alpha = (x,y) => pixels[(y*768+x)*4+3]
+      assert.ok(alpha(300,60)>230 && alpha(350,300)>230 && alpha(380,460)>230, 'hair, torso and clothing remain visible')
+      assert.ok(alpha(235,80)<20 && alpha(240,130)<20 && alpha(700,300)<20, 'background inside and outside the approximate lasso is removed')
+      ok(true, 'Real model follows the rough outline while removing background inside the selection')
+    }
+    const autoId = 'ds_auto_portrait'
+    store.saveJson('datasets', [...store.loadJson('datasets'), { id: autoId, name: '自动对齐验收', photoMatchColumn: 'photo', columns: [{ key:'photo' }], rows: [{ photo:'person' }, { photo:'person-2' }] }])
+    store.saveJson('photo-bindings', [...store.loadJson('photo-bindings'), { datasetId:autoId, column:'photo', files:[{name:'person.jpg',assetId:original.id},{name:'person-2.png',assetId:other.id}] }])
+    processing.startAutomaticOnImport(autoId, { counts:{matched:2} }, host)
+    processing.scheduleAutomatic(host, () => {}, autoId)
+    for (let i=0; i<400 && !processing.current(autoId); i++) await new Promise(resolve=>setTimeout(resolve,50))
+    const auto = processing.current(autoId)
+    assert.ok(auto?.recipe.faceAlign)
+    for (const id of [original.id, other.id]) {
+      const processed = designs.assetBytes(auto.items[id])
+      assert.deepEqual([processed.asset.width, processed.asset.height], [original.width, original.height])
+      const alignment = await host.analyzePhoto(processed)
+      assert.ok(alignment.faceCount===1 && Math.abs(alignment.eyeX-.5)<.04 && Math.abs(alignment.faceHeight-reference.faceHeight)<.04 && Math.abs(alignment.eyeY-reference.eyeY)<.04, JSON.stringify(alignment))
+    }
+    processing.clear(autoId)
+    store.saveJson('datasets', store.loadJson('datasets').filter(item=>item.id!==autoId))
+    store.saveJson('photo-bindings', store.loadJson('photo-bindings').filter(item=>item.datasetId!==autoId))
+    ok(true, 'Different source sizes are normalized and real faces centered to the reference before output')
     const preview = await processing.render({datasetId:'ds_processed',assetId:original.id,recipe:{width:384,height:256,cutout:true}}, host)
     const image = nativeImage.createFromBuffer(designs.assetBytes(preview.asset.id).buffer), pixels = image.toBitmap()
     let opaque = 0, transparent = 0, soft = 0
@@ -52,7 +96,7 @@ app.whenReady().then(async () => {
     console.log('Real portrait first inference ms=' + (Date.now() - start))
   }
   require('../electron/ipc.cjs').registerIpc()
-  ipcMain.handle('app:meta', () => ({version:'0.6.9-test'}))
+  ipcMain.handle('app:meta', () => ({version:'0.7.0-test'}))
   ui = new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{preload:path.join(ROOT,'electron/preload.cjs'),sandbox:false,contextIsolation:true,offscreen:true,backgroundThrottling:false}})
   const errors = []
   ui.webContents.on('console-message', (_event, level, message) => { if (level >= 3) { errors.push(message); console.error('RENDERER_ERROR', message) } })
@@ -73,6 +117,16 @@ app.whenReady().then(async () => {
   await wait(`Boolean(document.querySelector('[data-testid="photo-processing-panel"]')) && document.querySelector('[data-testid="photo-processing-panel"]').textContent.includes('制作样板')`, 'shared photo processing entry')
   await click('[data-testid="photo-processing-toggle"]')
   await wait(`Boolean(document.querySelector('[data-testid="photo-processing-sample"] option'))`, 'sample list')
+  await click('[data-testid="photo-processing-cutout"]')
+  await wait(`Boolean(document.querySelector('[data-testid="photo-processing-batch-model"]'))`, 'model options')
+  assert.equal(await evaluate(`document.querySelector('[data-testid="photo-processing-preview-model"]').value`), 'quality')
+  assert.equal(await evaluate(`document.querySelector('[data-testid="photo-processing-batch-model"]').value`), 'fast')
+  ok(await evaluate(`document.querySelector('[data-testid="photo-processing-panel"]').textContent.includes('10～16 秒/张') && document.querySelector('[data-testid="photo-processing-panel"]').textContent.includes('1～4 秒/张')`), 'Sample and batch expose their default models and approximate processing times')
+  ok(await evaluate(`(() => { const a=document.querySelector('[data-testid="photo-processing-preview-model"]'),b=document.querySelector('[data-testid="photo-processing-batch-model"]'),sample=document.querySelector('[data-testid="photo-processing-sample"]');return a.getBoundingClientRect().width < sample.getBoundingClientRect().width * .8 && Math.abs(a.getBoundingClientRect().top-b.getBoundingClientRect().top)<4 })()`), 'Model selectors are compact and share one row when space allows')
+  await fill('[data-testid="photo-processing-preview-model"]', 'fast')
+  assert.equal(await evaluate(`document.querySelector('[data-testid="photo-processing-preview-model"]').value`), 'fast')
+  if (host.status().qualityReady) await fill('[data-testid="photo-processing-preview-model"]', 'quality')
+  await click('[data-testid="photo-processing-cutout"]')
   await fill('[data-testid="photo-processing-width"]', 256)
   await fill('[data-testid="photo-processing-height"]', 320)
   await click('[data-testid="photo-processing-bottom"]')
@@ -109,6 +163,38 @@ app.whenReady().then(async () => {
   await click('[data-review-row="0"] .review-image')
   const singleUi = '.single-dialog '
   await wait(`Boolean(document.querySelector('.single-dialog [data-testid="photo-processing-preview"]')?.complete && !document.querySelector('.single-dialog [data-testid="photo-processing-pixel-edit"]').disabled)`, 'single-record processing panel')
+  if (!portrait && !qualityFixture) {
+    await click(singleUi + '[data-testid="photo-processing-cutout"]')
+    await fill(singleUi + '[data-testid="photo-processing-preview-model"]', 'fast')
+    await wait(`!document.querySelector('.single-dialog [data-testid="photo-processing-apply"]').disabled`, 'fast cutout preview', 150000)
+  }
+  await click(singleUi + '[data-testid="photo-processing-lasso"]')
+  await wait(`Boolean(document.querySelector('[data-testid="photo-lasso-board"] img')?.complete && document.querySelector('[data-testid="photo-lasso-board"] img')?.naturalWidth)`, 'lasso original photo')
+  await new Promise(resolve => setTimeout(resolve, 200)) // Let the image load handler enable drawing.
+  await evaluate(`(() => {const el=document.querySelector('[data-testid="photo-lasso-board"]'),r=el.getBoundingClientRect(),pts=[[.05,.05],[.95,.05],[.95,.95],[.05,.95],[.05,.05]];const event=(p)=>({clientX:r.left+r.width*p[0],clientY:r.top+r.height*p[1],pointerId:44,button:0,bubbles:true});el.dispatchEvent(new PointerEvent('pointerdown',event(pts[0])));for(const p of pts.slice(1))window.dispatchEvent(new PointerEvent('pointermove',event(p)));window.dispatchEvent(new PointerEvent('pointerup',event(pts.at(-1))))})()`)
+  await wait(`!document.querySelector('[data-testid="photo-lasso-apply"]').disabled`, 'lasso selection ready')
+  await click('[data-testid="photo-lasso-apply"]')
+  await wait(`!document.querySelector('[data-testid="photo-lasso-board"]') && document.querySelector('.single-dialog [data-testid="photo-processing-lasso-clear"]') && !document.querySelector('.single-dialog [data-testid="photo-processing-apply"]').disabled`, 'selection-guided cutout preview', 150000)
+  assert.equal(await evaluate(`document.querySelector('.single-dialog [data-testid="photo-processing-preview-model"]').value`), portrait || qualityFixture ? 'quality' : 'fast')
+  await click(singleUi + '[data-testid="photo-processing-apply"]')
+  await wait(`document.querySelector('.single-dialog')?.textContent.includes('仅此人的照片已更新')`, 'selection-guided cutout saved')
+  const lassoDs = require('../electron/dataset.cjs').getDataset('ds_processed'), lassoSaved = processing.inspect({datasetId:lassoDs.id,rowId:lassoDs.recordIds[0]},host).single
+  assert.ok(lassoSaved.override.subjectPolygon.length >= 4 && !lassoSaved.override.protectPolygon && lassoSaved.override.recipe.cutout)
+  assert.equal(lassoSaved.override.model, portrait || qualityFixture ? 'quality' : 'fast', 'selected model is saved with this record')
+  assert.equal(processing.resolver(lassoDs)(original.id,lassoDs.recordIds[2]),state.items[original.id])
+  if (portrait) {
+    const after = nativeImage.createFromBuffer(designs.assetBytes(lassoSaved.asset.id).buffer).toBitmap()
+    const originalPixels = nativeImage.createFromBuffer(designs.assetBytes(lassoSaved.restoreAsset.id).buffer).toBitmap()
+    let removed = 0, opaque = 0
+    for (let i = 3; i < after.length; i += 4) { if (originalPixels[i] > 240 && after[i] < 10) removed++; if (after[i] > 240) opaque++ }
+    assert.ok(removed > 100 && opaque > 100, `model removed background and kept subject: ${removed}/${opaque}`)
+  }
+  await click('[data-testid="photo-single-close"]')
+  await click('[data-review-row="0"] .review-image')
+  await wait(`!!document.querySelector('.single-dialog [data-testid="photo-processing-lasso-clear"]') && !document.querySelector('.single-dialog [data-testid="photo-processing-pixel-edit"]').disabled`, 'reopened saved selection')
+  ok(true, 'Freehand selection guides local cutout and saves only the chosen record')
+  await click(singleUi + '[data-testid="photo-processing-reset"]')
+  await wait(`document.querySelector('.single-dialog')?.textContent.includes('此人已恢复统一样板') && !document.querySelector('.single-dialog [data-testid="photo-processing-pixel-edit"]').disabled`, 'reset protected cutout')
   await click(singleUi + '[data-testid="photo-processing-pixel-edit"]')
   await wait(`Boolean(document.querySelector('[data-testid="image-tool-mask-restore"]:not(:disabled)') && document.querySelector('[data-testid="image-edit-apply"]:not(:disabled)'))`, 'shared editor with aligned restoration source')
   const knownPhoto = nativeImage.createFromBuffer(designs.assetBytes(state.items[original.id]).buffer), knownPixels = knownPhoto.toBitmap()

@@ -103,6 +103,7 @@ contextBridge.exposeInMainWorld('printpress', {
   cancelPhotoImport: (taskId) => invoke('photo:cancelImport', { taskId }),
   photoImportTasks: (datasetId) => invoke('photo:tasks', datasetId ? { datasetId } : {}),
   photoReport: (payload) => invoke('photo:report', payload),
+  deletePhotos: (payload) => invoke('photo:delete', payload),
   getPhotoProcessing: (query) => invoke('photo:processingGet', typeof query === 'string' ? { datasetId: query } : query),
   previewPhotoProcessing: (payload) => invoke('photo:processingPreview', payload),
   applyPhotoProcessing: (payload) => invoke('photo:processingApply', payload),
@@ -119,6 +120,9 @@ contextBridge.exposeInMainWorld('printpress', {
   getPhotoOverride: (payload) => invoke('photo:overrideGet', payload),
   setPhotoOverride: (payload) => invoke('photo:overrideSet', payload),
   clearPhotoOverride: (payload) => invoke('photo:overrideClear', payload),
+  getRecordDesign: (payload) => invoke('print:recordDesignGet', payload),
+  setRecordDesign: (payload) => invoke('print:recordDesignSet', payload),
+  clearRecordDesign: (payload) => invoke('print:recordDesignClear', payload),
   setPhotoMatchColumn: (datasetId, key) => invoke('dataset:setPhotoMatchColumn', { datasetId, key }),
   onPhotoProgress: (cb) => {
     const handler = (_e, progress) => cb(progress)
@@ -143,7 +147,7 @@ contextBridge.exposeInMainWorld('printpress', {
   createDesignFromPreset: (presetId, name) => invoke('design:createFromPreset', presetId, name),
   touchDesign: (id) => invoke('design:touch', id),
   getDesign: (id, revision) => invoke('design:get', id, revision),
-  saveDesign: (design) => invoke('design:save', design),
+  saveDesign: (design, recordOwner) => invoke('design:save', design, recordOwner),
   deleteDesign: (id) => invoke('design:delete', id),
   purgeOrphanDesigns: () => invoke('design:purgeOrphanDirs'),
   uploadDesignImageDialog: () => invoke('design:importDialog'),

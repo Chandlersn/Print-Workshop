@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import PhotoProcessingPanel from './PhotoProcessingPanel.vue'
+import PhotoSingleEditor from './PhotoSingleEditor.vue'
 import { photoProcessingRevision } from '../lib/photo-processing.js'
 import { toUserMessage } from '../../electron/user-error.cjs'
 import { gotoCell } from '../lib/cell-nav.js'
@@ -70,7 +70,7 @@ onBeforeUnmount(() => { alive = false; generation++; previewGeneration++ })
       </div>
       <footer><span>{{ filtered.length }} 条 · 第 {{ page + 1 }} / {{ pageCount }} 页</span><button :disabled="page <= 0" @click="page--">上一页</button><button :disabled="page >= pageCount - 1" @click="page++">下一页</button></footer>
     </template>
-    <div v-if="editing" class="single-mask" @click.self="editing = null"><section class="single-dialog" role="dialog" aria-modal="true" :aria-label="`编辑第 ${editing.rowIndex + 1} 行照片`"><header><strong>第 {{ editing.rowIndex + 1 }} 行 · {{ editing.label }}</strong><button data-testid="photo-single-close" @click="editing = null">关闭</button></header><PhotoProcessingPanel :key="editing.rowId" :dataset-id="datasetId" :row-id="editing.rowId" expanded @applied="applied" /></section></div>
+    <PhotoSingleEditor v-if="editing" :dataset-id="datasetId" :row="editing" @close="editing = null" @applied="applied" />
   </section>
 </template>
 

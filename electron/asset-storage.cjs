@@ -5,6 +5,7 @@ const { resolveInsideDataDir } = require('./store.cjs')
 const DATA_DIR = process.env.PRINTPRESS_DATA_DIR
 const MANAGED_POOL = 'design-assets'
 const EPHEMERAL_POOL = 'ephemeral-assets'
+const PHOTO_POOL = 'photo-assets'
 // The default keeps existing installations readable. Set this before Electron starts
 // to put the managed repository on another disk; temporary backgrounds stay in dataDir.
 const configured = process.env.PRINTPRESS_ASSET_DIR
@@ -23,15 +24,16 @@ if (configured) {
 function poolDir(pool) {
   if (pool === MANAGED_POOL) return managedDir
   if (pool === EPHEMERAL_POOL) return resolveInsideDataDir(EPHEMERAL_POOL)
+  if (pool === PHOTO_POOL) return resolveInsideDataDir(PHOTO_POOL)
   throw new Error('未知素材存储池')
 }
 
 function resolveAssetPath(relative) {
-  const match = /^(design-assets|ephemeral-assets)\/([a-f0-9]{64})\.(png|jpe?g|json)$/.exec(relative)
+  const match = /^(design-assets|ephemeral-assets|photo-assets)\/([a-f0-9]{64})\.(png|jpe?g|json)$/.exec(relative)
   if (!match) throw new Error('素材存储路径无效')
   return path.join(poolDir(match[1]), `${match[2]}.${match[3]}`)
 }
 
 function legacyManagedDir() { return resolveInsideDataDir(MANAGED_POOL) }
 
-module.exports = { MANAGED_POOL, EPHEMERAL_POOL, poolDir, resolveAssetPath, legacyManagedDir, managedDir }
+module.exports = { MANAGED_POOL, EPHEMERAL_POOL, PHOTO_POOL, poolDir, resolveAssetPath, legacyManagedDir, managedDir }

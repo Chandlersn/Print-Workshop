@@ -1,11 +1,34 @@
 const assert = require('assert/strict'), fs = require('fs'), path = require('path')
 const tmp = fs.mkdtempSync(path.join(__dirname, '.tmp-photo-processing-'))
 process.env.PRINTPRESS_DATA_DIR = path.join(tmp, 'data')
-const { normalizeRecipe, processPixels, orientedRgba, photoTransform } = require('../electron/photo-processing-pixels.cjs')
+const { normalizeRecipe, normalizeProtectPolygon, applyMatte, subjectRegion, applySubjectMatte, processPixels, orientedRgba, photoTransform } = require('../electron/photo-processing-pixels.cjs')
 const { pngFromPixels } = require('../electron/psd-import.cjs')
 const width = 64, height = 64, data = new Uint8ClampedArray(width * height * 4)
 for (let i = 0; i < data.length; i += 4) data.set([30, 120, 210, 255], i)
 const image = { width, height, data }
+const polygon = [{ x: .25, y: .25 }, { x: .75, y: .25 }, { x: .75, y: .75 }, { x: .25, y: .75 }]
+const cutout = { width, height, data: new Uint8ClampedArray(data) }
+cutout.data[(32 * width + 32) * 4 + 3] = 128
+applyMatte(cutout, new Float32Array([0]), 1, 1, polygon)
+assert.equal(cutout.data[(32 * width + 32) * 4 + 3], 128, '保护区保留原图透明度')
+assert.equal(cutout.data[(25 * width + 25) * 4 + 3], 255, '被模型误删的圈内主体保留')
+assert.equal(cutout.data[(5 * width + 5) * 4 + 3], 0, '圈外仍由模型抠图')
+for (const bad of [[], [{ x: 0, y: 0 }], [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 0, y: 1 }], [{ x: 0, y: 0 }, { x: .5, y: .5 }, { x: 1, y: 1 }], Array(513).fill({ x: .2, y: .2 })]) assert.throws(() => normalizeProtectPolygon(bad))
+const inferred = { width, height, data: new Uint8ClampedArray(data) }
+const region = subjectRegion(inferred, polygon), modelMask = new Float32Array(width * height).fill(1)
+modelMask[32 * width + 32] = 0
+applySubjectMatte(inferred, modelMask, width, height, polygon, region)
+assert.equal(inferred.data[(32 * width + 32) * 4 + 3], 0, '拉索圈内仍听从模型去掉背景')
+assert.equal(inferred.data[(25 * width + 25) * 4 + 3], 255, '模型识别到的主体保留')
+assert.equal(inferred.data[(0 * width + 0) * 4 + 3], 0, '远离轮廓的区域不会保留为背景')
+assert.ok(inferred.data[(32 * width + 14) * 4 + 3] > 0, '粗略轮廓外留出头发和衣服的识别余量')
+const triangle = [{ x:.25,y:.25 }, { x:.75,y:.25 }, { x:.25,y:.75 }]
+const triangleImage = { width, height, data: new Uint8ClampedArray(data) }
+applySubjectMatte(triangleImage, new Float32Array(width * height).fill(1), width, height, triangle, subjectRegion(triangleImage, triangle))
+assert.ok(triangleImage.data[(45 * width + 45) * 4 + 3] < inferred.data[(45 * width + 45) * 4 + 3], '相同外接范围内，拉索实际形状也会影响识别范围')
+const bigFrame = { width: 200, height: 120 }
+const smallBox = subjectRegion(bigFrame, [{ x:.4,y:.3 }, { x:.6,y:.3 }, { x:.6,y:.7 }, { x:.4,y:.7 }])
+assert.ok(smallBox.x < 80 && smallBox.y < 36 && smallBox.x + smallBox.width > 120 && smallBox.y + smallBox.height > 84, '范围向外扩展为模型保留背景上下文')
 const basic = normalizeRecipe({ width, height })
 assert.deepEqual(processPixels(image, basic).data, data, '无效果的同尺寸处理不能改变像素')
 const feathered = processPixels(image, { ...basic, edge: true, edgeWidth: .2, edgeOpacity: .5, bottom: true, bottomStart: .5, bottomOpacity: 0 })
@@ -43,6 +66,24 @@ console.log('ok - 人物大小和眼睛高度按同一目标对齐，无人脸�
   const b = designs.importImageBuffer(pngFromPixels({ width, height, data: second }), 'b.png', 'managed')
   store.saveJson('datasets', [{ id: 'ds_processing', name: '自动照片', photoMatchColumn: 'photo', columns: [{ key: 'photo' }], rows: [{ photo: 'a' }, { photo: 'a' }, { photo: 'b' }] }])
   store.saveJson('photo-bindings', [{ datasetId: 'ds_processing', column: 'photo', files: [{ name: 'a.png', assetId: a.id }, { name: 'b.png', assetId: b.id }] }])
+  const modelCalls = []
+  const modelHost = { processPhoto: async ({ model }) => { modelCalls.push(model); return pngFromPixels(image) } }
+  const modelArgs = { datasetId: 'ds_processing', assetId: a.id, recipe: { ...basic, cutout: true } }
+  const fastPreview = await processing.render({ ...modelArgs, model: 'fast' }, modelHost)
+  const qualityPreview = await processing.render({ ...modelArgs, model: 'quality' }, modelHost)
+  assert.notEqual(fastPreview.key, qualityPreview.key, '不同模型不能混用抠图缓存')
+  await processing.render({ ...modelArgs, model: 'quality' }, modelHost)
+  assert.deepEqual(modelCalls, ['fast', 'quality'], '相同模型重复预览复用缓存')
+  await assert.rejects(processing.render({ ...modelArgs, model: 'unknown' }, modelHost), /抠图模式/)
+  const oldQualityBatch = { datasetId: 'ds_processing', sampleAssetId: a.id, recipe: { ...basic, width: 65, cutout: true }, model: 'quality', taskId: 'old-quality' }
+  await processing.apply(oldQualityBatch, modelHost)
+  const oldStates = store.loadJson('photo-processing'); oldStates[0].modelVersion = 'birefnet-portrait-1ba1c8ff'; store.saveJson('photo-processing', oldStates)
+  store.saveJson('photo-processing-cache', [])
+  const callsBeforeUpgrade = modelCalls.length
+  const upgraded = await processing.apply({ ...oldQualityBatch, taskId: 'upgraded-quality', incremental: true }, modelHost)
+  assert.equal(modelCalls.length - callsBeforeUpgrade, 2, '精细模型更换后，增量批处理不能混用旧模型结果')
+  assert.equal(upgraded.state.modelVersion, 'birefnet-lite-56000243')
+  processing.clear('ds_processing')
   let calls = 0
   const host = { status: () => ({ ready: true }), processPhoto: async () => { calls++; return pngFromPixels(feathered) } }
   const args = { datasetId: 'ds_processing', sampleAssetId: a.id, recipe: { ...basic, bottom: true }, taskId: 'apply-1' }
@@ -85,6 +126,25 @@ console.log('ok - 人物大小和眼睛高度按同一目标对齐，无人脸�
   assert.notEqual(individualRows.byRecord.get(currentDs.rows[1]).photo, single.asset.id, '共用同一原图的其他记录不能被单张编辑影响')
   assert.ok(require('../electron/asset-library.cjs').referencedAssetIds().has(single.asset.id))
   assert.ok((await processing.review({ datasetId: ds.id })).rows[0].individual)
+  let protectedCalls = 0
+  const lassoHost = { status: () => ({ ready: true }), processPhoto: async ({ protectPolygon }) => { protectedCalls++; const next = { width, height, data: new Uint8ClampedArray(data) }; applyMatte(next, new Float32Array([0]), 1, 1, protectPolygon); return pngFromPixels(next) } }
+  const protectedRecipe = { ...basic, cutout: true }
+  const protectedSingle = await processing.setSingle({ datasetId: ds.id, rowId, assetId: a.id, recipe: protectedRecipe, protectPolygon: polygon }, lassoHost)
+  assert.deepEqual(processing.inspect({ datasetId: ds.id, rowId }, lassoHost).single.override.protectPolygon, polygon, '保护区按人员记录保存')
+  assert.equal(processing.resolver(currentDs)(a.id, rowId), protectedSingle.asset.id)
+  assert.equal(processing.resolver(currentDs)(a.id, ds.recordIds[1]), result.state.items[a.id], '共享原图的其他人员不受保护区影响')
+  await processing.render({ datasetId: ds.id, assetId: a.id, recipe: protectedRecipe, protectPolygon: polygon }, lassoHost)
+  assert.equal(protectedCalls, 1, '相同保护区复用缓存')
+  let selectedCalls = 0
+  const selectedHost = { processPhoto: async ({ subjectPolygon }) => { selectedCalls++; const next = { width, height, data: new Uint8ClampedArray(data) }; applySubjectMatte(next, modelMask, width, height, subjectPolygon, subjectRegion(next, subjectPolygon)); return pngFromPixels(next) } }
+  const selectedSingle = await processing.setSingle({ datasetId: ds.id, rowId, assetId: a.id, recipe: protectedRecipe, subjectPolygon: polygon }, selectedHost)
+  assert.deepEqual(selectedSingle.entry.subjectPolygon, polygon, '新拉索按人员保存为模型识别范围')
+  assert.equal(selectedSingle.entry.protectPolygon, null, '新拉索不使用旧版强制保留方式')
+  assert.notEqual(selectedSingle.asset.id, protectedSingle.asset.id, '新旧拉索效果与缓存隔离')
+  await processing.render({ datasetId: ds.id, assetId: a.id, recipe: protectedRecipe, subjectPolygon: polygon }, selectedHost)
+  assert.equal(selectedCalls, 1, '同一人物范围复用处理结果')
+  await assert.rejects(processing.render({ datasetId: ds.id, assetId: a.id, recipe: protectedRecipe, subjectPolygon: polygon, protectPolygon: polygon }, selectedHost), /不能同时使用/)
+  await processing.setSingle({ datasetId: ds.id, rowId, assetId: a.id, recipe: { ...basic, scale: .65 } }, individualHost)
   const partial = photos.prepareRows(ds.id, ['photo'], [currentDs.rows[1], currentDs.rows[0]], [1, 0])
   assert.equal(partial.byRecord.get(currentDs.rows[0]).photo, single.asset.id, '选择和重排输出记录后仍按稳定行标识使用单张结果')
   await processing.apply({ ...args, taskId: 'batch-preserve-single' }, host)
@@ -104,4 +164,54 @@ console.log('ok - 人物大小和眼睛高度按同一目标对齐，无人脸�
   processing.deletePreset({ id: preset.id })
   assert.ok(!processing.listPresets().some(item => item.id === preset.id))
   console.log('ok - 样板保存复用、单人隔离与重排输出、批量规则保留例外、自动增量处理')
+
+  const otherPixels = new Uint8ClampedArray(96 * 80 * 4); otherPixels.fill(180)
+  const differentSize = designs.importImageBuffer(pngFromPixels({ width: 96, height: 80, data: otherPixels }), 'different.png', 'managed')
+  const freshId = 'ds_auto_initial'
+  store.saveJson('datasets', [...store.loadJson('datasets'), { id: freshId, name: '首次自动统一', photoMatchColumn: 'photo', columns: [{ key: 'photo' }], rows: [{ photo: 'different' }, { photo: 'a' }] }])
+  store.saveJson('photo-bindings', [...store.loadJson('photo-bindings'), { datasetId: freshId, column: 'photo', files: [{ name: 'a.png', assetId: a.id }, { name: 'different.png', assetId: differentSize.id }] }])
+  const callsAuto = []
+  const autoHost = { status: () => ({ faceReady: true }), analyzePhoto: async () => ({ faceCount: 1, faceHeight: .24, eyeY: .41 }), processPhoto: async ({ recipe }) => {
+    callsAuto.push(recipe); await new Promise(resolve => setTimeout(resolve, 10))
+    return pngFromPixels({ width: recipe.width, height: recipe.height, data: new Uint8ClampedArray(recipe.width * recipe.height * 4).fill(255) })
+  } }
+  const emitted = []
+  processing.startAutomaticOnImport(freshId, { counts: { matched: 2 } }, autoHost, (_channel, value) => emitted.push(value))
+  assert.throws(() => processing.resolver(require('../electron/dataset.cjs').getDataset(freshId))(a.id), /正在统一/)
+  processing.scheduleAutomatic(autoHost, (_channel, value) => emitted.push(value), freshId)
+  for (let i = 0; i < 100 && !processing.current(freshId); i++) await new Promise(resolve => setTimeout(resolve, 10))
+  const initialState = processing.current(freshId)
+  assert.ok(initialState && initialState.enabled)
+  assert.equal(initialState.sampleAssetId, differentSize.id, '按名单顺序使用第一张匹配照片，不按文件顺序')
+  assert.deepEqual([initialState.recipe.width, initialState.recipe.height], [96, 80])
+  assert.deepEqual([initialState.recipe.faceAlign, initialState.recipe.faceHeight, initialState.recipe.eyeY], [true, .24, .41], '人物居中并沿用首张脸部大小和眼睛高度')
+  assert.equal(initialState.recipe.cutout, false, '统一尺寸不会擅自抠掉背景')
+  assert.equal(callsAuto.length, 2)
+  for (const id of Object.values(initialState.items)) assert.deepEqual([designs.assetInfo(id).width, designs.assetInfo(id).height], [96, 80])
+  assert.ok(processing.inspect(freshId, autoHost).options.autoProcess)
+  assert.ok(emitted.some(value => value.bootstrap && value.phase === 'processing'))
+  assert.ok(designs.assetBytes(differentSize.id).buffer.equals(pngFromPixels({ width: 96, height: 80, data: otherPixels })), '首张原图不被替换')
+  processing.clear(freshId)
+  assert.equal(processing.inspect(freshId, autoHost).options.autoProcess, false, '恢复原图时关闭自动沿用')
+  processing.startAutomaticOnImport(freshId, { counts: { matched: 2 } }, autoHost)
+  assert.equal(processing.current(freshId), null, '用户已关闭时后续导入不再自动启用')
+
+  const failedId = 'ds_auto_failure'
+  store.saveJson('datasets', [...store.loadJson('datasets'), { id: failedId, name: '失败保护', photoMatchColumn: 'photo', columns: [{ key: 'photo' }], rows: [{ photo: 'a' }] }])
+  store.saveJson('photo-bindings', [...store.loadJson('photo-bindings'), { datasetId: failedId, column: 'photo', files: [{ name: 'a.png', assetId: a.id }] }])
+  const brokenHost = { status: () => ({ faceReady: true }), analyzePhoto: async () => ({ faceCount: 0 }), processPhoto: async () => { throw Error('failed') } }
+  processing.startAutomaticOnImport(failedId, { counts: { matched: 1 } }, brokenHost)
+  processing.scheduleAutomatic(brokenHost, () => {}, failedId)
+  for (let i = 0; i < 100 && processing.inspect(failedId, brokenHost).job?.phase !== 'failed'; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(processing.inspect(failedId, brokenHost).job.phase, 'failed')
+  assert.throws(() => processing.resolver(require('../electron/dataset.cjs').getDataset(failedId))(a.id), /失败/)
+  const noFaceHost = { status: () => ({ faceReady: true }), analyzePhoto: async () => ({ faceCount: 0 }), processPhoto: async () => pngFromPixels(image) }
+  processing.setOptions({ datasetId: failedId, autoProcess: true })
+  processing.scheduleAutomatic(noFaceHost, () => {}, failedId)
+  for (let i = 0; i < 100 && !processing.current(failedId); i++) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(processing.current(failedId).recipe.faceAlign, false, '首张未识别到单个人脸时只等比适配')
+  assert.equal(processing.current(failedId).bootstrapReference.centered, false, '界面能提示自动居中不可用')
+  processing.clear(failedId)
+  assert.equal(processing.resolver(require('../electron/dataset.cjs').getDataset(failedId))(a.id), a.id)
+  console.log('ok - 首次自动按名单首图统一像素、人脸居中、失败阻断与关闭保护')
 })().catch(error => { console.error(error); process.exitCode = 1 })

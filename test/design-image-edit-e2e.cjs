@@ -22,13 +22,16 @@ const click = selector => evaluate(`document.querySelector(${JSON.stringify(sele
 const fill = (selector, value) => evaluate(`(() => {const el=document.querySelector(${JSON.stringify(selector)});if(!el) throw Error('Missing input: '+${JSON.stringify(selector)});el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));})()`)
 const draft = `JSON.parse(localStorage.getItem('printpress-background-designer-draft-v1'))?.design`
 const photo = `(${draft})?.layers.find(l=>l.id==='photo')`
-async function menu(mode, id = 'photo') {
+async function menu(mode, id = 'photo', forceMagic = true) {
   await wait(`!document.querySelector('[data-testid="design-save"]')?.disabled`, '工程操作完成')
   await evaluate(`(() => { const el=document.querySelector('[data-canvas-layer-id="${id}"]');el.scrollIntoView({block:'center',inline:'center'});const r=el.getBoundingClientRect();el.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+10,clientY:r.top+10}));})()`)
   await wait(`Boolean(document.querySelector('[data-testid="design-image-menu"]'))`, '图片右键菜单')
   await click(`[data-testid="design-menu-${mode}"]`)
   await wait(`Boolean(document.querySelector('[data-testid="image-edit-apply"]:not(:disabled)'))`, '图片编辑加载')
-  if (mode === 'erase') await wait(`Boolean(document.querySelector('[data-testid="image-brush-size"]'))`, '擦除画笔就绪')
+  if (mode === 'erase') {
+    await wait(`Boolean(document.querySelector('[data-testid="image-brush-size"]'))`, '擦除画笔就绪')
+    if (forceMagic) await click('[data-testid="image-tool-brush"]')
+  }
 }
 async function gesture(start, end, target = '[data-testid="image-edit-overlay"]', cancel = false) {
   await evaluate(`(() => {const el=document.querySelector(${JSON.stringify(target)}),r=document.querySelector('.image-board').getBoundingClientRect();const p=(v)=>({clientX:r.left+v[0]*r.width/400,clientY:r.top+v[1]*r.height/300,pointerId:7,bubbles:true,button:0});el.dispatchEvent(new PointerEvent('pointerdown',p(${JSON.stringify(start)})));window.dispatchEvent(new PointerEvent('pointermove',p(${JSON.stringify(end)})));window.dispatchEvent(new PointerEvent('${cancel ? 'pointercancel' : 'pointerup'}',p(${JSON.stringify(end)})));})()`)
@@ -65,10 +68,13 @@ async function main() {
     if (x >= 28 && x < 52 && y >= 28 && y < 52) translucentPixels.set([240, 40, 10, 255], i)
   }
   const translucent = designs.importImageBytes({ name: 'translucent.png', base64: nativeImage.createFromBitmap(translucentPixels, { width: 400, height: 300 }).toPNG().toString('base64') })
-  const design = designs.saveDesign({ schemaVersion: 1, name: '图片编辑验收', artboard: { w: 120, h: 100 }, assets: { [asset.id]: asset, [translucent.id]: translucent }, layers: [
+  const sparsePixels = Buffer.from(buffer); sparsePixels[(400 * 300 - 1) * 4 + 3] = 0
+  const sparse = designs.importImageBytes({name:'sparse-alpha.png',base64:nativeImage.createFromBitmap(sparsePixels,{width:400,height:300}).toPNG().toString('base64')})
+  const design = designs.saveDesign({ schemaVersion: 1, name: '图片编辑验收', artboard: { w: 120, h: 100 }, assets: { [asset.id]: asset, [translucent.id]: translucent, [sparse.id]:sparse }, layers: [
     { id: 'photo', type: 'image', name: '红色原图', assetId: asset.id, x: 10, y: 10, w: 80, h: 60, erasures: [{ type: 'rect', x: 190, y: 130, w: 5, h: 5 }] },
     { id: 'locked', type: 'image', name: '锁定原图', assetId: asset.id, x: 95, y: 10, w: 20, h: 15, locked: true },
     { id: 'translucent', type: 'image', name: '半透明位置验收', assetId: translucent.id, x: 95, y: 75, w: 20, h: 15, erasures: [{ type:'rect', x:118, y:94, w:2, h:12 }] },
+    { id: 'sparse', type:'image', name:'单点透明', assetId:sparse.id, x:95, y:42, w:20, h:15 },
   ] })
   require('../electron/ipc.cjs').registerIpc()
   ipcMain.handle('app:meta', () => ({ version: require('../package.json').version }))
@@ -128,6 +134,31 @@ async function main() {
   await click('.designer-more summary')
   assert.ok(await evaluate(`document.querySelector('.designer-more').open && document.querySelector('[data-testid="design-copy"]').getBoundingClientRect().width > 0`), '更多菜单可打开工程操作')
   await click('.designer-more summary')
+  await click('[data-layer-id="locked"] [aria-label="解锁图层"]')
+  await menu('erase', 'locked', false)
+  assert.equal(await evaluate(`document.querySelector('[data-testid="image-tool-brush"]').getAttribute('aria-pressed')`),'true','不透明 PNG 默认使用背景修补')
+  assert.ok(await evaluate(`Boolean(document.querySelector('[data-testid="image-tool-mask-erase"]')) && !document.querySelector('[data-testid="image-tool-mask-restore"]')`),'可手动精细擦除；没有原色图时不虚设恢复主体')
+  await evaluate(`document.querySelector('[data-testid="design-image-editor"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+  await click('[data-layer-id="locked"] [aria-label="锁定图层"]')
+  await menu('erase', 'sparse', false)
+  assert.equal(await evaluate(`document.querySelector('[data-testid="image-tool-mask-erase"]').getAttribute('aria-pressed')`),'true','末尾只有一个透明像素也自动切换精细擦除')
+  await evaluate(`document.querySelector('[data-testid="design-image-editor"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+  await menu('erase', 'photo', false)
+  assert.equal(await evaluate(`document.querySelector('[data-testid="image-tool-mask-erase"]').getAttribute('aria-pressed')`),'true','不透明原图带旧透明擦除时也自动切换')
+  await evaluate(`document.querySelector('[data-testid="design-image-editor"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))`)
+  await menu('erase', 'translucent', false)
+  assert.equal(await evaluate(`document.querySelector('[data-testid="image-tool-mask-erase"]').getAttribute('aria-pressed')`),'true','半透明图片自动启用精细擦除')
+  await fill('[data-testid="image-mask-softness"]',0)
+  await fill('[data-testid="image-brush-size"]',20)
+  await gesture([130,100],[130,100]); await waitPreview()
+  const maskResult = await evaluate(`(() => {const c=document.createElement('canvas');c.width=400;c.height=300;const ctx=c.getContext('2d');ctx.drawImage(document.querySelector('img[alt="修复效果预览"]'),0,0);return {inside:ctx.getImageData(130,100,1,1).data[3],outside:ctx.getImageData(200,140,1,1).data[3]}})()`)
+  assert.deepEqual(maskResult,{inside:0,outside:96},'精细擦除使笔触透明且不改变范围外的半透明像素')
+  await click('[data-testid="image-edit-apply"]')
+  const transparentLayer = `(${draft})?.layers.find(l=>l.id==='translucent')`
+  await wait(`Boolean(${transparentLayer}?.assetId && ${transparentLayer}.assetId!==${JSON.stringify(translucent.id)}) && !document.querySelector('[data-testid="design-image-editor"]')`, '精细擦除应用到图层')
+  assert.equal(await evaluate(`(async () => {const d=${draft},layer=d.layers.find(l=>l.id==='translucent'),img=new Image();img.src='pp://media/'+d.assets[layer.assetId].path;await img.decode();const c=document.createElement('canvas');c.width=400;c.height=300;const ctx=c.getContext('2d');ctx.drawImage(img,0,0);return ctx.getImageData(130,100,1,1).data[3]})()`),0,'完成后保存的实际图片保留透明擦除')
+  await undo(); await wait(`${transparentLayer}?.assetId===${JSON.stringify(translucent.id)}`, '撤销精细擦除恢复原图')
+  console.log('ok - 自动识别不透明、透明和旧蒙版，精细擦除保存透明像素并可撤销')
   // Exercise real pointer coordinates after zoom/scroll, translucent pixels, tool
   // chronology, undo and the exact bytes that survive the Complete action.
   await menu('erase', 'translucent')

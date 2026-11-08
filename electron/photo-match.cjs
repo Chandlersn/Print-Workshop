@@ -67,6 +67,7 @@ function matchPhotos(rows, column, files, rowIndexes) {
           } else {
             item.status = 'matched'
             item.assetId = file.assetId
+            item.fileName = file.name
             if (!uses.has(file.assetId)) uses.set(file.assetId, [])
             uses.get(file.assetId).push(rowIndex)
           }

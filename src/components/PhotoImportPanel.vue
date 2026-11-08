@@ -1,6 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
+import ConfirmDialog from './ConfirmDialog.vue'
+import { photoProcessingChanged } from '../lib/photo-processing.js'
 
 const props = defineProps({ datasetId: { type: String, required: true }, columns: { type: Array, required: true }, matchColumn: { type: String, default: '' }, embedded: Boolean })
 const emit = defineEmits(['close', 'edit-cell', 'report'])
@@ -15,6 +17,7 @@ const taskHistory = ref([])
 const pendingSelection = ref(null)
 const importTaskId = ref('')
 const cancelling = ref(false)
+const selectedPhotos = ref(new Set()), pendingDelete = ref(null)
 const cancelRequested = ref(false)
 const stateKey = `printpress.photo-table.${props.datasetId}`
 let savedState = {}
@@ -69,6 +72,9 @@ const filtered = computed(() => {
 const filteredIssueCount = computed(() => filtered.value.filter(row => row.status !== 'matched').length)
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 30)))
 const displayed = computed(() => filtered.value.slice(page.value * 30, (page.value + 1) * 30))
+const filteredPhotoNames = computed(() => [...new Set(filtered.value.filter(row => row.status === 'matched' && row.fileName).map(row => row.fileName))])
+const selectedCount = computed(() => selectedPhotos.value.size)
+const affectedCount = computed(() => (result.value?.results || []).filter(row => selectedPhotos.value.has(row.fileName)).length)
 watch(pageCount, count => { if (page.value >= count) page.value = count - 1 })
 const off = window.printpress.onPhotoProgress(p => {
   if (alive && p.taskId === importTaskId.value && p.datasetId === props.datasetId && p.column === column.value) progress.value = p
@@ -82,7 +88,7 @@ onBeforeUnmount(() => {
   if (pendingSelection.value?.token) window.printpress.cancelPhotoSelection(pendingSelection.value.token).catch(() => {})
 })
 
-watch(() => [props.datasetId, column.value], refresh, { immediate: true })
+watch(() => [props.datasetId, column.value], () => { selectedPhotos.value = new Set(); pendingDelete.value = null; refresh() }, { immediate: true })
 watch(filter, () => { page.value = 0 })
 
 async function refresh() {
@@ -108,12 +114,35 @@ async function refresh() {
       window.printpress.photoImportTasks(props.datasetId),
       window.printpress.getDataset(props.datasetId),
     ])
-    if (alive && token === generation) { result.value = report; taskHistory.value = tasks; dsDetail.value = detail; emit('report', report) }
+    if (alive && token === generation) { result.value = report; taskHistory.value = tasks; dsDetail.value = detail; const names = new Set(report.files.map(file => file.name)); selectedPhotos.value = new Set([...selectedPhotos.value].filter(name => names.has(name))); emit('report', report) }
   } catch (err) {
     if (alive && token === generation) error.value = toUserMessage(err)
   } finally {
     if (alive && token === generation) loading.value = false
   }
+}
+function togglePhoto(name, checked) {
+  const next = new Set(selectedPhotos.value)
+  if (checked) next.add(name); else next.delete(name)
+  selectedPhotos.value = next
+}
+function selectFiltered() { selectedPhotos.value = new Set([...selectedPhotos.value, ...filteredPhotoNames.value]) }
+function askDelete(all = false) { pendingDelete.value = { all, names: all ? [] : [...selectedPhotos.value] } }
+async function confirmDelete() {
+  const selection = pendingDelete.value
+  if (!selection || busy.value) return
+  pendingDelete.value = null; busy.value = true; error.value = ''; notice.value = ''
+  try {
+    let protectedIds = []
+    const draft = localStorage.getItem('printpress-background-designer-draft-v1')
+    if (draft) protectedIds = Object.keys(JSON.parse(draft)?.design?.assets || {})
+    const response = await window.printpress.deletePhotos({ datasetId: props.datasetId, column: column.value, all:selection.all, names:[...selection.names], protectedIds })
+    selectedPhotos.value = new Set()
+    photoProcessingChanged()
+    await refresh()
+    notice.value = `已删除 ${response.removed} 条照片关联，涉及 ${response.affectedRows} 人；可重新导入。${response.cleanupWarning ? '部分文件暂未清理：' + toUserMessage(response.cleanupWarning) : ''}`
+  } catch (err) { error.value = toUserMessage(err) }
+  finally { busy.value = false }
 }
 
 defineExpose({ refresh })
@@ -228,6 +257,7 @@ async function cancelImport() {
         <strong>配图列：{{ columns.find(c => c.key === column)?.alias || column || '未选择' }}</strong>
         <button class="btn-primary" :disabled="busy || loading || !column" @click="importFolder('append')">{{ busy ? '正在导入…' : loading ? '正在检查…' : result?.imported ? '补充缺失照片' : '导入照片' }}</button>
         <button v-if="result?.imported" class="btn-ghost" :disabled="busy || loading || !column" @click="importFolder('replace')">替换当前名单照片</button>
+        <button v-if="result?.files?.length" class="btn-ghost" data-testid="photo-delete-all" :disabled="busy || loading" @click="askDelete(true)">删除全部已导入照片</button>
         <button v-if="busy && progress?.taskId === importTaskId" class="btn-ghost" :disabled="cancelling" @click="cancelImport">{{ cancelling ? '正在取消…' : '取消导入' }}</button>
         <button class="btn-ghost" :disabled="busy || loading || !column" title="只检查已入库照片；要扫描本地 PNG/JPEG 文件，请重新选择文件夹导入" @click="refresh">重新检查</button>
       </div>
@@ -273,19 +303,23 @@ async function cancelImport() {
               <option value="broken">坏图</option><option value="invalid">无效值</option>
             </select></label>
             <span>当前筛选 {{ filtered.length }} / 名单 {{ result.total }} 行</span>
+            <button class="btn-ghost" data-testid="photo-select-filtered" :disabled="!filteredPhotoNames.length || busy" @click="selectFiltered">选择当前筛选照片</button>
+            <button class="btn-ghost" :disabled="!selectedCount || busy" @click="selectedPhotos = new Set()">清空选择</button>
+            <button class="btn-ghost" data-testid="photo-delete-selected" :disabled="!selectedCount || busy || loading" @click="askDelete(false)">删除已选 {{ selectedCount }} 张</button>
             <button class="btn-ghost" :disabled="!filteredIssueCount || busy" @click="goNextIssue">定位下一条问题</button>
             <label>识别字段 <select v-model="identifierKey" aria-label="问题清单识别字段"><option v-for="item in columns" :key="item.key" :value="item.key">{{ item.alias || item.key }}</option></select></label>
             <button class="btn-ghost" :disabled="!filteredIssueCount || busy" @click="exportFilteredIssues">导出当前问题 {{ filteredIssueCount }} 行</button>
           </div>
           <div class="photo-results">
-            <table><thead><tr><th>行号</th><th>配图列的值</th><th>照片</th><th>匹配结果</th></tr></thead><tbody>
-              <tr v-for="row in displayed" :key="dsDetail?.recordIds?.[row.rowIndex] || row.rowIndex" :data-photo-record-id="dsDetail?.recordIds?.[row.rowIndex]"><td><button :disabled="busy" class="photo-row" @click="goEditRow(row)">{{ row.rowIndex + 1 }}</button></td><td>{{ row.name || '（空）' }}</td><td><div class="matched-photo" :data-photo-row="row.rowIndex"><img v-if="row.status === 'matched' && photoStates[row.assetId] !== 'failed'" :key="rowPhotoUrl(row)" :src="rowPhotoUrl(row)" :alt="row.name" loading="lazy" @error="onPhotoError($event, row)"><span v-else-if="row.status === 'matched'" class="photo-unavailable">预览不可用</span></div></td><td><span>{{ labels[row.status] }}{{ ['empty','missing'].includes(row.status) ? ' · 出片留白' : '' }}</span><small v-if="row.reason || row.candidates">{{ row.reason || row.candidates.join('、') }}</small></td></tr>
+            <table><thead><tr><th>选择</th><th>行号</th><th>配图列的值</th><th>照片</th><th>匹配结果</th></tr></thead><tbody>
+              <tr v-for="row in displayed" :key="dsDetail?.recordIds?.[row.rowIndex] || row.rowIndex" :data-photo-record-id="dsDetail?.recordIds?.[row.rowIndex]"><td><input type="checkbox" :aria-label="`选择第 ${row.rowIndex + 1} 行照片`" :disabled="busy || row.status !== 'matched'" :checked="selectedPhotos.has(row.fileName)" @change="togglePhoto(row.fileName, $event.target.checked)"></td><td><button :disabled="busy" class="photo-row" @click="goEditRow(row)">{{ row.rowIndex + 1 }}</button></td><td>{{ row.name || '（空）' }}</td><td><div class="matched-photo" :data-photo-row="row.rowIndex"><img v-if="row.status === 'matched' && photoStates[row.assetId] !== 'failed'" :key="rowPhotoUrl(row)" :src="rowPhotoUrl(row)" :alt="row.name" loading="lazy" @error="onPhotoError($event, row)"><span v-else-if="row.status === 'matched'" class="photo-unavailable">预览不可用</span></div></td><td><span>{{ labels[row.status] }}{{ ['empty','missing'].includes(row.status) ? ' · 出片留白' : '' }}</span><small v-if="row.reason || row.candidates">{{ row.reason || row.candidates.join('、') }}</small></td></tr>
             </tbody></table>
             <p v-if="!filtered.length">当前没有待处理的照片记录。</p>
           </div>
           <footer><button :disabled="page === 0" @click="page--">上一页</button><span>{{ page + 1 }} / {{ pageCount }}</span><button :disabled="page + 1 >= pageCount" @click="page++">下一页</button></footer>
         </div>
       </template>
+      <ConfirmDialog v-if="pendingDelete" title="删除变量照片" :message="pendingDelete.all ? '将删除当前名单全部已导入照片及对应单张修改。其他名单和普通图层仍在使用的素材会保留；名单数据和外部原文件不受影响。之后可以重新导入。' : `将删除已选 ${selectedCount} 张照片关联，影响 ${affectedCount} 行；共用同一照片的人员都会失去该照片。其他名单和普通图层仍在使用的素材会保留，之后可以重新导入。`" @confirm="confirmDelete" @cancel="pendingDelete = null" />
     </section>
   </div>
 </template>
@@ -302,5 +336,6 @@ header{display:flex;justify-content:space-between;gap:20px}h2{margin:0 0 8px;fon
 .photo-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:16px 0}select{max-width:250px}button{cursor:pointer}button:disabled{cursor:default;opacity:.5}.photo-error{color:var(--cinnabar)}.photo-warning{color:var(--warn);line-height:1.7;font-size:13px}
 .photo-table-tools{gap:9px}.photo-search{padding:7px 10px;min-width:210px;max-width:100%;background:var(--paper-card);border:1px solid var(--line-strong);border-radius:6px;color:var(--ink)}
 .photo-results{max-height:40vh;overflow:auto;border:1px solid var(--line-strong);border-radius:8px}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}th,td{padding:9px 12px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{position:sticky;top:0;background:var(--paper)}td:first-child{width:65px}small{display:block;color:var(--stone);margin-top:4px}.photo-row{border:0;background:transparent;color:var(--cinnabar);text-decoration:underline}.photo-results>p{padding:16px}footer{display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:14px}details{font-size:13px;line-height:1.8}details ul{max-height:160px;overflow:auto}
+.photo-panel :deep(.cd-mask){z-index:2200}
 .photo-plan{border:1px solid var(--warn-line);border-radius:10px;padding:16px;background:var(--warn-soft);margin:16px 0}.photo-plan h3{margin:0 0 8px;font-size:16px}.photo-plan p{font-size:13px;line-height:1.6;color:var(--stone)}.photo-plan-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.photo-plan-grid span{padding:6px 10px;background:var(--paper-card);border:1px solid var(--line);border-radius:6px;font-size:13px}
 </style>

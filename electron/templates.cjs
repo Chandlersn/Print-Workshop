@@ -248,6 +248,7 @@ function deleteTemplate(id) {
   }
   const rest = loadAll().filter((x) => x.id !== id)
   persistAll(rest)
+  try { require('./record-designs.cjs').forget({templateId:id}) } catch (error) { console.warn('[record-designs] cleanup deferred:', error.message) }
   // 连带清理底图：assetId 走分流（仍被引用则保留），旧 print-bg 路径按原逻辑（其他模板引用则保留）
   if (t.background) {
     if (/^asset_[a-f0-9]{64}$/.test(String(t.background))) {
