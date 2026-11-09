@@ -1,5 +1,5 @@
 {
-  "version": "0.7.0",
-  "notes": "新增变量照片批量统一尺寸与人物对齐、快速和精细抠图、自由拉索及单张修补；打印预览支持单人照片调整、精修和 25% 缩放。安装包未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
+  "version": "0.7.1",
+  "notes": "优化打印中心预览、翻页与单人照片调整，改进变量照片问题提示，并增强数据保存与输出记录的可靠性。安装包未签名，请按 Release 里的 SHA256SUMS.txt 核对后再安装。",
   "url": "https://github.com/Chandlersn/Print-Workshop/releases/latest"
 }
