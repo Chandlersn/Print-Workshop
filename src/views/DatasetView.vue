@@ -29,6 +29,7 @@ const page = ref(0)
 const gridBusy = ref(false)
 const editingCell = ref(null) // { rowIndex, key }
 const editingValue = ref('')
+let pendingCellSave = null
 
 const pageCount = computed(() => (detail.value ? Math.max(1, Math.ceil(detail.value.rows.length / PAGE_SIZE)) : 1))
 const pageStart = computed(() => page.value * PAGE_SIZE)
@@ -287,6 +288,10 @@ function pruneStaleHidden() {
 }
 
 async function selectDataset(id) {
+  if (id !== activeId.value) {
+    if (pendingCellSave && !(await pendingCellSave)) return
+    if (editingCell.value && !(await commitEdit())) return
+  }
   const summary = datasets.value.find(d => d.id === id)
   if (summary) activeBatchKey.value = batchKeyOf(summary)
   activeId.value = id
@@ -458,20 +463,32 @@ function cancelEdit() {
 }
 
 async function commitEdit() {
+  if (pendingCellSave) {
+    if (!(await pendingCellSave)) return false
+    return commitEdit()
+  }
   const cell = editingCell.value
-  if (!cell || !detail.value) return
+  if (!cell || !detail.value) return true
+  const id = detail.value.id
+  const value = editingValue.value
   const original = detail.value.rows[cell.rowIndex]?.[cell.key]
   editingCell.value = null
-  if (String(original ?? '') === editingValue.value) return // 未变化不写盘
+  if (String(original ?? '') === value) return true // 未变化不写盘
   gridBusy.value = true
-  try {
-    await window.printpress.updateCell(detail.value.id, cell.rowIndex, cell.key, editingValue.value)
-    await selectDataset(detail.value.id) // 重新拉取行 + 字段目录（填充率/类型即时刷新）
-  } catch (err) {
-    errorMsg.value = extractError(err)
-  } finally {
-    gridBusy.value = false
-  }
+  const task = (async () => {
+    try {
+      await window.printpress.updateCell(id, cell.rowIndex, cell.key, value)
+      const refreshed = await window.printpress.getDataset(id)
+      if (activeId.value === id) detail.value = refreshed
+      return true
+    } catch (err) {
+      errorMsg.value = extractError(err)
+      if (activeId.value === id && !editingCell.value) { editingCell.value = cell; editingValue.value = value }
+      return false
+    }
+  })()
+  pendingCellSave = task
+  try { return await task } finally { if (pendingCellSave === task) { pendingCellSave = null; gridBusy.value = false } }
 }
 
 async function removeRow(rowIndex) {

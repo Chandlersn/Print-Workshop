@@ -77,7 +77,7 @@ function avg(values) {
 }
 
 /** 标准网格 → 数据集建档（类型/填充统计 + 入库），importFromFile 与 importSheets 共用 */
-function gridToDataset(grid, name, sourceMeta) {
+function buildDataset(grid, name, sourceMeta) {
   const headers = grid[0]
   const bodyRows = grid.slice(1)
 
@@ -113,6 +113,11 @@ function gridToDataset(grid, name, sourceMeta) {
     rows,
     recordIds: rows.map(() => newId('row')),
   }
+  return ds
+}
+
+function gridToDataset(grid, name, sourceMeta) {
+  const ds = buildDataset(grid, name, sourceMeta)
   const list = loadAll()
   list.push(ds)
   persistAll(list)
@@ -209,7 +214,7 @@ async function importSheets(filePath, { selections, mode, onProgress = () => {} 
     if (parsed.length === 1) mode = 'split' // 单表无合并意义，退化为 split
   }
 
-  const results = []
+  const pending = []
   if (mode === 'merge') {
     // 列并集（按各表表头文本去重，保持首现顺序），行按选择顺序拼接
     report({ stage: 'build', pct: 70, label: `合并 ${parsed.length} 个工作表…` })
@@ -238,7 +243,7 @@ async function importSheets(filePath, { selections, mode, onProgress = () => {} 
     }
     report({ stage: 'save', pct: 92, label: '保存合并数据集…' })
     await yieldUi()
-    results.push(gridToDataset(rows2d, `${base}（合并 ${parsed.length} 表）`, sourceMeta))
+    pending.push(buildDataset(rows2d, `${base}（合并 ${parsed.length} 表）`, sourceMeta))
   } else {
     for (let i = 0; i < parsed.length; i++) {
       const p = parsed[i]
@@ -250,11 +255,13 @@ async function importSheets(filePath, { selections, mode, onProgress = () => {} 
         label: `生成「${base}·${p.name}」${i + 1}/${parsed.length}`,
       })
       await yieldUi()
-      results.push(gridToDataset(p.sliced, `${base}·${p.name}`, sourceMeta))
+      pending.push(buildDataset(p.sliced, `${base}·${p.name}`, sourceMeta))
     }
   }
+  const list = loadAll()
+  persistAll([...list, ...pending])
   report({ stage: 'done', pct: 100, label: '导入完成' })
-  return results
+  return pending.map(summary)
 }
 
 function summary(ds) {

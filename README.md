@@ -6,7 +6,7 @@
 
 批印坊是一款面向证书、奖状、胸卡、人像卡片和桌牌的 **Windows 本地智能批量制作工具**。导入名单与照片，确定一张样板的效果，再把处理规则和排版应用到整批记录，最后统一检查、导出或打印。
 
-**当前源码版本：v0.7.0 · Windows x64 · MIT**
+**当前源码版本：v0.7.1 · Windows x64 · MIT**
 
 [下载安装](https://github.com/Chandlersn/Print-Workshop/releases/latest) · [使用说明](docs/使用说明.md) · [底图制作指南](docs/底图制作使用说明.md)
 

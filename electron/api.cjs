@@ -286,7 +286,7 @@ const OPS = {
     },
   },
 
-  // 选择新目录 → 可写校验 + 嵌套守卫 → 整目录迁移现有数据 → 写引导配置 → 重启生效
+  // Schedule the copy for the next start, after all current edits have finished.
   'app:changeDataDir': {
     write: true,
     gui: 'dialog',
@@ -305,13 +305,9 @@ const OPS = {
       if (!dataDirModule.isWritableDir(target)) {
         throw new Error('该目录不可写（可能需要管理员权限），请换一个位置')
       }
-      let migrated = false
-      if (path.resolve(target) !== path.resolve(current) && fs.existsSync(current)) {
-        dataDirModule.copyDirSync(current, target)
-        migrated = true
-      }
-      dataDirModule.writeCustomDataDir(ctx.app.userDataDir, target)
-      return { canceled: false, dataDir: target, migrated, needRestart: true }
+      dataDirModule.assertNoMigrationConflicts(current, target)
+      dataDirModule.scheduleMigration(ctx.app.userDataDir, current, target)
+      return { canceled: false, dataDir: target, migrated: false, pendingMigration: true, needRestart: true }
     },
   },
 
@@ -1444,8 +1440,12 @@ const OPS = {
         }
         // 状态回写（不变量「留痕必全，状态只认全量」）：只有全量出片才回写数据集「已打」状态；
         // 部分出片（行级勾选）照常留痕，但不改侧栏徽标与变色，避免「打了 3 个人却显示整份已打」
-        if (printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'pdf')
-        const job = printDomain.createJob({
+        let recordWarning = ''
+        if (printDomain.shouldMarkPrinted(built.scope)) {
+          try { dataset.markPrinted(String(p.datasetId), 'pdf') } catch { recordWarning = 'PDF 已导出，但数据集打印状态未保存，请勿重复导出。' }
+        }
+        let job
+        try { job = printDomain.createJob({
           templateId: String(p.templateId),
           templateName: built.templateName,
           datasetId: String(p.datasetId),
@@ -1462,8 +1462,8 @@ const OPS = {
           detail: `${batches.length > 1
             ? `${r.bytes} bytes → ${r.path}（${r.batches} 批合并，${r.pages} 页）`
             : `${r.bytes} bytes → ${r.path}`}${describeOutput(r.output || built.output, r.bake || built.bake)}`,
-        })
-        return { canceled: false, ...r, output: r.output || built.output, jobId: job.id, jobKey, scope: built.scope }
+        }) } catch { recordWarning = 'PDF 已导出，但打印记录未完整保存，请勿重复导出。' }
+        return { canceled: false, ...r, output: r.output || built.output, jobId: job?.id || '', jobKey, scope: built.scope, recordWarning }
       } catch (err) {
         // 取消与失败都留痕，但状态不同：取消 = 用户主动叫停（无半成品、无最终文件）
         printDomain.createJob({
@@ -1596,10 +1596,14 @@ const OPS = {
           detail: `已保存 ${count}/${whole.recordCount} 张 ${formatLabel}：${String(err.message || err)}` })
         throw err
       }
-      const job = printDomain.createJob({ ...jobBase, status: 'ok', completedCount: count,
-        detail: `${count} 张 ${formatLabel}（${dpi} dpi）→ ${dir}` })
-      if (printDomain.shouldMarkPrinted(whole.scope)) dataset.markPrinted(dsId, 'images')
-      return { canceled: false, count, directory: dir, files, dpi, format, quality, jobId: job.id, scope: whole.scope }
+      let job, recordWarning = ''
+      try { job = printDomain.createJob({ ...jobBase, status: 'ok', completedCount: count,
+        detail: `${count} 张 ${formatLabel}（${dpi} dpi）→ ${dir}` }) }
+      catch { recordWarning = '图片已导出，但打印记录未完整保存，请勿重复导出。' }
+      if (printDomain.shouldMarkPrinted(whole.scope)) {
+        try { dataset.markPrinted(dsId, 'images') } catch { recordWarning = '图片已导出，但数据集打印状态未保存，请勿重复导出。' }
+      }
+      return { canceled: false, count, directory: dir, files, dpi, format, quality, jobId: job?.id || '', scope: whole.scope, recordWarning }
     },
   },
 
@@ -1682,8 +1686,11 @@ const OPS = {
         printTasks.delete(jobKey)
       }
       // 真正送达「且为全量出片」才回写（部分出片留痕但不改数据集状态）；取消不标
-      if (r.ok && printDomain.shouldMarkPrinted(built.scope)) dataset.markPrinted(String(p.datasetId), 'print')
-      printDomain.createJob({
+      let recordWarning = ''
+      if (r.ok && printDomain.shouldMarkPrinted(built.scope)) {
+        try { dataset.markPrinted(String(p.datasetId), 'print') } catch { recordWarning = '打印任务已发送，但数据集打印状态未保存，请勿重复打印。' }
+      }
+      try { printDomain.createJob({
         templateId: String(p.templateId),
         templateName: built.templateName,
         datasetId: String(p.datasetId),
@@ -1700,8 +1707,8 @@ const OPS = {
         detail: r.ok
           ? `${silent ? '静默直打' : '打印对话框确认'}${r.batches > 1 ? `（${r.batches} 批）` : ''}${describeOutput(r.output || built.output, r.bake || built.bake)}`
           : String(r.error || ''),
-      })
-      return { ...r, output: r.output || built.output, jobKey, scope: built.scope }
+      }) } catch { recordWarning = r.ok ? '打印任务已发送，但打印记录未完整保存，请勿重复打印。' : '打印已取消，但未能保存取消记录。' }
+      return { ...r, output: r.output || built.output, jobKey, scope: built.scope, recordWarning }
     },
   },
 
@@ -1796,21 +1803,26 @@ function call(name, params, ctx) {
   if (!op) throw unknownOp(name)
   const c = normalizeCtx(ctx)
   if (op.write && !c.allowWrite) throw writeForbidden(name)
-  // 权限之后（不是之前）再探数据目录互斥：缺写权限必须报 WRITE_FORBIDDEN，
-  // 实测 I-18 那条守卫会遍历全部写操作断言这一点。GUI 自己持锁，靠 pid 自检放行（I-54）
-  if (op.write) require('./data-lock.cjs').assertWritableByClient()
   assertCapabilities(name, op, c)
-  const result = op.run(params || {}, c)
-  if (op.write && c.photoProcessor && (name.startsWith('dataset:') || ['photo:commitSelection', 'photo:importFolder'].includes(name))) {
-    const notify = value => {
-      const processing = require('./photo-processing.cjs'), id = params?.datasetId || value?.report?.datasetId || value?.datasetId || value?.id
-      if (['photo:commitSelection', 'photo:importFolder'].includes(name)) processing.startAutomaticOnImport(id, value?.report || value, c.photoProcessor, c.emit)
-      processing.scheduleAutomatic(c.photoProcessor, c.emit, id)
-      return value
+  const release = op.write ? require('./data-lock.cjs').acquireForClient() : () => {}
+  try {
+    let result = op.run(params || {}, c)
+    if (op.write && c.photoProcessor && (name.startsWith('dataset:') || ['photo:commitSelection', 'photo:importFolder'].includes(name))) {
+      const notify = value => {
+        const processing = require('./photo-processing.cjs'), id = params?.datasetId || value?.report?.datasetId || value?.datasetId || value?.id
+        if (['photo:commitSelection', 'photo:importFolder'].includes(name)) processing.startAutomaticOnImport(id, value?.report || value, c.photoProcessor, c.emit)
+        processing.scheduleAutomatic(c.photoProcessor, c.emit, id)
+        return value
+      }
+      result = result && typeof result.then === 'function' ? result.then(notify) : notify(result)
     }
-    return result && typeof result.then === 'function' ? result.then(notify) : notify(result)
+    if (result && typeof result.then === 'function') return Promise.resolve(result).finally(release)
+    release()
+    return result
+  } catch (error) {
+    release()
+    throw error
   }
-  return result
 }
 
 /** 必填参数体检：只查 required，不做类型强制（类型转换仍归各 run，避免改变既有语义） */

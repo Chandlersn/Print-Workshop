@@ -22,14 +22,15 @@ if (isMcp) console.log = (...args) => console.error(...args)
 const dataDirModule = require('./data-dir.cjs')
 // 测试注入口：外部已设 PRINTPRESS_DATA_DIR（e2e 隔离数据目录）时直接采用，
 // 不读自定义配置也不迁移；生产环境无此变量，走常规解析
-const resolved = process.env.PRINTPRESS_DATA_DIR
+const hasExplicitDataDir = Boolean(process.env.PRINTPRESS_DATA_DIR)
+const resolved = hasExplicitDataDir
   ? { dataDir: process.env.PRINTPRESS_DATA_DIR, custom: false, fallback: process.env.PRINTPRESS_DATA_DIR }
   : dataDirModule.resolveDataDir({
       isPackaged: app.isPackaged,
       userDataDir: app.getPath('userData'),
       appPath: app.getAppPath(),
     })
-const dataDir = resolved.dataDir
+let dataDir = resolved.dataDir
 
 // 统一在模块加载前定好环境变量，供 ipc/store 模块读取
 process.env.PRINTPRESS_DATA_DIR = dataDir
@@ -113,7 +114,7 @@ function main() {
   // **不看**我们的 PRINTPRESS_DATA_DIR。测试一个接一个起多个实例、甚至与开发者已开着的
   // 窗口并存，第二个实例会静默 app.quit()，症状是「窗口没出现 / CDP 连不上」，
   // 排查起来完全不指向锁。生产环境不设这个变量，照常生效。
-  const isolatedInstance = Boolean(process.env.PRINTPRESS_DATA_DIR) || isMcp
+  const isolatedInstance = hasExplicitDataDir || isMcp
   if (!isolatedInstance && !app.requestSingleInstanceLock()) {
     app.quit()
     return
@@ -158,6 +159,42 @@ function main() {
       return
     }
     console.warn('[data-lock] 取锁异常，按无锁继续启动')
+  }
+
+  // Copy only after the previous session has closed, while both directories
+  // are reserved. Changes made before a deferred restart are included.
+  if (!hasExplicitDataDir && !isMcp) {
+    const userDataDir = app.getPath('userData')
+    const target = dataDirModule.pendingMigration(userDataDir, dataDir)
+    if (target) {
+      const dataLock = require('./data-lock.cjs')
+      let releaseTarget, nextDir = ''
+      try {
+        const issue = dataDirModule.nestingIssue(target, dataDir)
+        if (issue) throw new Error(issue)
+        if (!dataDirModule.isWritableDir(target)) throw new Error('新数据目录不可写。')
+        releaseTarget = dataLock.reserveHostDirectory(target)
+        dataDirModule.assertNoMigrationConflicts(dataDir, target)
+        dataDirModule.copyDirSync(dataDir, target, { exclusive: true })
+        dataDirModule.writeCustomDataDir(userDataDir, target)
+        nextDir = target
+      } catch (error) {
+        if (releaseTarget) releaseTarget()
+        try { dataDirModule.writeCustomDataDir(userDataDir, dataDir) } catch { /* retain the original data */ }
+        dialog.showErrorBox('数据目录迁移未完成', `${error.message}\n原目录中的数据仍可使用，请选择其他空目录后重试。`)
+      }
+      if (nextDir) {
+        dataLock.release()
+        dataDir = nextDir
+        process.env.PRINTPRESS_DATA_DIR = dataDir
+        process.env.PRINTPRESS_DATA_DIR_CUSTOM = '1'
+        try { dataLock.adoptHostLock() } catch (error) {
+          dialog.showErrorBox('数据目录暂不可用', '新目录已迁移，但暂时无法取得使用权，请关闭其他实例后重试。')
+          app.exit(1)
+          return
+        }
+      }
+    }
   }
 
   if (isMcp) {

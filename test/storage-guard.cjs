@@ -126,6 +126,8 @@ console.log('== 4. JSON 损坏 / null 兜底 ==')
   const corruptFiles = fs.readdirSync(DATA).filter((f) => f.includes('.corrupt-'))
   ok(corruptFiles.length === 1, '损坏文件被留存为 .corrupt-<ts>', fs.readdirSync(DATA))
   ok(!fs.existsSync(tplJson), '原路径已腾空（不覆盖留存件）')
+  throws(() => templates.listTemplates(), '损坏文件留存后再次读取仍拒绝当成空数据')
+  throws(() => store.saveJson('templates', []), '损坏文件尚未恢复时拒绝直接写入空数据')
 
   // 场景 B：无 .bak + JSON 语法破损 → 同样抛错
   reset()

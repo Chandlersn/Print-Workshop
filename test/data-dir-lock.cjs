@@ -120,20 +120,22 @@ check('心跳早于本次开机的锁会被回收（Windows 会复用 pid）', (
   dataLock.release()
 })
 
-check('心跳超过 TTL 的锁会被回收（强杀后最坏 45s 可写）', () => {
+check('持有进程仍存活时，过期心跳不允许回收', () => {
   clean()
-  writeHolder(process.pid, { beatAt: Date.now() - dataLock.TTL_MS - 1000 })
-  const res = dataLock.acquireForHost()
-  assert.equal(res.ok, true, '过期心跳应被回收')
-  dataLock.release()
+  writeHolder(LIVE_PID, { beatAt: Date.now() - dataLock.TTL_MS - 1000 })
+  assert.throws(() => dataLock.acquireForHost(), { code: 'DATA_DIR_BUSY' })
+  clean()
 })
 
 check('锁位是普通文件 / 坏 JSON 时按可回收处理（不给「误建文件 = 永久锁死」留门）', () => {
   clean()
   fs.writeFileSync(LOCK, '不是 JSON', 'utf-8')
+  assert.throws(() => dataLock.acquireForHost(), { code: 'DATA_DIR_BUSY' }, '刚创建的不完整锁应等待')
+  fs.utimesSync(LOCK, new Date(0), new Date(0))
   assert.equal(dataLock.acquireForHost().ok, true, '坏内容应被可回收')
   dataLock.release()
   fs.writeFileSync(LOCK, JSON.stringify({ role: 'gui' }), 'utf-8') // 没有 pid
+  fs.utimesSync(LOCK, new Date(0), new Date(0))
   assert.equal(dataLock.acquireForHost().ok, true, '缺 pid 的锁应被可回收')
   dataLock.release()
 })
@@ -212,7 +214,7 @@ check('GUI 入口真的取了锁：main.cjs 在种子之前 acquireForHost，且
 check('写闸门接在权限之后（缺写权限仍报 WRITE_FORBIDDEN，而不是 BUSY）', () => {
   const src = fs.readFileSync(path.join(ROOT, 'electron', 'api.cjs'), 'utf-8')
   const forbiddenAt = src.indexOf('writeForbidden(name)')
-  const busyAt = src.indexOf('assertWritableByClient()')
+  const busyAt = src.indexOf('acquireForClient()')
   assert.ok(busyAt > forbiddenAt && forbiddenAt > 0, '互斥探测必须在写权限闸门之后')
   assert.ok(src.includes("require('./data-lock.cjs')"), 'api.cjs 必须引用 data-lock.cjs')
 })

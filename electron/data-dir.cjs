@@ -7,6 +7,7 @@
  */
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { LOCK_NAME } = require('./data-lock.cjs')
 
 const BOOTSTRAP_FILE = 'data-dir.json'
@@ -23,15 +24,51 @@ function readCustomDataDir(userDataDir) {
 }
 
 /** 写入/清除自定义目录配置（dataDir 传 null/undefined 即清除，恢复默认） */
+function writeBootstrap(userDataDir, value) {
+  fs.mkdirSync(userDataDir, { recursive: true })
+  const fp = path.join(userDataDir, BOOTSTRAP_FILE)
+  const tmp = `${fp}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf-8', flag: 'wx' })
+    fs.renameSync(tmp, fp)
+  } finally { try { fs.unlinkSync(tmp) } catch { /* renamed or not created */ } }
+}
+
 function writeCustomDataDir(userDataDir, dataDir) {
   fs.mkdirSync(userDataDir, { recursive: true })
   const fp = path.join(userDataDir, BOOTSTRAP_FILE)
   if (dataDir) {
-    fs.writeFileSync(fp, JSON.stringify({ dataDir }, null, 2), 'utf-8')
+    writeBootstrap(userDataDir, { dataDir })
   } else {
     fs.rmSync(fp, { force: true })
   }
   return { ok: true }
+}
+
+function scheduleMigration(userDataDir, current, target) {
+  writeBootstrap(userDataDir, { dataDir: current, pendingDataDir: target })
+}
+
+function pendingMigration(userDataDir, current) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(userDataDir, BOOTSTRAP_FILE), 'utf-8'))
+    if (typeof cfg.pendingDataDir === 'string' && cfg.pendingDataDir && path.resolve(cfg.dataDir) === path.resolve(current)) return cfg.pendingDataDir
+  } catch { /* no valid pending migration */ }
+  return null
+}
+
+/** Refuse to overwrite any existing destination file, before copying anything. */
+function assertNoMigrationConflicts(src, dest) {
+  if (!fs.existsSync(src)) return
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (entry.name === LOCK_NAME) continue
+    const source = path.join(src, entry.name), target = path.join(dest, entry.name)
+    if (entry.isSymbolicLink()) throw new Error('原数据目录包含链接，请先移除链接后再迁移。')
+    if (!fs.existsSync(target)) continue
+    const targetStat = fs.lstatSync(target)
+    if (entry.isDirectory() && targetStat.isDirectory() && !targetStat.isSymbolicLink()) assertNoMigrationConflicts(source, target)
+    else throw new Error(`新目录已有同名文件或目录（${entry.name}），请选择空目录，避免覆盖原有数据。`)
+  }
 }
 
 /** 目录可写探测：建目录 + 写删探针文件 */
@@ -64,7 +101,7 @@ function nestingIssue(target, current) {
 }
 
 /** 递归复制目录（合并语义：目标已存在的同名文件被覆盖） */
-function copyDirSync(src, dest) {
+function copyDirSync(src, dest, { exclusive = false } = {}) {
   fs.mkdirSync(dest, { recursive: true })
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     // 迁移数据目录时不搬走互斥锁：锁描述的是「哪个进程正在用当前目录」，
@@ -72,8 +109,8 @@ function copyDirSync(src, dest) {
     if (entry.name === LOCK_NAME) continue
     const s = path.join(src, entry.name)
     const d = path.join(dest, entry.name)
-    if (entry.isDirectory()) copyDirSync(s, d)
-    else fs.copyFileSync(s, d)
+    if (entry.isDirectory()) copyDirSync(s, d, { exclusive })
+    else fs.copyFileSync(s, d, exclusive ? fs.constants.COPYFILE_EXCL : 0)
   }
 }
 
@@ -96,6 +133,9 @@ module.exports = {
   BOOTSTRAP_FILE,
   readCustomDataDir,
   writeCustomDataDir,
+  scheduleMigration,
+  pendingMigration,
+  assertNoMigrationConflicts,
   isWritableDir,
   nestingIssue,
   copyDirSync,

@@ -12,6 +12,16 @@ function filePath(name) {
   return path.join(DATA_DIR, `${name}.json`)
 }
 
+// A quarantined file means absence is not a fresh installation. Keep refusing
+// reads and writes until the user restores the original or moves the evidence.
+function assertNoUnrecoveredFile(name, fp) {
+  if (fs.existsSync(fp) || !fs.existsSync(DATA_DIR)) return
+  const prefix = `${name}.json.corrupt-`
+  if (fs.readdirSync(DATA_DIR).some(entry => entry.startsWith(prefix))) {
+    throw new Error(`${name}.json 损坏且尚未恢复，请先检查留存的损坏文件或恢复备份。`)
+  }
+}
+
 /**
  * 把存储里的相对路径解析为数据目录内的绝对路径，**拒绝任何越界**。
  *
@@ -52,7 +62,7 @@ function resolveInsideDataDir(rel) {
  */
 function loadJson(name, { expect = null } = {}) {
   const fp = filePath(name)
-  if (!fs.existsSync(fp)) return null
+  if (!fs.existsSync(fp)) { assertNoUnrecoveredFile(name, fp); return null }
   let raw
   try {
     raw = fs.readFileSync(fp, 'utf-8')
@@ -113,6 +123,7 @@ function recoverCorrupt(name, fp, why, expect) {
  */
 function saveJson(name, value) {
   const fp = filePath(name)
+  assertNoUnrecoveredFile(name, fp)
   // 目录可能不存在（首次写入/测试环境），自足建目录不依赖调用方
   fs.mkdirSync(DATA_DIR, { recursive: true })
   const tmp = `${fp}.tmp`

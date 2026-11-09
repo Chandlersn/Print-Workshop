@@ -2,6 +2,7 @@
 import { ref, reactive, computed, watch, nextTick, onMounted, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import DesignSurface from '../components/DesignSurface.vue'
+import { isNonFunctionalArea } from '../lib/interaction-area.js'
 import DesignImageEditor from '../components/DesignImageEditor.vue'
 import DesignTextColorPicker from '../components/DesignTextColorPicker.vue'
 import TemplateFieldText from '../components/TemplateFieldText.vue'
@@ -1644,7 +1645,7 @@ function startTextColorPick() {
   const layerId = single.value.id
   pickingTextColor.value = true
   textColorPickListener = async (event) => {
-    if (!event.target.closest?.('[data-testid="design-stage"]')) return
+    if (!event.target.closest?.('[data-testid="design-stage"]')) { stopTextColorPick(); return }
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation()
     stopTextColorPick()
     try {
@@ -2177,6 +2178,7 @@ function deactivate() {
   active = false
   endLayerDrag()
   imageEdit.value = null; imageMenu.value = null
+  selectedIds.value = []
   ++portraitListRequest
   ++portraitRequest
   portraitChecking.value = true
@@ -2197,6 +2199,7 @@ function deactivate() {
 }
 /** 素材库抽屉点外部收起：开关按钮与抽屉内部除外（开关自己 toggle，别打架） */
 function onDocPointerDown(event) {
+  if (event.button === 0 && !imageEdit.value && !portraitPicker.value && !pickingTextColor.value && isNonFunctionalArea(event.target, '.layer-hit, .layer-row, .inspector, .layer-actions, .style-actions, .canvas-navigator, .ruler, .workspace-resizer, [data-testid="design-image-menu"]')) selectedIds.value = []
   if (!event.target?.closest?.('[data-testid="design-image-menu"]')) imageMenu.value = null
   if (!showAssets.value) return
   const t = event.target

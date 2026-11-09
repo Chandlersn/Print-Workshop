@@ -518,12 +518,12 @@ onMounted(async () => {
     <!-- 数据目录迁移后的重启确认 -->
     <div v-if="showRestart" class="onboard-mask">
       <div class="onboard">
-        <h3 class="onboard-title">{{ pendingReset ? '将恢复默认数据目录' : '数据已迁移到新目录' }}</h3>
+        <h3 class="onboard-title">{{ pendingReset ? '将恢复默认数据目录' : '已安排迁移数据目录' }}</h3>
         <p class="onboard-desc">
           {{
             pendingReset
               ? '重启后数据将从默认位置读取（自定义目录中的现有数据保留不动）。'
-              : '现有数据已完整复制到新目录，重启后生效。原目录中的数据保留不动，可作为备份。'
+              : '下次启动时会复制最新数据到新目录并启用。重启前仍可继续使用，原目录会保留作为备份。'
           }}
         </p>
         <div class="onboard-actions">

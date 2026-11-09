@@ -248,7 +248,7 @@ async function main() {
     await evaluate(`Array.from(document.querySelectorAll('.toolbar-row-output .cs-option')).find(el=>el.textContent.includes('150')).click()`)
     await evaluate(`document.querySelector('.toolbar-actions button').click()`)
     await waitFor(`document.querySelector('.toast')?.textContent.includes('已导出 20 张 PNG')`, 'PNG button exports all rows')
-    await waitFor(`document.querySelector('.stats-bar')?.textContent.includes('已打印/导出')`, 'live dataset statistics refreshed')
+    await waitFor(`document.querySelector('[data-testid="print-dataset-stats"]')?.textContent.includes('已打印/导出')`, 'live dataset statistics refreshed')
     check(dataset.listDatasets().find(d => d.id === ds.id).printCount === countBeforeUi + 1, 'actual PNG button marks full dataset after success')
     await evaluate(`document.querySelector('.history-trigger').click()`)
     await waitFor(`document.querySelector('.history-modal tbody tr')?.textContent.includes('导出 PNG')`, 'live PNG history refreshed')

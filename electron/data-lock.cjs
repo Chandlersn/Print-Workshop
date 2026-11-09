@@ -12,7 +12,7 @@
  *    交错依然会丢更新，却给人「已经修好了」的错觉，比不修更糟。
  *  - **不上版本号 CAS**：语义最准，但要给六个领域模块的 JSON 都加信封、改掉全部损坏恢复
  *    路径与大量裸写夹具（`designs.cjs` 的 `DESIGN_CONFLICT` 已是范式，留给 v0.7 单独做）。
- *  - 所以这里只做**可见的互斥**：GUI 持锁（带心跳租约），命令行写操作前探测；只读永远不受限。
+ *  - GUI 在运行期间持锁，命令行在完整写操作期间持锁；只读不受限。
  *
  * 三个易错点（都有前例可循）：
  *  - 锁路径必须**每次现取** `process.env.PRINTPRESS_DATA_DIR`（`store.cjs` 是加载期缓存，
@@ -27,7 +27,7 @@ const path = require('path')
 
 /** 锁文件名落在 `.gitignore` 既有的 `data/*.json` 覆盖内，仓库数据目录与测试目录都不会变脏 */
 const LOCK_NAME = 'data-dir.lock.json'
-/** 心跳租约：GUI 每 10s 刷一次，超过 45s 没刷新才按陈旧回收（强杀后最坏 45s 可写） */
+/** 心跳每 10s 更新；短暂损坏的锁位至少等待 45s，存活进程的锁不按超时回收。 */
 const TTL_MS = 45_000
 const BEAT_MS = 10_000
 
@@ -58,20 +58,21 @@ function readHolder() {
   if (!p) return null
   let st
   try { st = fs.lstatSync(p) } catch { return null }
-  if (!st.isFile() || st.size > 4096) return { malformed: true }
+  if (!st.isFile() || st.size > 4096) return { malformed: true, modifiedAt: st.mtimeMs }
   try {
     const holder = JSON.parse(fs.readFileSync(p, 'utf-8'))
-    if (!holder || typeof holder.pid !== 'number' || !Number.isFinite(holder.pid)) return { malformed: true }
+    if (!holder || typeof holder.pid !== 'number' || !Number.isFinite(holder.pid)) return { malformed: true, modifiedAt: st.mtimeMs }
     return holder
-  } catch { return { malformed: true } }
+  } catch { return { malformed: true, modifiedAt: st.mtimeMs } }
 }
 
-/** 陈旧判据：坏内容 / pid 已不在 / 心跳过期 / 心跳早于本次开机（Windows 会复用 pid） */
+/** 陈旧判据：旧的损坏锁、进程已退出或心跳早于本次开机。 */
 function isStale(holder) {
-  if (!holder || holder.malformed) return true
+  if (!holder) return true
+  if (holder.malformed) return Date.now() - (holder.modifiedAt ?? Date.now()) > TTL_MS
   if (!processIsAlive(holder.pid)) return true
   const beat = Number(holder.beatAt || holder.startedAt || 0)
-  if (!beat || Date.now() - beat > TTL_MS) return true
+  if (!beat) return false
   if (beat < Date.now() - os.uptime() * 1000) return true
   return false
 }
@@ -91,7 +92,11 @@ function startHeartbeat() {
       const holder = readHolder()
       // 锁已经不是我的了（被别的进程回收/顶掉）：停心跳，别把别人的锁刷新成自己的
       if (!holder || holder.malformed || holder.pid !== process.pid) { stopHeartbeat(); return }
-      fs.writeFileSync(p, JSON.stringify({ ...holder, beatAt: Date.now() }), 'utf-8')
+      const tmp = `${p}.${process.pid}.heartbeat`
+      try {
+        fs.writeFileSync(tmp, JSON.stringify({ ...holder, beatAt: Date.now() }), 'utf-8')
+        fs.renameSync(tmp, p)
+      } finally { try { fs.unlinkSync(tmp) } catch { /* renamed or already removed */ } }
     } catch { /* 心跳失败不改业务结果：最坏是死后被按陈旧回收 */ }
   }, BEAT_MS)
   if (heartbeat.unref) heartbeat.unref()
@@ -106,7 +111,7 @@ function stopHeartbeat() {
  * @returns {{ok: true} | {ok: false, reason: string}}
  * @throws DATA_DIR_BUSY 另一个活跃实例已经持有
  */
-function acquireForHost() {
+function acquireForHost(role = 'gui') {
   const p = lockPath()
   if (!p) return { ok: false, reason: 'no-data-dir' }
   try { fs.mkdirSync(path.dirname(p), { recursive: true }) } catch { /* 目录建不了让写入路径去报错 */ }
@@ -114,14 +119,16 @@ function acquireForHost() {
     try {
       const fd = fs.openSync(p, 'wx', 0o600)
       fs.writeSync(fd, JSON.stringify({
-        pid: process.pid, role: 'gui', startedAt: Date.now(), beatAt: Date.now(),
+        pid: process.pid, role, startedAt: Date.now(), beatAt: Date.now(),
       }))
       fs.closeSync(fd)
       startHeartbeat()
       return { ok: true }
     } catch (err) {
       if (err.code === 'EEXIST') {
-        if (isStale(readHolder())) {
+        const holder = readHolder()
+        if (!holder) { if (!fs.existsSync(p)) continue; throw busyError() }
+        if (isStale(holder)) {
           try { fs.unlinkSync(p); continue } catch { throw busyError() }
         }
         throw busyError()
@@ -150,6 +157,39 @@ function assertWritableByClient() {
   try { fs.unlinkSync(p) } catch { throw busyError() }
 }
 
+/** Hold the lock for the entire client operation, including asynchronous work. */
+function acquireForClient() {
+  const holder = readHolder()
+  if (holder && !holder.malformed && holder.pid === process.pid && holder.role === 'gui') return () => {}
+  acquireForHost('client')
+  return release
+}
+
+/** Reserve the destination while the current data directory remains locked. */
+function reserveHostDirectory(dir) {
+  fs.mkdirSync(dir, { recursive: true })
+  const target = path.join(dir, LOCK_NAME)
+  let fd
+  try {
+    fd = fs.openSync(target, 'wx', 0o600)
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, role: 'gui', startedAt: Date.now(), beatAt: Date.now() }))
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch {}
+      fd = undefined
+      try { fs.unlinkSync(target) } catch {}
+    }
+    throw busyError()
+  } finally { if (fd !== undefined) fs.closeSync(fd) }
+  return () => { try { fs.unlinkSync(target) } catch {} }
+}
+
+function adoptHostLock() {
+  const holder = readHolder()
+  if (!holder || holder.malformed || holder.pid !== process.pid || holder.role !== 'gui') throw busyError()
+  startHeartbeat()
+}
+
 /** 释放：只删自己的锁；删不掉只告警，绝不抛（否则会顶掉调用方真正要报的结果） */
 function release() {
   stopHeartbeat()
@@ -170,6 +210,9 @@ module.exports = {
   isStale,
   processIsAlive,
   acquireForHost,
+  acquireForClient,
+  reserveHostDirectory,
+  adoptHostLock,
   assertWritableByClient,
   release,
 }

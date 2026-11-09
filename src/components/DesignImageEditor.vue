@@ -11,7 +11,7 @@ const dialog = ref(null), board = ref(null), imageViewport = ref(null), sourceIm
 const tool = ref(props.mode === 'mask' ? 'maskErase' : props.mode === 'erase' ? 'brush' : 'crop')
 const restoreImage = ref(null), restoreLoaded = ref(false), maskSoftness = ref(.5)
 const maskTool = computed(() => tool.value === 'maskErase' || tool.value === 'maskRestore')
-const editTitle = computed(() => tool.value === 'maskErase' ? '精细擦除' : tool.value === 'maskRestore' ? '恢复主体' : tool.value === 'crop' ? '裁剪图片' : tool.value === 'clone' ? '仿制图章' : '魔法擦除')
+const editTitle = computed(() => tool.value === 'maskErase' ? '精细擦除' : tool.value === 'maskRestore' ? '恢复主体' : tool.value === 'crop' ? '裁剪图片' : tool.value === 'clone' ? '仿制图章' : tool.value ? '图片修补' : '图片编辑')
 const redraw = ref(true)
 const pendingCrop = ref(copy(props.layer.crop))
 // Previous transparent edits stay independent of the new repair selection.
@@ -76,7 +76,7 @@ async function imageLoaded() {
         }
       }
     }
-    if (!disposed) tool.value = transparent ? 'maskErase' : 'brush'
+    if (!disposed && tool.value) tool.value = transparent ? 'maskErase' : 'brush'
   } catch {
     if (!disposed) error.value = '无法自动识别图片透明度，请手动选择魔法擦除或精细擦除。'
   } finally {
@@ -95,7 +95,7 @@ function setRect(key, event) {
   return true
 }
 function down(event) {
-  if (event.button !== 0 || !loaded.value || drag || encoding || props.busy) return
+  if (event.button !== 0 || !tool.value || !loaded.value || drag || encoding || props.busy) return
   event.preventDefault()
   dialog.value?.focus({ preventScroll: true })
   applyAfterPreview = false
@@ -198,6 +198,15 @@ function cancelDrag() {
   if (!disposed && hasEdits.value && (processing.value || !previewBlob.value)) requestPreview()
 }
 function currentCrop() { const r = rect.value; return { x: r.x / props.asset.width, y: r.y / props.asset.height, w: r.w / props.asset.width, h: r.h / props.asset.height } }
+function onBlankPointerDown(event) {
+  if (event.button !== 0 || !tool.value || encoding || props.busy) return
+  if (event.target.closest?.('.image-board, button, input, select, textarea, label, a, [role="button"]')) return
+  cancelDrag()
+  if (tool.value === 'crop' && validRect(rect.value)) pendingCrop.value = currentCrop()
+  tool.value = null
+  pickingCloneSource.value = false
+  cursor.value = null
+}
 function changeTool(value) {
   if (encoding || props.busy) return
   cancelDrag()
@@ -460,7 +469,7 @@ onBeforeUnmount(() => { disposed = true; cancelDrag(); invalidatePreview(); obse
 </script>
 
 <template>
-  <div class="image-editor-mask" @pointerdown.self="$emit('cancel')">
+  <div class="image-editor-mask" @pointerdown="onBlankPointerDown">
     <section ref="dialog" class="image-editor" role="dialog" aria-modal="true" aria-labelledby="image-edit-title" tabindex="-1" data-testid="design-image-editor" @keydown="keydown">
       <header><h3 id="image-edit-title"><AppIcon :name="tool === 'crop' ? 'crop' : 'brush'" :size="20" /> {{ editTitle }}</h3><button class="icon-only" aria-label="&#x5173;&#x95ED;&#x56FE;&#x7247;&#x7F16;&#x8F91;" title="&#x5173;&#x95ED;" @click="$emit('cancel')"><AppIcon name="close" /></button></header>
       <div class="image-tools">
@@ -483,6 +492,7 @@ onBeforeUnmount(() => { disposed = true; cancelDrag(); invalidatePreview(); obse
       </div>
       <p v-if="recognizing" class="hint">正在识别图片透明区域…</p>
       <p v-else-if="maskTool" class="hint">{{ tool === 'maskRestore' ? '从同位置的原色图恢复误删内容。' : '涂抹区域变透明，可清理抠图残留。' }}柔边控制笔触边缘；可以撤销并与裁剪、图章交替使用。</p>
+      <p v-else-if="!tool" class="hint">选择上方工具继续编辑，已完成的修改仍然保留。</p>
       <p v-else class="hint">原图 {{ asset.width }} × {{ asset.height }} px（按原图方向编辑） · {{ tool === 'crop' ? '\u62d6\u52a8\u88c1\u526a\u6846\uff0c\u6309 Enter \u786e\u8ba4\uff1bEsc \u53d6\u6d88\u3002' : tool === 'clone' ? (pickingCloneSource ? '\u5148\u70b9\u9009\u53d6\u6837\u6e90\uff1b\u53ef\u8f93\u5165\u5750\u6807\u7cbe\u786e\u8bbe\u7f6e\u3002' : '\u5728\u76ee\u6807\u4f4d\u7f6e\u62d6\u52a8\u6d82\u62b9\u590d\u5236\uff1bEnter \u5e94\u7528\u3002') : '\u62d6\u52a8\u64e6\u9664\uff0c\u677e\u5f00\u9f20\u6807\u81ea\u52a8\u4fee\u590d\uff1bEnter \u5e94\u7528\uff0cEsc \u53d6\u6d88\u3002' }}</p>
       <div ref="imageViewport" class="image-viewport">
         <div ref="board" class="image-board" :style="{ width: `${asset.width * scale}px`, height: `${asset.height * scale}px` }" @pointerdown="down" @pointermove="cursor = point($event)" @pointerleave="cursor = null" @lostpointercapture="lostCapture" @contextmenu.prevent>

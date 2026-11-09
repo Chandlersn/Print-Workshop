@@ -62,6 +62,7 @@ function inspect(query) {
     size: applied && old.size ? old.size : { w: layer.w, h: layer.h },
     rotation: layer.rotation,
     defaultPosition: { x: layer.x, y: layer.y },
+    defaultSize: { w: layer.w, h: layer.h },
     defaultFit: layer.fit, defaultFocal: layer.focal,
     assetId: current?.match.assetId || null,
     displayAssetId: current ? require('./photo-processing.cjs').resolver(ds)(current.match.assetId, String(query.rowId)) : null,

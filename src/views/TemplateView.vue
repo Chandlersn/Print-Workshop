@@ -9,6 +9,7 @@
  */
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
+import { isNonFunctionalArea } from '../lib/interaction-area.js'
 import PageHeader from '../components/PageHeader.vue'
 import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -1284,6 +1285,7 @@ function onKeydown(e) {
   // 而弹窗问的正是「要不要删」——用户看着问号，字段已经没了。
   if (pendingConfirm.value) return
   if (!activeTpl.value) return
+  if (e.key === 'Escape') { clearSelection(); return }
 
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return }
   if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z')
@@ -1413,16 +1415,29 @@ async function removeFont(file) {
   }
 }
 
+function clearSelection() {
+  selectedIdx.value = -1
+  multiSel.value = new Set()
+  bgSelected.value = false
+}
+
+function onBlankPointerDown(event) {
+  if (event.button !== 0 || pendingConfirm.value) return
+  if (isNonFunctionalArea(event.target, '.field-box, .canvas-bg, .canvas-design, .props, .align-bar, .template-ruler')) clearSelection()
+}
+
 let viewMounted = false
 let viewActive = true
 function bindTemplateEvents() {
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('pointerdown', onBlankPointerDown, true)
   window.addEventListener('paste', onPaste)
 }
 function unbindTemplateEvents() {
   cancelRulerDrag()
   stopFieldResize()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointerdown', onBlankPointerDown, true)
   window.removeEventListener('paste', onPaste)
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
@@ -1447,6 +1462,7 @@ onActivated(() => {
 })
 onDeactivated(() => {
   viewActive = false
+  clearSelection()
   unbindTemplateEvents()
 })
 

@@ -61,11 +61,13 @@ function onKey(e) {
 
 onMounted(() => {
   document.addEventListener('click', onDocClick)
+  document.addEventListener('pointerdown', onDocClick, true)
   document.addEventListener('keydown', onKey)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick)
+  document.removeEventListener('pointerdown', onDocClick, true)
   document.removeEventListener('keydown', onKey)
 })
 </script>

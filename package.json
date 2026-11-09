@@ -1,6 +1,6 @@
 {
   "name": "printpress",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "批印坊 PrintPress - 本地离线通用批量打印工具",
   "type": "module",
   "main": "electron/main.cjs",
@@ -36,7 +36,8 @@
     "test:about-cache-e2e": "node test/about-cache-e2e.cjs",
     "pack:skill": "node scripts/pack-skill.cjs",
     "test:image-edit-e2e": "node test/helpers/electron-runner.cjs test/design-image-edit-e2e.cjs",
-    "test:psd-import": "node test/psd-import.cjs"
+    "test:psd-import": "node test/psd-import.cjs",
+    "test:audit": "npm run build && node test/system-audit-data.cjs && node test/helpers/electron-runner.cjs test/system-audit-instance-e2e.cjs && node test/helpers/electron-runner.cjs test/system-audit-migration-e2e.cjs success && node test/helpers/electron-runner.cjs test/system-audit-migration-e2e.cjs conflict && node test/helpers/electron-runner.cjs test/system-audit-migration-e2e.cjs locked && node test/helpers/electron-runner.cjs test/system-audit-ui-e2e.cjs"
   },
   "author": "lyq",
   "license": "MIT",

@@ -258,7 +258,8 @@ try {
     fs.writeFileSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-bindings.json'), '{broken', 'utf8')
     assert.throws(() => library.purgeOrphanOriginals([hashC]), /photo-bindings\.json/)
     assert.ok(fs.existsSync(path.join(assetsDir, `${hashC}.png`)), '照片绑定索引损坏时拒绝删除候选原件')
-    require('../electron/store.cjs').saveJson('photo-bindings', [])
+    // Explicitly repair the injected corrupt fixture before continuing.
+    fs.writeFileSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'photo-bindings.json'), '[]', 'utf8')
 
     // 竞态复核：把 D 也收进库 → 再 purge D 应跳过，不删（绝不静默删被引用的图）
     library.upsert(assetD, { displayName: 'D 后来收库' })

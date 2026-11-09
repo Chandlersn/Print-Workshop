@@ -4,8 +4,9 @@
  * → 导出 PDF / 直接送打印 → 打印历史留痕与归档件回看。
  * 预览用 iframe srcdoc 直接承载渲染引擎输出的批量 HTML。
  */
-import { ref, computed, watch, onActivated, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onActivated, onDeactivated, onBeforeUnmount, nextTick } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
+import { isNonFunctionalArea } from '../lib/interaction-area.js'
 import PageHeader from '../components/PageHeader.vue'
 import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -35,10 +36,41 @@ const busy = ref(false)
 const previewPage = ref(0)
 const previewFrame = ref(null)
 const photoEdit = ref(null)
+const photoEditActive = ref(false)
 const photoEditBusy = ref(false)
 const photoEditError = ref('')
 const photoInteraction = ref(false)
-const photoEditDirty = computed(() => !!photoEdit.value && ['x','y'].some(k => photoEdit.value.position[k] !== photoEdit.value.initialPosition[k]) || !!photoEdit.value && ['w','h'].some(k => photoEdit.value.size[k] !== photoEdit.value.initialSize[k]))
+const photoEditDirty = computed(() => {
+  const edit = photoEdit.value
+  return !!edit && (edit.resetRequested || edit.fit !== edit.initialFit || ['x', 'y'].some(k => edit.position[k] !== edit.initialPosition[k] || edit.focal[k] !== edit.initialFocal[k]) || ['w', 'h'].some(k => edit.size[k] !== edit.initialSize[k]))
+})
+const previewPageInput = ref('1')
+const previewPageCount = computed(() => Math.max(1, Number(previewInfo.value?.pageCount) || 1))
+const previewPagingDisabled = computed(() => busy.value || previewLoading.value || photoEditBusy.value || photoEditDirty.value || photoInteraction.value)
+watch(previewPage, page => { previewPageInput.value = String(page + 1) })
+
+function jumpToPreviewPage() {
+  const input = previewPageInput.value.trim()
+  if (!previewPagingDisabled.value && /^\d+$/.test(input)) {
+    const page = Number(input)
+    if (Number.isSafeInteger(page)) previewPage.value = Math.max(1, Math.min(previewPageCount.value, page)) - 1
+  }
+  previewPageInput.value = String(previewPage.value + 1)
+}
+
+function stepPreviewPage(step) {
+  if (previewPagingDisabled.value) return
+  previewPage.value = Math.max(0, Math.min(previewPageCount.value - 1, previewPage.value + step))
+}
+
+function onPreviewPageKey(event) {
+  if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+  if (!previewInfo.value || previewPagingDisabled.value || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
+  if (event.target?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="listbox"], [role="menu"], [role="tablist"]')) return
+  if (document.querySelector('.modal-mask, .cd-mask, .onboard-mask, [role="dialog"], [role="alertdialog"], .custom-select .cs-menu')) return
+  event.preventDefault()
+  stepPreviewPage(event.key === 'ArrowLeft' ? -1 : 1)
+}
 const recordDesignRow = ref(null), recordDesignInfo = ref(null), recordDesignBusy = ref(false)
 const singlePhotoBusy = ref(false)
 let recordDesignSeq = 0
@@ -93,6 +125,7 @@ async function cancelOutput() {
   } catch (err) { say(`取消失败：${toUserMessage(err)}`) }
 }
 const toast = ref('')
+const outputRecordWarning = ref('')
 /** 预览请求序号：晚到的旧响应据此丢弃（见 rebuildPreview） */
 let previewSeq = 0
 
@@ -158,7 +191,8 @@ const boundDsMissing = computed(() =>
 // selRows = null 表示全量；数组为 0 基索引集合（基于数据集全量行序）。
 // 部分出片不回写数据集「已打」状态，避免「打了 3 个人却显示整份已打」。
 const selRows = ref(null)
-const selRowsMeta = ref(null) // { dsId, rowCount }：行数漂移守卫比对基准
+const selRowsMeta = ref(null) // { dsId, recordIds }：以人员身份追踪选择
+const scopeNeedsReview = ref(false)
 const dsDetail = ref(null)    // 当前数据集完整数据（行选择面板用）
 const imageNameField1 = ref('')
 const imageNameField2 = ref('')
@@ -281,17 +315,23 @@ async function loadDetail() {
 /** 设置出片范围：null = 全量；数组 = 部分。同时记录行数快照供漂移守卫比对 */
 function setScope(rows) {
   selRows.value = Array.isArray(rows) && rows.length ? [...rows].sort((a, b) => a - b) : null
-  selRowsMeta.value = selRows.value ? { dsId: selDs.value, rowCount: dsRowCount.value } : null
+  selRowsMeta.value = selRows.value ? { dsId: selDs.value, recordIds: selRows.value.map(index => dsDetail.value?.recordIds?.[index]) } : null
+  scopeNeedsReview.value = Boolean(selRowsMeta.value?.recordIds.some(id => !id))
 }
 
-/** 漂移守卫：数据集增删行会让旧索引错位，必须重置为全量，否则会打错人 */
-function guardScope() {
+/** 重新按稳定人员 ID 定位，删除所选人员时要求用户重新确认范围。 */
+async function guardScope() {
   if (!selRows.value || !selRowsMeta.value) return
-  const cur = datasets.value.find((d) => d.id === selRowsMeta.value.dsId)
-  if (!cur || cur.rowCount !== selRowsMeta.value.rowCount) {
+  try {
+    const cur = await window.printpress.getDataset(selRowsMeta.value.dsId)
+    const resolved = resolveReprintScope({ partial: true, selection: selRows.value, selectionIds: selRowsMeta.value.recordIds }, cur.recordIds)
+    if (resolved.reason) throw new Error(resolved.reason)
+    if (resolved.rows.some((row, i) => row !== selRows.value[i])) selRows.value = resolved.rows
+  } catch (err) {
     selRows.value = null
     selRowsMeta.value = null
-    say('数据集行数已变化，出片范围已重置为全部')
+    scopeNeedsReview.value = true
+    say('名单或所选人员已变化，请重新选择打印范围')
   }
 }
 
@@ -402,7 +442,7 @@ async function refreshAll() {
   }
   if (!datasets.value.some((d) => d.id === selDs.value)) selDs.value = ''
   if (!templates.value.some((t) => t.id === selTpl.value)) selTpl.value = ''
-  guardScope() // 行数漂移则重置范围（打印不改行数，故正常打印后选择保留）
+  await guardScope()
 }
 
 async function rebuildPreview() {
@@ -489,8 +529,8 @@ function syncPhotoPreview() {
     const layer = img.closest('[data-design-layer]')
     if (!layer) return
     const selected = img.dataset.photoLayerId === edit.layerId && previewPhotoRow(img) === edit.rowIndex
-    layer.querySelectorAll('[data-photo-resize]').forEach(handle => { handle.style.display = selected ? 'block' : 'none' })
-    if (selected) { layer.style.left = `${edit.position.x}mm`; layer.style.top = `${edit.position.y}mm`; layer.style.width = `${edit.size.w}mm`; layer.style.height = `${edit.size.h}mm`; layer.style.outline = '2px solid #d34f32'; layer.style.outlineOffset = '-1px' }
+    layer.querySelectorAll('[data-photo-resize]').forEach(handle => { handle.style.display = selected && photoEditActive.value ? 'block' : 'none' })
+    if (selected) { layer.style.left = `${edit.position.x}mm`; layer.style.top = `${edit.position.y}mm`; layer.style.width = `${edit.size.w}mm`; layer.style.height = `${edit.size.h}mm`; layer.style.outline = photoEditActive.value ? '2px solid #d34f32' : ''; layer.style.outlineOffset = '-1px'; img.style.objectFit = edit.fit; img.style.objectPosition = `${edit.focal.x * 100}% ${edit.focal.y * 100}%` }
   })
 }
 
@@ -500,18 +540,54 @@ function clearPhotoPreview() {
   doc.querySelectorAll('img[data-photo-layer-id]').forEach(img => {
     if (img.dataset.photoLayerId !== edit.layerId || previewPhotoRow(img) !== edit.rowIndex) return
     const layer = img.closest('[data-design-layer]')
-    if (layer) { layer.style.left = `${edit.initialPosition.x}mm`; layer.style.top = `${edit.initialPosition.y}mm`; layer.style.width = `${edit.initialSize.w}mm`; layer.style.height = `${edit.initialSize.h}mm`; layer.style.outline = ''; layer.querySelectorAll('[data-photo-resize]').forEach(handle => { handle.style.display = 'none' }) }
+    if (layer) { layer.style.left = `${edit.initialPosition.x}mm`; layer.style.top = `${edit.initialPosition.y}mm`; layer.style.width = `${edit.initialSize.w}mm`; layer.style.height = `${edit.initialSize.h}mm`; layer.style.outline = ''; img.style.objectFit = edit.initialFit; img.style.objectPosition = `${edit.initialFocal.x * 100}% ${edit.initialFocal.y * 100}%`; layer.querySelectorAll('[data-photo-resize]').forEach(handle => { handle.style.display = 'none' }) }
   })
 }
 
 function closePhotoEdit() {
-  if (photoKeyTimer) { finishPhotoKeys(); return }
+  if (photoKeyTimer) finishPhotoKeys()
   if (photoEditBusy.value) return
+  if (photoEditDirty.value) { photoEditActive.value = false; syncPhotoPreview(); return }
   photoEditSeq++
+  clearPhotoPreview()
   photoEdit.value = null
+  photoEditActive.value = false
   photoDrag = null
   photoInteraction.value = false
-  rebuildPreview()
+}
+
+function finishPhotoEditOnBlank() {
+  if (photoDrag) return
+  if (photoKeyTimer) finishPhotoKeys()
+  if (photoEditBusy.value) { photoEditActive.value = false; syncPhotoPreview(); return }
+  if (photoEdit.value) closePhotoEdit()
+  else if (!photoInteraction.value) photoEditSeq++
+}
+
+function discardPhotoEdit() {
+  if (photoEditBusy.value || photoInteraction.value) return
+  clearPhotoPreview()
+  photoEditSeq++
+  photoEdit.value = null
+  photoEditActive.value = false
+  photoEditError.value = ''
+}
+
+function resetPhotoEdit() {
+  const edit = photoEdit.value
+  if (!edit || photoEditBusy.value || photoInteraction.value) return
+  edit.position = { ...edit.defaultPosition }
+  edit.size = { ...edit.defaultSize }
+  edit.fit = edit.defaultFit
+  edit.focal = { ...edit.defaultFocal }
+  edit.resetRequested = true
+  photoEditError.value = ''
+  syncPhotoPreview()
+}
+
+function onBlankPointerDown(event) {
+  if (event.button !== 0) return
+  if (isNonFunctionalArea(event.target, '.photo-edit, .preview-frame')) finishPhotoEditOnBlank()
 }
 
 function onPreviewFrameLoad(event) {
@@ -523,17 +599,26 @@ function onPreviewFrameLoad(event) {
     const img = event.target.closest?.('img[data-photo-layer-id]')
     if (!img) return
     const rowIndex = previewPhotoRow(img)
-    if (photoEdit.value?.rowIndex !== rowIndex || photoEdit.value?.layerId !== img.dataset.photoLayerId) openPhotoEdit(rowIndex, img.dataset.photoLayerId)
+    if (photoEdit.value?.rowIndex !== rowIndex || photoEdit.value?.layerId !== img.dataset.photoLayerId) {
+      if (photoEditDirty.value) { photoEditError.value = '请先保存或撤销当前照片调整'; return }
+      openPhotoEdit(rowIndex, img.dataset.photoLayerId)
+    } else { photoEditActive.value = true; syncPhotoPreview() }
   })
   doc.addEventListener('pointerdown', event => {
     const handle = event.target.closest?.('[data-photo-resize]')
     const img = handle ? handle.parentElement.querySelector('img[data-photo-layer-id]') : event.target.closest?.('img[data-photo-layer-id]'), edit = photoEdit.value
-    if (!img || event.button !== 0 || photoEditBusy.value || busy.value) return
+    if (event.button !== 0) return
+    if (!img) {
+      if (!event.target.closest?.('button, input, textarea, select, a, label, [contenteditable="true"]')) finishPhotoEditOnBlank()
+      return
+    }
+    if (photoEditBusy.value || busy.value) return
     if (photoKeyTimer) { finishPhotoKeys(); return }
     event.preventDefault()
     const rowIndex = previewPhotoRow(img), layerId = img.dataset.photoLayerId
     const same = edit?.rowIndex === rowIndex && edit?.layerId === layerId
-    if (!same && photoEditDirty.value) { photoEditError.value = '当前调整尚未保存，请重试保存或恢复默认'; return }
+    if (!same && photoEditDirty.value) { photoEditError.value = '请先保存或撤销当前照片调整'; return }
+    if (same) { photoEditActive.value = true; syncPhotoPreview() }
     photoFocusSign = img.closest('.fold-half.flip') ? -1 : 1
     img.focus({ preventScroll:true })
     const drag = { pointerId:event.pointerId, x:event.clientX, y:event.clientY, lastX:event.clientX, lastY:event.clientY,
@@ -548,7 +633,7 @@ function onPreviewFrameLoad(event) {
       drag.position = { ...photoEdit.value.position }
       drag.size = { ...photoEdit.value.size }; drag.rotation = photoEdit.value.rotation
       applyPhotoDrag(drag)
-      if (drag.ended) { photoDrag = null; if (drag.moved) savePhotoEdit(); photoInteraction.value = false }
+      if (drag.ended) { photoDrag = null; photoInteraction.value = false }
     })
   })
   doc.addEventListener('pointermove', event => {
@@ -557,10 +642,11 @@ function onPreviewFrameLoad(event) {
     if (Math.abs(photoDrag.lastX-photoDrag.x) + Math.abs(photoDrag.lastY-photoDrag.y) > 1) photoDrag.moved = true
     applyPhotoDrag(photoDrag)
   })
-  const stopDrag = event => { if (photoDrag?.pointerId === event.pointerId) { if (photoDrag.position) { const changed = photoDrag.moved; photoDrag = null; if (changed) savePhotoEdit(); photoInteraction.value = false } else photoDrag.ended = true } }
+  const stopDrag = event => { if (photoDrag?.pointerId === event.pointerId) { if (photoDrag.position) { photoDrag = null; photoInteraction.value = false } else photoDrag.ended = true } }
   doc.addEventListener('pointerup', stopDrag)
   doc.addEventListener('pointercancel', stopDrag)
   doc.addEventListener('keydown', handlePhotoKey)
+  doc.addEventListener('keydown', onPreviewPageKey)
   doc.querySelectorAll('img[data-photo-layer-id]').forEach(img => {
     img.style.cursor = 'grab'; img.style.userSelect = 'none'; img.title = '拖动照片移动，拖动控制点缩放，方向键微调'; img.draggable = false; img.tabIndex = 0
     const layer = img.closest('[data-design-layer]')
@@ -571,7 +657,7 @@ function onPreviewFrameLoad(event) {
     }
   })
   syncPhotoPreview()
-  if (photoEdit.value && document.activeElement === previewFrame.value) {
+  if (photoEdit.value && photoEditActive.value && document.activeElement === previewFrame.value) {
     const target = [...doc.querySelectorAll('img[data-photo-layer-id]')].find(img => img.dataset.photoLayerId === photoEdit.value.layerId && previewPhotoRow(img) === photoEdit.value.rowIndex && Boolean(img.closest('.fold-half.flip')) === (photoFocusSign === -1))
     target?.focus({ preventScroll:true })
   }
@@ -580,12 +666,11 @@ function onPreviewFrameLoad(event) {
 function finishPhotoKeys() {
   if (!photoKeyTimer) return
   clearTimeout(photoKeyTimer); photoKeyTimer = null
-  if (photoEditDirty.value) savePhotoEdit()
   photoInteraction.value = false
 }
 
 function handlePhotoKey(event) {
-  if (!photoEdit.value || photoEditBusy.value || busy.value || photoDrag || event.ctrlKey || event.metaKey || event.altKey) return
+  if (!photoEdit.value || !photoEditActive.value || photoEditBusy.value || busy.value || photoDrag || event.ctrlKey || event.metaKey || event.altKey) return
   const directions = { ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,-1], ArrowDown:[0,1] }
   const direction = directions[event.key]
   if (!direction || event.target?.closest?.('input,textarea,select,[contenteditable="true"]')) return
@@ -594,6 +679,7 @@ function handlePhotoKey(event) {
   const clamp = n => Math.max(-10000, Math.min(10000, Math.round(n*100)/100))
   photoEdit.value.position.x = clamp(photoEdit.value.position.x + direction[0]*step)
   photoEdit.value.position.y = clamp(photoEdit.value.position.y + direction[1]*step)
+  photoEdit.value.resetRequested = false
   syncPhotoPreview()
   photoInteraction.value = true
   clearTimeout(photoKeyTimer)
@@ -619,6 +705,7 @@ function applyPhotoDrag(drag) {
     photoEdit.value.position.x = clamp(drag.position.x + dx)
     photoEdit.value.position.y = clamp(drag.position.y + dy)
   }
+  if (drag.moved) photoEdit.value.resetRequested = false
   syncPhotoPreview()
 }
 
@@ -637,23 +724,30 @@ async function openPhotoEdit(rowIndex, layerId) {
     if (!current.assetId) throw new Error('当前人员没有可调整的匹配照片')
     recordDesignRow.value = rowIndex
     photoEdit.value = { ...key, rowIndex, label: rowPreview(detail.rows[rowIndex]), assetId: current.assetId,
-      displayAssetId: current.displayAssetId || current.assetId, state: current.state, fit: current.fit, focal: { ...current.focal }, position: { ...current.position }, initialPosition: { ...current.position }, size:{...current.size}, initialSize:{...current.size}, rotation:current.rotation }
+      displayAssetId: current.displayAssetId || current.assetId, state: current.state, fit: current.fit, initialFit: current.fit, focal: { ...current.focal }, initialFocal: { ...current.focal }, position: { ...current.position }, initialPosition: { ...current.position }, size:{...current.size}, initialSize:{...current.size}, defaultPosition: { ...current.defaultPosition }, defaultSize: { ...current.defaultSize }, defaultFit: current.defaultFit, defaultFocal: { ...current.defaultFocal }, resetRequested: false, rotation:current.rotation }
+    photoEditActive.value = true
     syncPhotoPreview()
   } catch (err) { if (seq === photoEditSeq) photoEditError.value = toUserMessage(err) }
 }
 
-async function savePhotoEdit(restore = false) {
+async function savePhotoEdit() {
   if (!photoEdit.value || photoEditBusy.value) return
-  if (!restore && (!Number.isFinite(photoEdit.value.position.x) || !Number.isFinite(photoEdit.value.position.y) || Math.abs(photoEdit.value.position.x)>10000 || Math.abs(photoEdit.value.position.y)>10000 || !Number.isFinite(photoEdit.value.size.w) || !Number.isFinite(photoEdit.value.size.h) || photoEdit.value.size.w<.01 || photoEdit.value.size.h<.01 || photoEdit.value.size.w>10000 || photoEdit.value.size.h>10000)) { photoEditError.value = '请输入有效的位置和宽高'; return }
+  if (!Number.isFinite(photoEdit.value.position.x) || !Number.isFinite(photoEdit.value.position.y) || Math.abs(photoEdit.value.position.x)>10000 || Math.abs(photoEdit.value.position.y)>10000 || !Number.isFinite(photoEdit.value.size.w) || !Number.isFinite(photoEdit.value.size.h) || photoEdit.value.size.w<.01 || photoEdit.value.size.h<.01 || photoEdit.value.size.w>10000 || photoEdit.value.size.h>10000) { photoEditError.value = '请输入有效的位置和宽高'; return }
   photoEditBusy.value = true
   photoEditError.value = ''
-  const { datasetId, templateId, rowId, layerId, rowIndex } = photoEdit.value
+  const { datasetId, templateId, rowId, layerId } = photoEdit.value
+  const restore = photoEdit.value.resetRequested
   try {
-    if (restore) await window.printpress.clearPhotoOverride({ datasetId, templateId, rowId, layerId })
-    else await window.printpress.setPhotoOverride({ datasetId, templateId, rowId, layerId,
+    let current
+    if (restore) {
+      await window.printpress.clearPhotoOverride({ datasetId, templateId, rowId, layerId })
+      current = await window.printpress.getPhotoOverride({ datasetId, templateId, rowId, layerId })
+    } else current = await window.printpress.setPhotoOverride({ datasetId, templateId, rowId, layerId,
       fit: photoEdit.value.fit, focal: { x: photoEdit.value.focal.x, y: photoEdit.value.focal.y }, position: { x: photoEdit.value.position.x, y: photoEdit.value.position.y }, size:{ w:photoEdit.value.size.w, h:photoEdit.value.size.h } })
-    await openPhotoEdit(rowIndex, layerId)
-    rebuildPreview()
+    if (photoEdit.value?.rowId === rowId && photoEdit.value?.layerId === layerId) {
+      Object.assign(photoEdit.value, { state: current.state, fit: current.fit, initialFit: current.fit, focal: { ...current.focal }, initialFocal: { ...current.focal }, position: { ...current.position }, initialPosition: { ...current.position }, size: { ...current.size }, initialSize: { ...current.size }, defaultPosition: { ...current.defaultPosition }, defaultSize: { ...current.defaultSize }, defaultFit: current.defaultFit, defaultFocal: { ...current.defaultFocal }, resetRequested: false, rotation: current.rotation })
+      syncPhotoPreview()
+    }
     loadPhotoPreflight()
     say(restore ? '已恢复此人的默认照片位置' : '已保存此人的照片位置')
   } catch (err) { photoEditError.value = toUserMessage(err) }
@@ -797,12 +891,13 @@ watch(outputDpi, () => rebuildPreview())
 watch(previewPage, () => { photoEditSeq++; photoEdit.value = null; photoDrag = null; photoInteraction.value = false; rebuildPreview() })
 
 async function exportIndividualImages() {
-  if (!ready.value || busy.value || mismatched.value) return
+  if (!ready.value || busy.value || mismatched.value || scopeNeedsReview.value) return
   if (!imageNameField1.value || !imageNameField2.value || imageNameField1.value === imageNameField2.value) {
     say('请选择两个不同的数据字段作为图片名称')
     return
   }
   busy.value = true
+  outputRecordWarning.value = ''
   try {
     const photo = await loadPhotoPreflight()
     if (!photo || !photo.canOutput) {
@@ -818,6 +913,7 @@ async function exportIndividualImages() {
       format: imageFormat.value, quality: FORMATS[imageFormat.value].quality === null ? undefined : imageQuality.value,
       preflightFingerprint: photo.fingerprint, jobKey,
     })
+    outputRecordWarning.value = r.recordWarning || ''
     if (r.canceled) say('已取消选择保存文件夹')
     else say(`已导出 ${r.count} 张 ${r.format === 'jpeg' ? 'JPG' : String(r.format || 'png').toUpperCase()} 图片（${r.dpi} dpi），保存到：${r.directory}`)
   } catch (err) {
@@ -835,7 +931,7 @@ async function exportIndividualImages() {
 
 /** 校验 → 有空值先弹窗（可中断可放行），字段缺失不可放行；无问题直接执行 */
 async function runAction(action) {
-  if (!ready.value || busy.value || mismatched.value) return
+  if (!ready.value || busy.value || mismatched.value || scopeNeedsReview.value) return
   busy.value = true
   try {
     const photo = await loadPhotoPreflight()
@@ -947,15 +1043,18 @@ async function execute(action, preflightFingerprint) {
   payload.jobKey = activeJobKey.value
   taskProgress.value = null
   cancelRequested.value = false
+  outputRecordWarning.value = ''
   try {
     if (action === 'pdf') {
       const r = await window.printpress.printExportPdf(payload)
+      outputRecordWarning.value = r.recordWarning || ''
       if (r.canceled) { say('已取消导出'); return }
       // 体积用**真实字节数**报（估算只是模型，见 I-49）；页数分批时以实际合并结果为准
       const pages = r.pages ?? previewInfo.value?.pageCount ?? '?'
       say(`PDF 已导出（${pages} 页${r.bytes ? ` · ${formatBytes(r.bytes)}` : ''}）${outputResultText(r.output)}`)
     } else {
       const r = await window.printpress.printSend(payload)
+      outputRecordWarning.value = r.recordWarning || ''
       if (r.ok) say(`已发送打印机${outputResultText(r.output)}`)
       // Chromium 的 print 回调给的是英文（'Print job canceled' / 'Invalid printer settings'），
       // 不能直接贴给用户；给一个贴合场景的兜底（I-48）
@@ -1085,6 +1184,8 @@ const modeLabel = { pdf: '导出 PDF', print: '打印', images: '导出图片', 
 const statusLabel = { ok: '完成', failed: '失败', canceled: '取消' }
 
 onActivated(async () => {
+  window.addEventListener('pointerdown', onBlankPointerDown, true)
+  window.addEventListener('keydown', onPreviewPageKey)
   await refreshAll()
   if (!ready.value) return
   await loadDetail()
@@ -1093,15 +1194,30 @@ onActivated(async () => {
   returnedPhotoRowId = ''
   rebuildPreview(); loadPhotoPreflight()
 })
+onDeactivated(() => {
+  window.removeEventListener('pointerdown', onBlankPointerDown, true)
+  window.removeEventListener('keydown', onPreviewPageKey)
+  finishPhotoEditOnBlank()
+})
 </script>
 
 <template>
   <section class="page">
-    <PageHeader title="打印中心" description="选模板 → 预览确认 → 导出 PDF、逐条保存图片或直接送打印机。">
+    <PageHeader class="print-header" title="打印中心" description="预览 · 导出 · 打印">
       <template #actions>
+        <div class="toolbar-actions" aria-label="出片操作">
+          <button class="btn" :disabled="!ready || busy || mismatched || scopeNeedsReview || photoEditBusy || photoEditDirty || photoInteraction || imageNameFieldOptions.length < 2" @click="exportIndividualImages"><AppIcon name="image" /> {{ busy && activeJobKey.startsWith('images-') ? '正在导出图片…' : `逐条导出 ${imageFormatLabel}` }}</button>
+          <button class="btn" :disabled="!ready || busy || mismatched || scopeNeedsReview || photoEditBusy || photoEditDirty || photoInteraction" @click="runAction('print')"><AppIcon name="print" /> 直接打印</button>
+          <button class="btn btn-primary" :disabled="!ready || busy || mismatched || scopeNeedsReview || photoEditBusy || photoEditDirty || photoInteraction" @click="runAction('pdf')"><AppIcon name="download" /> 导出 PDF</button>
+        </div>
         <button class="btn btn-mini history-trigger" @click="historyOpen = true"><AppIcon name="history" /> 打印历史<span>{{ jobs.length }}</span></button>
       </template>
     </PageHeader>
+
+    <div v-if="outputRecordWarning" class="scope-bar mismatch-bar" role="alert">
+      <span class="scope-note">{{ outputRecordWarning }}</span>
+      <button class="btn btn-mini" @click="outputRecordWarning = ''">知道了</button>
+    </div>
 
     <div class="toolbar">
       <div class="toolbar-row toolbar-row-template">
@@ -1112,18 +1228,13 @@ onActivated(async () => {
         <!-- 模板已绑定数据集：直接显示关联关系，不可错配 -->
         <template v-if="boundTpl && boundTpl.datasetId">
           <span class="bound-ds">关联数据集：{{ boundTpl.datasetName || '（已删除）' }}（{{ dsTotalRows }} 行）</span>
-          <button class="btn btn-mini" :disabled="busy" @click="openRebind">更换数据集</button>
+          <button class="btn btn-mini" :disabled="busy || photoEditBusy || photoEditDirty || photoInteraction" @click="openRebind">更换数据集</button>
         </template>
         <!-- 旧模板未绑定：兼容路径，允许临时选择 -->
         <div v-else-if="selTpl" class="toolbar-control">
           <span class="tb-label">数据集</span>
           <CustomSelect v-model="selDs" :disabled="busy || photoEditBusy || photoEditDirty || photoInteraction" :options="dsOptions" placeholder="选择数据集" width="200px" />
           <span class="scope-note">旧模板未绑定数据集，建议回模板工坊保存一次完成绑定</span>
-        </div>
-        <div class="toolbar-actions" aria-label="出片操作">
-          <button class="btn" :disabled="!ready || busy || mismatched || photoEditBusy || photoEditDirty || photoInteraction || imageNameFieldOptions.length < 2" @click="exportIndividualImages"><AppIcon name="image" /> {{ busy && activeJobKey.startsWith('images-') ? '正在导出图片…' : `逐条导出 ${imageFormatLabel}` }}</button>
-          <button class="btn" :disabled="!ready || busy || mismatched || photoEditBusy || photoEditDirty || photoInteraction" @click="runAction('print')"><AppIcon name="print" /> 直接打印</button>
-          <button class="btn btn-primary" :disabled="!ready || busy || mismatched || photoEditBusy || photoEditDirty || photoInteraction" @click="runAction('pdf')"><AppIcon name="download" /> 导出 PDF</button>
         </div>
       </div>
 
@@ -1184,12 +1295,13 @@ onActivated(async () => {
         <template v-if="selRows">· 不改数据集「已打」状态，仅留痕</template>
       </span>
       <span v-if="photoPreflight" class="scope-note range-count">本次 {{ photoPreflight.recordCount }} 人 · 预计 {{ photoPreflight.pageCount }} 页</span>
+      <span v-if="scopeNeedsReview" class="photo-preflight-error">名单或所选人员已变化，请重新选择打印范围</span>
       <span class="tb-spacer"></span>
       <button class="btn btn-mini" :disabled="busy || !dsDetail || photoEditBusy || photoEditDirty || photoInteraction" @click="openScope">选择打印行</button>
       <button v-if="selRows" class="btn btn-mini" :disabled="busy || photoEditBusy || photoEditDirty || photoInteraction" @click="setScope(null)">恢复全量</button>
     </div>
 
-    <div v-if="photoPreflightLoading || photoPreflightError || photoPreflight?.photoLayerCount" class="photo-preflight" data-testid="print-photo-preflight">
+    <div v-if="photoPreflightLoading || photoPreflightError || photoPreflight?.photoLayerCount || dsPrintStats" class="photo-preflight" data-testid="print-photo-preflight">
       <span v-if="photoPreflightLoading" class="scope-note">正在检查本次范围的照片…</span>
       <span v-else-if="photoPreflightError" class="photo-preflight-error">照片预检失败：{{ photoPreflightError }}</span>
       <template v-else-if="photoPreflight">
@@ -1205,6 +1317,15 @@ onActivated(async () => {
             <span v-if="!photoPreflight.canOutput" class="photo-preflight-error">冲突、无效或坏图需先处理</span>
           </template>
         </template>
+      </template>
+      <template v-if="dsPrintStats">
+        <span class="det-flag" :class="dsPrintStats.times ? 'st-ok' : 'st-failed'">{{ dsPrintStats.times ? '有记录' : '无记录' }}</span>
+        <span class="scope-note" data-testid="print-dataset-stats">
+          「{{ dsPrintStats.name }}」（共 {{ dsPrintStats.rowCount }} 行）：
+          <template v-if="dsPrintStats.times">已打印/导出 {{ dsPrintStats.times }} 次 · 累计 {{ dsPrintStats.pages }} 份 · 最近 {{ fmtTime(dsPrintStats.last) }}</template>
+          <template v-else>尚无全量打印或导出记录——如果这份名单本来就要出片，这里就是遗漏提醒</template>
+          <template v-if="dsPrintStats.partialTimes">（另有补打 {{ dsPrintStats.partialTimes }} 次 · {{ dsPrintStats.partialRows }} 行，不计入全量）</template>
+        </span>
       </template>
       <details v-if="photoPreflight?.warnings?.length" class="photo-issues" data-testid="print-photo-quality"><summary>{{ photoPreflight.warnings.length }} 人有清晰度、人物对齐或裁切提示（建议输出前检查）</summary><div class="photo-issues-list"><div v-for="item in photoPreflight.warnings" :key="item.rowIndex" class="photo-issue-row"><button class="btn btn-mini" @click="goPhotoIssue(item)">第 {{ item.rowIndex + 1 }} 行</button><span>{{ item.name }}</span><span class="scope-note">{{ item.reasons.join('；') }}</span></div></div></details>
       <div v-if="photoIssuesOpen && visiblePhotoIssues.length" class="photo-issues">
@@ -1244,14 +1365,14 @@ onActivated(async () => {
         </span>
         <span class="tb-spacer"></span>
         <div v-if="previewInfo" class="preview-paging" data-testid="print-preview-paging">
-          <button class="btn" :disabled="busy || previewLoading || photoEditBusy || photoEditDirty || photoInteraction || previewPage === 0" @click="previewPage--">上一页</button>
-          <span>第 {{ (previewInfo.previewPage ?? previewPage) + 1 }} / {{ previewInfo.pageCount || 1 }} 页</span>
-          <button class="btn" :disabled="busy || previewLoading || photoEditBusy || photoEditDirty || photoInteraction || previewPage + 1 >= previewInfo.pageCount" @click="previewPage++">下一页</button>
+          <label for="preview-page-input">第</label>
+          <input id="preview-page-input" v-model="previewPageInput" class="preview-page-input" data-testid="print-preview-page-input" type="text" inputmode="numeric" :disabled="previewPagingDisabled" :aria-label="`跳转到第几页，共 ${previewPageCount} 页`" title="输入页码，按 Enter 跳转" @focus="$event.target.select()" @keydown.enter.prevent="jumpToPreviewPage" @keydown.esc.prevent="previewPageInput = String(previewPage + 1)" @blur="jumpToPreviewPage">
+          <span>/ {{ previewPageCount }} 页</span>
         </div>
         <label v-if="pageRecordIndexes.length > 1" class="preview-paging">当前人员 <select v-model.number="recordDesignRow" aria-label="选择要单独编辑的人员" data-testid="print-record-design-row"><option v-for="index in pageRecordIndexes" :key="index" :value="index">第 {{ index + 1 }} 行 · {{ rowPreview(dsDetail?.rows?.[index] || {}) }}</option></select></label>
         <button v-if="pageRecordIndexes.length" class="btn" data-testid="print-record-design-edit" :disabled="busy || recordDesignBusy || previewLoading || photoEditBusy || photoEditDirty || photoInteraction" @click="editRecordDesign">编辑此人底图</button>
         <button v-if="pageRecordIndexes.length && dsDetail?.photoMatchColumn && previewHtml.includes('data-photo-layer-id=')" class="btn" data-testid="print-single-photo-edit" :disabled="busy || singlePhotoBusy || previewLoading || photoEditBusy || photoEditDirty || photoInteraction" @click="editSinglePhoto">精修此人照片</button>
-        <button v-if="recordDesignInfo?.hasOverride" class="btn" data-testid="print-record-design-reset" :disabled="busy || recordDesignBusy" @click="clearRecordDesign">恢复此人默认底图</button>
+        <button v-if="recordDesignInfo?.hasOverride" class="btn" data-testid="print-record-design-reset" :disabled="busy || recordDesignBusy || photoEditBusy || photoEditDirty || photoInteraction" @click="clearRecordDesign">恢复此人默认底图</button>
         <span v-if="designHint" class="preview-dpi" :class="designHint.tone" :title="designHint.title" data-testid="print-design-dpi">
           {{ designHint.text }}
         </span>
@@ -1275,7 +1396,7 @@ onActivated(async () => {
         <span class="photo-edit-hint">拖动照片或控制点调整，方向键微调（Shift 加速）。</span>
         <span v-if="photoEdit.state === 'stale'" class="photo-preflight-error">照片已变化，旧调整未应用</span>
         <span class="photo-edit-status" role="status">{{ photoEditBusy ? '正在保存…' : photoEditDirty ? '未保存' : '已保存' }}</span>
-        <div class="photo-edit-controls"><button v-if="photoEditDirty" class="btn btn-mini btn-primary" :disabled="photoEditBusy" @click="savePhotoEdit()">重试保存</button><button class="btn btn-mini" data-testid="print-photo-reset" :disabled="photoEditBusy" @click="savePhotoEdit(true)">恢复默认</button><button class="btn btn-mini" :disabled="photoEditBusy || photoInteraction" @click="closePhotoEdit">完成</button></div>
+        <div class="photo-edit-controls"><button v-if="photoEditDirty" class="btn btn-mini btn-primary" :disabled="photoEditBusy || photoInteraction" @click="savePhotoEdit()">保存调整</button><button v-if="photoEditDirty" class="btn btn-mini" :disabled="photoEditBusy || photoInteraction" @click="discardPhotoEdit">撤销未保存调整</button><button class="btn btn-mini" data-testid="print-photo-reset" :disabled="photoEditBusy || photoInteraction" @click="resetPhotoEdit">恢复默认</button><button v-if="photoEditActive" class="btn btn-mini" :disabled="photoEditBusy || photoInteraction" @click="closePhotoEdit">完成</button></div>
       </div>
 
       <!-- 多联回退提示：配了多联却放不下时已自动按单页出片。这不是错误，但结果与
@@ -1283,6 +1404,8 @@ onActivated(async () => {
       <p v-if="layoutFallback" class="layout-warn">
         <span class="lw-tag">已按单页出片</span>{{ layoutFallback }}
       </p>
+      <div class="preview-stage" :class="{ 'has-paging': previewInfo }" :style="previewInfo ? { width: `${frameW * zoomK + 134}px` } : {}">
+        <button v-if="previewInfo" type="button" class="preview-page-arrow" data-testid="print-preview-previous" aria-label="上一页" title="上一页" :disabled="previewPagingDisabled || previewPage === 0" @click="stepPreviewPage(-1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7" /></svg></button>
       <div class="preview-scroll">
         <!-- scale 缩放：iframe 布局尺寸=纸张全宽（内视口完整容纳内容，不裁边），
              transform 只做视觉缩放，外层 holder 定缩放后的占位尺寸 -->
@@ -1302,20 +1425,8 @@ onActivated(async () => {
           ></iframe>
         </div>
       </div>
-    </div>
-
-    <!-- 打印统计：从留痕自动聚合，对照工作簿是否遗漏。放在历史上方——
-         出完片往下一滚就是「有没有打过」的对照，遗漏提醒与记录清单贴在一起 -->
-    <div v-if="ready && dsPrintStats" class="scope-bar stats-bar">
-      <span class="det-flag" :class="dsPrintStats.times ? 'st-ok' : 'st-failed'">
-        {{ dsPrintStats.times ? '有记录' : '无记录' }}
-      </span>
-      <span class="scope-note">
-        「{{ dsPrintStats.name }}」（共 {{ dsPrintStats.rowCount }} 行）：
-        <template v-if="dsPrintStats.times">已打印/导出 {{ dsPrintStats.times }} 次 · 累计 {{ dsPrintStats.pages }} 份 · 最近 {{ fmtTime(dsPrintStats.last) }}</template>
-        <template v-else>尚无全量打印或导出记录——如果这份名单本来就要出片，这里就是遗漏提醒</template>
-        <template v-if="dsPrintStats.partialTimes">（另有补打 {{ dsPrintStats.partialTimes }} 次 · {{ dsPrintStats.partialRows }} 行，不计入全量）</template>
-      </span>
+        <button v-if="previewInfo" type="button" class="preview-page-arrow" data-testid="print-preview-next" aria-label="下一页" title="下一页" :disabled="previewPagingDisabled || previewPage + 1 >= previewPageCount" @click="stepPreviewPage(1)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>
+      </div>
     </div>
 
     <div v-if="historyOpen" class="modal-mask history-mask" @click.self="historyOpen = false" @keydown.esc.window="historyOpen = false">
@@ -1520,13 +1631,22 @@ onActivated(async () => {
 <style scoped>
 .output-progress{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 16px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
 .preview-paging{display:flex;gap:8px;align-items:center;font-size:12px}
+.preview-page-input { width: 58px; padding: 5px 6px; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--input-bg); color: var(--ink); font: inherit; text-align: center; }
+.preview-page-input:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 1px; }
+.preview-page-input:disabled { opacity: .5; }
+
+.print-header { margin-bottom: 8px; }
+.print-header :deep(.page-header__text) { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.print-header :deep(.page-header__desc) { margin: 0; padding: 0; line-height: 1.4; }
+.print-header :deep(.page-header__actions) { gap: 8px; }
 
 .toolbar {
   display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 12px;
-  margin-bottom: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--paper-card);
@@ -1544,8 +1664,14 @@ onActivated(async () => {
   padding: 10px 0 2px;
 }
 
-.output-settings { border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; }
-.output-settings summary { cursor: pointer; font-size: 12px; color: var(--ink-2); }
+.toolbar-row-template { flex: 1 1 380px; }
+.output-settings { min-width: 0; max-width: 100%; }
+.output-settings:not([open]) { flex: 0 1 auto; }
+.output-settings[open] { flex: 1 0 100%; border-top: 1px solid var(--line); padding-top: 8px; }
+.output-settings summary { cursor: pointer; padding: 5px 9px; border: 1px solid var(--cinnabar); border-radius: 6px; background: var(--cinnabar-soft); color: var(--cinnabar); font-size: 12px; font-weight: 600; }
+.output-settings summary:hover { filter: brightness(.96); }
+.output-settings summary:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 2px; }
+.output-settings:not([open]) summary { max-width: min(42vw, 520px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .output-settings summary span { color: var(--stone); font-weight: 400; }
 .output-settings .format-note { padding-top: 8px; }
 
@@ -1566,7 +1692,7 @@ onActivated(async () => {
 }
 
 .toolbar-name-plus { color: var(--stone); font-size: 13px; }
-.toolbar-actions { margin-left: auto; }
+.toolbar-actions { margin-left: 0; }
 .image-quality { font-size: 13px; color: var(--stone); }
 .image-quality input { width: 60px; box-sizing: border-box; padding: 6px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--ink); background: var(--paper-card); }
 .format-note { margin: 0; color: var(--stone); font-size: 12px; }
@@ -1592,7 +1718,7 @@ onActivated(async () => {
 .range-count { color: var(--ink-2); font-weight: 600; }
 .tb-spacer { flex: 1; }
 
-.print-summary{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin-bottom:14px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
+.print-summary{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin-bottom:8px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}
 .print-summary .range-bar{margin:0;border:0;background:transparent;flex:0 1 auto}
 .print-summary .range-bar .tb-spacer{display:none}
 .photo-preflight{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 12px;min-width:0;flex:1 1 auto;border-left:1px solid var(--line)}
@@ -1755,8 +1881,15 @@ onActivated(async () => {
 .preview-dpi.dpi-ok { color: var(--stone); }
 .preview-dpi.dpi-low { color: var(--cinnabar); border-color: var(--cinnabar); background: var(--cinnabar-soft); }
 
+.preview-stage { display: grid; min-width: 0; max-width: 100%; margin: 0 auto; align-items: center; background: var(--paper); }
+.preview-stage.has-paging { grid-template-columns: 50px minmax(0, 1fr) 50px; }
+.preview-page-arrow { display: grid; place-items: center; justify-self: center; width: 36px; height: 44px; padding: 6px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper-card); color: var(--ink-2); cursor: pointer; }
+.preview-page-arrow svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.preview-page-arrow:hover:not(:disabled) { color: var(--cinnabar); border-color: var(--cinnabar); }
+.preview-page-arrow:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 2px; }
+.preview-page-arrow:disabled { opacity: .35; cursor: default; }
 .preview-scroll {
-  max-height: 68vh;
+  max-height: calc(100vh - 200px);
   overflow: auto;
   padding: 16px;
   background: var(--paper);
