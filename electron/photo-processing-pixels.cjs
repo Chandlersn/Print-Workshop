@@ -18,7 +18,28 @@ function normalizeRecipe(value = {}) {
     scale: number(value.scale, 1, .25, 2), offsetX: number(value.offsetX, 0, -1, 1), offsetY: number(value.offsetY, 0, -1, 1),
     bottom: Boolean(value.bottom), bottomStart: number(value.bottomStart, .75, 0, .99), bottomOpacity: number(value.bottomOpacity, 0, 0, 1),
     edge: Boolean(value.edge), edgeWidth: number(value.edgeWidth, .08, .001, .4), edgeOpacity: number(value.edgeOpacity, .5, 0, 1), edgeTarget,
-    faceAlign: Boolean(value.faceAlign), faceHeight: number(value.faceHeight, .3, .08, .8), eyeY: number(value.eyeY, .32, .1, .75) }
+    faceAlign: Boolean(value.faceAlign), faceHeight: number(value.faceHeight, .3, .08, .8), eyeY: number(value.eyeY, .32, .1, .75),
+    sharpen: Boolean(value.sharpen), sharpenStrength: number(value.sharpenStrength, .6, 0, 1) }
+}
+// Sharpen colour only, using alpha-weighted neighbours so transparent padding
+// cannot introduce dark fringes. Preserve alpha and suppress tiny differences.
+function sharpenPixels(data, width, height, strength) {
+  if (!strength) return
+  const source = new Uint8ClampedArray(data)
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const i = (y * width + x) * 4
+    if (!source[i + 3]) continue
+    const left = x ? i - 4 : i, right = x + 1 < width ? i + 4 : i
+    const top = y ? i - width * 4 : i, bottom = y + 1 < height ? i + width * 4 : i
+    const a = source[left + 3], b = source[right + 3], c = source[top + 3], d = source[bottom + 3]
+    const weight = a + b + c + d
+    if (!weight) continue
+    for (let channel = 0; channel < 3; channel++) {
+      const average = (source[left + channel] * a + source[right + channel] * b + source[top + channel] * c + source[bottom + channel] * d) / weight
+      const difference = source[i + channel] - average
+      if (Math.abs(difference) > 2) data[i + channel] = source[i + channel] + strength * difference
+    }
+  }
 }
 function orientedRgba(bitmap, width, height, orientation = 1) {
   if (bitmap.length !== width * height * 4) throw new Error('照片像素数据不完整')
@@ -208,6 +229,7 @@ function processPixels(image, input, transform) {
     for (let c = 0; c < 3; c++) data[dst + c] = alpha ? rgb[c] / alpha : 0
     data[dst + 3] = alpha
   }
+  if (recipe.sharpen) sharpenPixels(data, width, height, recipe.sharpenStrength)
   const distances = recipe.edge && recipe.edgeTarget === 'subject' ? innerDistances(data, width, height) : null
   // Fade the visible photograph/person, including when fitting left transparent
   // padding above or below it. The canvas's empty bottom is not the subject edge.

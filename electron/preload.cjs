@@ -192,6 +192,9 @@ contextBridge.exposeInMainWorld('printpress', {
   listAssetOrphans: (protectedIds) => invoke('asset:listOrphans', { protectedIds }),
   purgeAssetOrphans: (hashes, protectedIds) => invoke('asset:purgeOrphans', { hashes, protectedIds }),
   assetUsage: () => invoke('asset:usage'),
+  assetAuditStatus: (pages) => invoke('asset:auditStatus', pages || {}),
+  assetAuditStart: () => invoke('asset:auditStart'),
+  assetAuditCancel: () => invoke('asset:auditCancel'),
   openAssetFolder: () => invoke('asset:openFolder'),
 
   // 打印

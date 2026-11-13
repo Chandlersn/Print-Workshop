@@ -236,6 +236,7 @@ function main() {
     console.error('种子异常:', err)
   }
 
+  let assetMaintenanceReady = true
   // 原件迁移先于模板迁移和媒体读取：独立素材目录只存受管理原件。
   try {
     const designs = require('./designs.cjs')
@@ -244,6 +245,7 @@ function main() {
     if (temporary.migrated) console.log(`临时底图原件迁移 ${temporary.migrated} 件`)
     if (managed.migrated) console.log(`素材库原件迁移 ${managed.migrated} 件`)
   } catch (err) {
+    assetMaintenanceReady = false
     console.error('素材原件迁移异常:', err)
   }
 
@@ -253,6 +255,7 @@ function main() {
     const r = templates.migrateBackgrounds()
     if (r.migrated) console.log(`模板底图迁移 ${r.migrated} 条`)
   } catch (err) {
+    assetMaintenanceReady = false
     console.error('模板底图迁移异常:', err)
   }
 
@@ -268,20 +271,28 @@ function main() {
     const purged = designPackage.purgeStaging()
     if (purged.removed.length) console.log(`清理过期导入暂存 ${purged.removed.length} 项`)
   } catch (err) {
+    assetMaintenanceReady = false
     console.error('启动事务恢复异常:', err)
   }
   try {
     const photoRecovery = require('./photo-library.cjs').recoverPendingImports()
+    if (photoRecovery.failed.length) assetMaintenanceReady = false
     if (photoRecovery.recovered.length || photoRecovery.rolledBack.length || photoRecovery.failed.length) {
       console.log(`照片导入恢复：完成 ${photoRecovery.recovered.length} 个，回滚 ${photoRecovery.rolledBack.length} 个，失败 ${photoRecovery.failed.length} 个`)
     }
-  } catch (err) { console.error('照片导入恢复异常:', err) }
+  } catch (err) { assetMaintenanceReady = false; console.error('照片导入恢复异常:', err) }
 
   // Copy legacy photo originals separately in the background; never move or
   // delete old shared files, so existing designs and print history stay valid.
   setImmediate(() => require('./photo-library.cjs').migrateLegacyPhotoAssets()
-    .then(result => { if (result.migrated || result.failed) console.log(`照片目录整理：复制 ${result.migrated} 项，跳过 ${result.failed} 项`) })
-    .catch(err => console.error('照片目录整理异常:', err)))
+    .then(result => { if (result.failed) assetMaintenanceReady = false; if (result.migrated || result.failed) console.log(`照片目录整理：复制 ${result.migrated} 项，跳过 ${result.failed} 项`) })
+    .catch(err => { assetMaintenanceReady = false; console.error('照片目录整理异常:', err) })
+    .finally(() => { if (!isSmoke) {
+      require('./asset-audit.cjs').start()
+      const cleanup = require('./asset-thumbnail-cleanup.cjs')
+      if (!assetMaintenanceReady) cleanup.skip('启动数据恢复未完成')
+      else cleanup.run().catch(err => console.warn('缩略图缓存整理失败:', err.message))
+    } }))
 
   // 更新检测 IPC：meta 给渲染层版本与出口链接；checkUpdate 支持手动触发（卡点可见）
   ipcMain.handle('app:meta', () => ({

@@ -31,6 +31,20 @@ const smallBox = subjectRegion(bigFrame, [{ x:.4,y:.3 }, { x:.6,y:.3 }, { x:.6,y
 assert.ok(smallBox.x < 80 && smallBox.y < 36 && smallBox.x + smallBox.width > 120 && smallBox.y + smallBox.height > 84, '范围向外扩展为模型保留背景上下文')
 const basic = normalizeRecipe({ width, height })
 assert.deepEqual(processPixels(image, basic).data, data, '无效果的同尺寸处理不能改变像素')
+assert.equal(basic.sharpen, false, '旧样板默认不增强')
+const detail = new Uint8ClampedArray(data)
+for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+  const i = (y * width + x) * 4
+  if (x < 10) detail.set([0, 0, 0, 0], i)
+  else detail.set([x < 32 ? 100 : 150, 120, 120, x === 10 ? 128 : 255], i)
+}
+const detailImage = { width, height, data: detail }
+const sharpened = processPixels(detailImage, { ...basic, sharpen: true, sharpenStrength: 1 }).data
+assert.ok(sharpened[(32 * width + 31) * 4] < 100 && sharpened[(32 * width + 32) * 4] > 150, '增强边缘对比')
+assert.equal(sharpened[(32 * width + 10) * 4], 100, '透明区域不会造成黑边')
+for (let i = 3; i < detail.length; i += 4) assert.equal(sharpened[i], detail[i], '增强不改变透明度')
+assert.deepEqual(processPixels(detailImage, { ...basic, sharpen: true, sharpenStrength: 0 }).data, detail, '零强度不改变像素')
+assert.equal(detail[(32 * width + 31) * 4], 100, '增强不修改原图')
 const feathered = processPixels(image, { ...basic, edge: true, edgeWidth: .2, edgeOpacity: .5, bottom: true, bottomStart: .5, bottomOpacity: 0 })
 assert.equal(feathered.data[(32 * 64 + 32) * 4 + 3], 255, '中心主体保持不透明')
 assert.equal(feathered.data[(0 * 64 + 32) * 4 + 3], 128, '外缘不透明度可为 50%')
@@ -47,7 +61,7 @@ assert.ok(shaped.data[(32 * 64 + 12) * 4 + 3] < 140, '人物轮廓羽化根据�
 const oriented = orientedRgba(Buffer.from([0, 0, 255, 255, 255, 0, 0, 255]), 2, 1, 6)
 assert.equal(oriented.width, 1); assert.equal(oriented.height, 2)
 assert.deepEqual([...oriented.data], [255, 0, 0, 255, 0, 0, 255, 255], 'EXIF 旋转和 BGRA 颜色通道正确')
-for (const invalid of [{ width: -1 }, { height: 9000 }, { fit: 'stretch' }, { scale: NaN }, { bottomStart: 1 }, { edgeTarget: 'unknown' }]) assert.throws(() => normalizeRecipe(invalid))
+for (const invalid of [{ width: -1 }, { height: 9000 }, { fit: 'stretch' }, { scale: NaN }, { bottomStart: 1 }, { edgeTarget: 'unknown' }, { sharpenStrength: 2 }]) assert.throws(() => normalizeRecipe(invalid))
 console.log('ok - 适配、透明蒙版、轮廓羽化、原件隔离和 EXIF 像素变换')
 const alignRecipe = normalizeRecipe({ width: 64, height: 64, faceAlign: true, faceHeight: .3, eyeY: .32 })
 const face = { x: 12, y: 10, w: 24, h: 30, eyes: [{ x: 18, y: 22 }, { x: 30, y: 22 }] }
@@ -86,8 +100,9 @@ console.log('ok - 人物大小和眼睛高度按同一目标对齐，无人脸�
   processing.clear('ds_processing')
   let calls = 0
   const host = { status: () => ({ ready: true }), processPhoto: async () => { calls++; return pngFromPixels(feathered) } }
-  const args = { datasetId: 'ds_processing', sampleAssetId: a.id, recipe: { ...basic, bottom: true }, taskId: 'apply-1' }
+  const args = { datasetId: 'ds_processing', sampleAssetId: a.id, recipe: { ...basic, bottom: true, sharpen: true, sharpenStrength: .8 }, taskId: 'apply-1' }
   const result = await processing.apply(args, host)
+  assert.equal(result.state.recipe.sharpen, true); assert.equal(result.state.recipe.sharpenStrength, .8)
   assert.equal(result.applied, true); assert.equal(calls, 2, '共用同一照片的多条记录只处理一次')
   const ds = require('../electron/dataset.cjs').getDataset(args.datasetId)
   const prepared = photos.prepareRows(ds.id, ['photo'], ds.rows)

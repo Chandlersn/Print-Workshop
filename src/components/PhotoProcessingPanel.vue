@@ -234,6 +234,8 @@ onBeforeUnmount(() => { alive = false; generation++; clearTimeout(previewTimer);
         <div class="control-pair"><label>宽度 px<input v-model.number="recipe.width" data-testid="photo-processing-width" type="number" min="64" max="4096" step="1"></label><label>高度 px<input v-model.number="recipe.height" data-testid="photo-processing-height" type="number" min="64" max="4096" step="1"></label></div>
         <button class="btn-ghost" data-testid="photo-processing-use-size" @click="useSampleSize">使用这张照片的尺寸</button>
         <label>适配方式<select v-model="recipe.fit"><option value="contain">等比完整显示</option><option value="cover">等比铺满裁切</option></select></label>
+        <label class="check"><input v-model="recipe.sharpen" data-testid="photo-processing-sharpen" type="checkbox"> 一键增强清晰度</label>
+        <template v-if="recipe.sharpen"><label>增强强度 {{ Math.round(recipe.sharpenStrength * 100) }}%<input v-model.number="recipe.sharpenStrength" data-testid="photo-processing-sharpen-strength" type="range" min="0" max="1" step="0.1"></label><p class="muted">温和锐化照片细节，不增加真实分辨率；请对照原图检查效果。</p></template>
         <label class="check"><input v-model="recipe.cutout" data-testid="photo-processing-cutout" type="checkbox" :disabled="!modelReady && !qualityReady"> 人像自动抠图</label>
         <p v-if="!modelReady && !qualityReady" class="muted">本地抠图组件缺失，请安装完整安装包。</p>
         <label class="check"><input v-model="recipe.subjectFit" type="checkbox"> 按可见主体适配尺寸</label>

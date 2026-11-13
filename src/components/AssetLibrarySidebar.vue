@@ -17,7 +17,7 @@ const reportedMissing = new Set()
  * 点击素材时把 assetId 交给父组件，由它做「会话保护 + 一次性撤销」的入画板，
  * 本组件不碰 design / commit，避免两边撤销栈打架。
  */
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
 import { formatBytes } from '../lib/format-bytes.cjs'
 
@@ -40,6 +40,29 @@ const includeArchived = ref(false)
 const category = ref('design')
 const usage = ref(null)
 const usageOpen = ref(false)
+const auditOpen = ref(false), audit = ref(null)
+const auditPages = reactive({ groupsPage: 1, assetsPage: 1, issuesPage: 1 })
+let auditTimer = null, auditAlive = true, auditRequest = 0
+async function refreshAudit() {
+  clearTimeout(auditTimer)
+  const request = ++auditRequest
+  try {
+    const result = await pp.assetAuditStatus({ ...auditPages })
+    if (!auditAlive || !auditOpen.value || request !== auditRequest) return
+    audit.value = result
+    if (['starting', 'enumerating', 'checking', 'references'].includes(result.phase) || result.maintenance?.phase === 'running') auditTimer = setTimeout(refreshAudit, 1000)
+  } catch (err) { if (auditAlive && auditOpen.value && request === auditRequest) error.value = toUserMessage(err) }
+}
+async function toggleAudit() {
+  auditOpen.value = !auditOpen.value
+  auditRequest++
+  clearTimeout(auditTimer)
+  if (auditOpen.value) await refreshAudit()
+}
+async function restartAudit() { try { Object.assign(auditPages, { groupsPage: 1, assetsPage: 1, issuesPage: 1 }); await pp.assetAuditStart(); await refreshAudit() } catch (err) { error.value = toUserMessage(err) } }
+async function cancelAudit() { try { auditRequest++; clearTimeout(auditTimer); audit.value = await pp.assetAuditCancel() } catch (err) { error.value = toUserMessage(err) } }
+async function changeAuditPage(key, page) { auditPages[key] = page; await refreshAudit() }
+onBeforeUnmount(() => { auditAlive = false; clearTimeout(auditTimer) })
 const loading = ref(false)
 const error = ref('')
 const editing = reactive({ id: null, name: '', tags: '' })
@@ -293,8 +316,37 @@ onMounted(() => {
       <button data-testid="asset-import" :disabled="loading" @click="importDialog">＋ 导入图片</button>
       <button data-testid="asset-cleanup" :disabled="loading" title="扫描并清理不被任何工程或素材库引用的孤立原件" @click="scanOrphans">清理未引用</button>
       <button data-testid="asset-usage" :disabled="loading" @click="toggleUsage">{{ usageOpen ? '收起盘点' : '空间盘点' }}</button>
+      <button data-testid="asset-audit" @click="toggleAudit">{{ auditOpen ? '收起重复检查' : '重复素材检查' }}</button>
       <button data-testid="asset-reset-filter" v-if="hasFilters" @click="() => { query=''; activeTags=[]; favoriteOnly=false; includeArchived=false; resetPage(); refresh() }">清除筛选</button>
       <button class="asset-open-folder" data-testid="asset-open-folder" :disabled="loading" title="在系统文件管理器里打开素材库原件所在的文件夹" @click="openFolder">打开素材库文件夹</button>
+    </div>
+
+    <div v-if="auditOpen" class="asset-usage" data-testid="asset-audit-panel">
+      <strong>重复素材检查</strong>
+      <p>检查三个素材池，不删除或合并原件。跨池副本可能各有用途，理论重复空间不等于可释放空间。</p>
+      <p v-if="audit?.maintenance?.phase === 'running'" role="status">正在整理旧缩略图缓存…</p>
+      <p v-else-if="audit?.maintenance?.phase === 'completed'">本次启动已删除 {{ audit.maintenance.removed }} 个旧缩略图缓存，实际释放 {{ formatBytes(audit.maintenance.bytes) }}<span v-if="audit.maintenance.skipped || audit.maintenance.failed">；跳过 {{ audit.maintenance.skipped }}，失败 {{ audit.maintenance.failed }}</span>。</p>
+      <p v-else-if="audit?.maintenance?.phase === 'skipped'">本次启动未整理缓存：{{ audit.maintenance.reason }}。</p>
+      <p v-if="!audit || audit.phase === 'idle'">尚未开始扫描。</p>
+      <p v-else-if="['starting', 'enumerating', 'checking', 'references'].includes(audit.phase)" role="status">后台检查中 · 已发现 {{ audit.files || 0 }} 份原件 · 已校验 {{ audit.checked || 0 }} 份跨池副本 <span v-if="audit.phase === 'references'">· 正在检查业务引用</span> <button @click="cancelAudit">取消</button></p>
+      <p v-else-if="audit.phase === 'canceled'">扫描已取消。</p>
+      <p v-else-if="audit.phase === 'failed'" class="asset-error">{{ audit.reason }}</p>
+      <template v-else-if="audit.report">
+        <p>完成于 {{ new Date(audit.report.completedAt).toLocaleString() }} · {{ audit.report.complete ? '文件扫描完成' : '扫描不完整，请检查异常' }}</p>
+        <p>原件文件 {{ audit.report.files }} 份 · 大小合计 {{ formatBytes(audit.report.bytes) }}；跨池相同内容 {{ audit.report.groupCount }} 组 · 理论重复文件大小 {{ formatBytes(audit.report.theoreticalBytes) }}。</p>
+        <p>结果是扫描时的快照；打印归档照片为独立副本，未保存草稿与快照中的内嵌图片未逐项核实，不能作为清理依据。</p>
+        <p>本次未发现已保存的已知引用：{{ audit.report.noKnownReferences }} 项（仅供核查，不能据此清理）。</p>
+        <p v-if="audit.report.missingReferences">{{ audit.report.missingReferences }} 个被引用的素材在本次扫描中未找到，请检查原件。</p>
+        <div v-for="group in audit.report.groups.items" :key="group.hash" class="asset-usage-row"><b>{{ group.hash.slice(0, 12) }}…</b> · {{ group.copies.map(copy => `${copy.pool} ${formatBytes(copy.bytes)}`).join(' / ') }}</div>
+        <div v-if="audit.report.groups.pages > 1"><button :disabled="audit.report.groups.page <= 1" @click="changeAuditPage('groupsPage', audit.report.groups.page - 1)">上一页</button> 重复组 {{ audit.report.groups.page }}/{{ audit.report.groups.pages }} <button :disabled="audit.report.groups.page >= audit.report.groups.pages" @click="changeAuditPage('groupsPage', audit.report.groups.page + 1)">下一页</button></div>
+        <details><summary>查看素材及已知引用（{{ audit.report.assets.total }}）</summary>
+          <div v-for="asset in audit.report.assets.items" :key="asset.hash" class="asset-usage-row"><b>{{ asset.hash.slice(0, 12) }}…</b> · {{ asset.copies.map(copy => copy.pool).join(' / ') }}<br>{{ asset.references.length ? asset.references.map(ref => `${ref.type}${ref.name ? '：' + ref.name : ''}`).join('；') : '未发现已保存的已知引用，不代表可以清理' }}</div>
+          <div v-if="audit.report.assets.pages > 1"><button :disabled="audit.report.assets.page <= 1" @click="changeAuditPage('assetsPage', audit.report.assets.page - 1)">上一页</button> {{ audit.report.assets.page }}/{{ audit.report.assets.pages }} <button :disabled="audit.report.assets.page >= audit.report.assets.pages" @click="changeAuditPage('assetsPage', audit.report.assets.page + 1)">下一页</button></div>
+        </details>
+        <div v-for="(issue, index) in audit.report.issues.items" :key="index" class="asset-usage-row">{{ issue.pool }} {{ issue.hash ? issue.hash.slice(0, 12) + '…' : '' }}：{{ issue.reason }}</div>
+        <div v-if="audit.report.issues.pages > 1"><button :disabled="audit.report.issues.page <= 1" @click="changeAuditPage('issuesPage', audit.report.issues.page - 1)">上一页</button> 异常 {{ audit.report.issues.page }}/{{ audit.report.issues.pages }} <button :disabled="audit.report.issues.page >= audit.report.issues.pages" @click="changeAuditPage('issuesPage', audit.report.issues.page + 1)">下一页</button></div>
+      </template>
+      <button v-if="!audit || !['starting', 'enumerating', 'checking', 'references'].includes(audit.phase)" data-testid="asset-audit-restart" @click="restartAudit">重新检查</button>
     </div>
 
     <div v-if="usageOpen && usage" class="asset-usage" data-testid="asset-usage-panel">

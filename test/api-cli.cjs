@@ -142,6 +142,9 @@ const ADDED_CHANNELS = [
   'asset:purgeOrphans',
   'asset:openFolder',
   'asset:usage',
+  'asset:auditStatus',
+  'asset:auditStart',
+  'asset:auditCancel',
   // 应用内更新（I-35）：信标只负责提示，这两条才真下载 / 真安装；能力经 ctx.autoUpdate 注入
   'app:startUpdate',
   'app:installUpdate',

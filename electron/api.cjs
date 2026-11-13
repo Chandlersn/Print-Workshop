@@ -1263,6 +1263,9 @@ const OPS = {
     params: {},
     run: () => assetLibrary.resourceUsage(),
   },
+  'asset:auditStatus': { params: { groupsPage: { required: false }, assetsPage: { required: false }, issuesPage: { required: false } }, run: p => require('./asset-audit.cjs').status(p) },
+  'asset:auditStart': { params: {}, run: () => require('./asset-audit.cjs').start() },
+  'asset:auditCancel': { params: {}, run: () => require('./asset-audit.cjs').cancel() },
 
   /**
    * 在系统文件管理器里打开**素材库原件文件夹**（`design-assets/`）。
