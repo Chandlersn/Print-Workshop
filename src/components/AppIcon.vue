@@ -43,6 +43,7 @@ defineProps({ name: { type: String, required: true }, size: { type: Number, defa
     <template v-else-if="name === 'move-down'"><path d="M12 4v15M6 13l6 6 6-6"/></template>
     <template v-else-if="name === 'move-top'"><path d="M4 4h16M12 20V8M7 13l5-5 5 5"/></template>
     <template v-else-if="name === 'move-bottom'"><path d="M4 20h16M12 4v12M7 11l5 5 5-5"/></template>
+    <template v-else-if="name === 'help'"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .9-1 1.7v.4"/><circle cx="12" cy="17" r=".6" fill="currentColor" stroke="none"/></template>
   </svg>
 </template>
 <style scoped>.app-icon { display: inline-block; vertical-align: -0.22em; flex: none; }</style>

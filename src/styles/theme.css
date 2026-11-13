@@ -6,8 +6,19 @@
   --ink-2: #6f675c;      /* 次级墨色 */
   --line: #ddd4c3;       /* 淡墨描线 */
   --line-strong: #c9bda6;
-  --cinnabar: #b03a2e;   /* 朱砂红 */
-  --cinnabar-soft: #f3e0dd;
+  --cinnabar: #2563eb;   /* 兼容已有强调色图形 */
+  --accent-solid: #2563eb;
+  --accent-ink-light: #2158d2;
+  --accent-ink-dark: #5c8bf0;
+  --accent-ink: var(--accent-ink-light);
+  --cinnabar-soft: color-mix(in srgb, var(--cinnabar) 14%, var(--paper));
+  --on-accent: #ffffff;
+  --accent-active: #487cee;
+  --on-accent-active: #000000;
+  --danger: #a52d22;
+  --danger-soft: #f7e3df;
+  --danger-solid: #a52d22;
+  --on-danger: #ffffff;
   --stone: #8c8577;      /* 石灰色（禁用/次级） */
   --ok: #4a7c59;         /* 印章绿（成功态） */
   --ok-soft: #eef3ee;    /* 印章绿软底 */
@@ -18,9 +29,7 @@
   --input-bg: #ffffff;   /* 输入控件底（暗色下切换） */
 }
 
-/* 暗色模式：夜宣纸（深褐底 / 米白字 / 朱砂提亮保对比度）。
-   对比度均已按 WCAG AA 校验：ink/paper ≈ 12:1，ink-2/paper-card ≈ 6.5:1，
-   cinnabar/paper-card ≈ 5.2:1（正常文字达标），stone 仅用于 ≥12px 辅助文字。 */
+/* 暗色模式：强调文字切换到脚本按暗色纸面计算的色值。 */
 :root[data-theme='dark'] {
   --paper: #211c17;
   --paper-card: #2a241d;
@@ -28,8 +37,9 @@
   --ink-2: #bdb29d;
   --line: #3d352b;
   --line-strong: #55493a;
-  --cinnabar: #e06a5c;
-  --cinnabar-soft: #3f2a25;
+  --accent-ink: var(--accent-ink-dark);
+  --danger: #ff8b80;
+  --danger-soft: #492823;
   --stone: #948b7c;
   --ok: #7fb895;
   --ok-soft: #22301f;
@@ -97,13 +107,14 @@ select option { background: var(--input-bg); color: var(--ink); }
   padding: 7px 16px;
   border: 1px solid var(--cinnabar);
   border-radius: 6px;
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
+  transition: none;
   font-size: 13px;
   cursor: pointer;
 }
 .btn-primary:disabled { opacity: 0.6; cursor: default; }
-.btn-primary:hover:not(:disabled) { opacity: 0.9; }
+.btn-primary:active:not(:disabled) { background: var(--accent-active); border-color: var(--accent-active); color: var(--on-accent-active); }
 
 .btn-ghost {
   padding: 6px 14px;
@@ -114,15 +125,15 @@ select option { background: var(--input-bg); color: var(--ink); }
   font-size: 13px;
   cursor: pointer;
 }
-.btn-ghost:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--cinnabar); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--accent-ink); }
 
 .btn-danger {
   padding: 6px 14px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--paper-card);
-  color: var(--cinnabar);
+  color: var(--danger);
   font-size: 12px;
   cursor: pointer;
 }
-.btn-danger:hover:not(:disabled) { border-color: var(--cinnabar); background: var(--cinnabar-soft); }
+.btn-danger:hover:not(:disabled), .btn-danger:active:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); }

@@ -530,13 +530,20 @@ console.log('== 8b. 清理缓存「点了没反应」不许再复发 ==')
   ok(/openAbout[\s\S]{0,120}?cacheMsg\.value = ''/.test(app), '重开「关于」清掉上次的结果文案')
 }
 
-console.log('== 8c. 「关于」不再挂使用说明入口（顶栏「说明」是唯一入口） ==')
+console.log('== 8c. 「关于」不再挂使用说明入口（顶栏「帮助」下拉是唯一入口） ==')
 {
   const app = src('src/App.vue')
+  // 判据收紧到「关于弹窗内部」：帮助下拉本身可以有「使用说明」菜单项，
+  // 不允许的是**关于弹窗里**再挂一个同名入口（两处入口会让用户困惑）。
+  // 切块用起止锚点，不用花括号配对——嵌套 div 会让正则抓错边界（改成能过、实为瞎过）。
+  const aboutStart = app.indexOf('<div v-if="showAbout"')
+  const aboutEnd = app.indexOf('<!-- 应用内使用说明 -->')
+  const aboutBlock = aboutStart >= 0 && aboutEnd > aboutStart ? app.slice(aboutStart, aboutEnd) : ''
+  ok(aboutBlock.length > 200, '关于弹窗区块能定位到（否则下面的判据是空过）')
   ok(!/查看使用说明/.test(app), '「关于」里没有「查看使用说明」按钮了')
-  ok(!/>\s*使用说明\s*<\/button>/.test(app), '没有残留的「使用说明」按钮文案')
-  // 删干净 ≠ 把功能删了：顶栏入口与弹窗必须都还在，否则是误删
-  ok(/showGuide = true/.test(app), '顶栏「说明」入口还在')
+  ok(!/>\s*使用说明\s*<\/button>/.test(aboutBlock), '关于弹窗内没有残留的「使用说明」按钮文案')
+  // 删干净 ≠ 把功能删了：入口与弹窗必须都还在，否则是误删
+  ok(/showGuide = true/.test(app), '顶栏「帮助」里的使用说明入口还在')
   ok(/<GuideDialog v-if="showGuide"/.test(app), '使用说明弹窗还在挂载')
   ok(/import GuideDialog from '\.\/components\/GuideDialog\.vue'/.test(app), 'GuideDialog 组件仍被引用')
   // 说明文档本身不许被顺手删掉

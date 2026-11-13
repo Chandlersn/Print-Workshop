@@ -2259,7 +2259,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <button class="primary" :disabled="busy || portraitInserting || !portraitColumn" @click="addPortrait">插入变量图</button> <button @click="portraitPicker = false">取消</button>
       </section>
     </div>
-    <PageHeader title="底图制作" description="图片、固定文字与形状分别编辑，保存后用于打印模板。">
+    <PageHeader class="designer-page-header" title="底图制作" description="图片、固定文字与形状分别编辑，保存后用于打印模板。">
       <template #actions>
         <button data-testid="design-new" class="primary" :disabled="busy" @click="newDesign"><AppIcon name="add" /> 新建底图</button>
         <label class="preset-picker" title="内置版面与常用工程：选「内置模板」是「已有就打开、没有才新建」——不会每点一次就多一个同名工程；「常用」里只列你自己保存过的工程，选中直接打开那份（也不会复制）">
@@ -2776,25 +2776,30 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
 .designer-more { position: relative; }
 .designer-more summary { list-style: none; cursor: pointer; padding: 6px 9px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--paper-card); font-size: 12px; color: var(--ink); }
 .designer-more summary::-webkit-details-marker { display: none; }
-.designer-more summary:hover, .designer-more[open] summary { color: var(--cinnabar); border-color: var(--cinnabar); }
+.designer-more summary:hover, .designer-more[open] summary { color: var(--accent-ink); border-color: var(--cinnabar); }
 .designer-more-menu { position: absolute; z-index: 50; right: 0; top: calc(100% + 5px); min-width: 152px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--paper-card); box-shadow: 0 6px 24px #0003; }
 .designer-more-menu button { display: block; width: 100%; border: 0; text-align: left; padding: 9px 10px; white-space: nowrap; }
 .portrait-mask{position:fixed;inset:0;z-index:2000;background:rgba(30,26,20,.45);display:grid;place-items:center}.portrait-picker{width:440px;padding:24px;background:var(--paper-card);color:var(--ink);border-radius:14px;box-shadow:0 20px 60px #0003}.portrait-picker label{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:16px 0}.portrait-picker select{max-width:280px}.portrait-picker p{color:var(--stone);line-height:1.7}
 .designer-view { min-width: 0; }
 button { border: 1px solid var(--line-strong); background: var(--paper-card); color: var(--ink); border-radius: 5px; padding: 6px 9px; font-size: 12px; }
-button:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--cinnabar); }
+button:hover:not(:disabled) { border-color: var(--cinnabar); color: var(--accent-ink); }
 button:disabled { opacity: .42; cursor: default; }
-button.primary { color: #fff; background: var(--cinnabar); border-color: var(--cinnabar); }
-button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.07); }
+button.primary { color: var(--on-accent); background: var(--accent-solid); border-color: var(--accent-solid); transition: none; }
+button.primary:hover:not(:disabled) { color: var(--on-accent); }
+button.primary:active:not(:disabled) { color: var(--on-accent-active); background: var(--accent-active); border-color: var(--accent-active); }
 /* 「素材库」开关的选中态（`on` 只此一处用）。布局与间距由 PageHeader 的
    `.page-header__actions` 统一负责，这里只管这一个按钮自己的态。 */
-button.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
+button.on { border-color: var(--cinnabar); color: var(--accent-ink); background: var(--paper-card); }
+/* 工具栏整排下移：这排按钮（新建底图 / 常用模板 / 素材库 / 导出图片 / 更多 / 保存工程）
+   与顶栏贴得太紧，读起来像顶栏的一部分。只在本页加顶部留白——PageHeader 是全局组件，
+   改它的 margin 会连带其他四页。 */
+.designer-page-header { margin-top: 14px; }
 /* 下拉里塞了「名称 — 说明」，收起来时按固定宽度截断；展开的列表仍是完整文案 */
 .preset-picker { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); }
 .preset-picker select { max-width: 230px; font-size: 12px; }
 .notice { padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 6px; display: flex; align-items: center; gap: 12px; font-size: 12px; }
 .notice button { margin-left: auto; flex-shrink: 0; }
-.notice.error { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+.notice.error { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
 .notice.success { background: var(--ok-soft); color: var(--ok); }
 .context-note { background: var(--paper-card); color: var(--ink-2); }
 /* 导出完成条：文字占满一行（路径可能很长），按钮在第二行靠右 */
@@ -2888,7 +2893,7 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .adopted-flag { font-size: 11px; color: var(--warn); line-height: 1; }
 /* 徽标一律 nowrap + inline-block：表格/弹性布局按 min-content 分列宽，中文徽标可断字，
    窄窗口下「仅编辑」会被拆成两行（同 I-14 的 .det-flag）。 */
-.layer-flag { flex: none; display: inline-block; white-space: nowrap; font-size: 11px; line-height: 1.4; padding: 0 5px; border-radius: 999px; color: var(--cinnabar); background: var(--cinnabar-soft); border: 1px solid currentColor; }
+.layer-flag { flex: none; display: inline-block; white-space: nowrap; font-size: 11px; line-height: 1.4; padding: 0 5px; border-radius: 999px; color: var(--accent-ink); background: var(--cinnabar-soft); border: 1px solid currentColor; }
 .canvas-column { min-width: 0; position: relative; --inspector-reserve: 276px; }
 .canvas-column:not(.inspector-open) { --inspector-reserve: 0px; }
 .canvas-toolbar { display: flex; align-items: center; gap: 7px; overflow-x: auto; scrollbar-width: thin; background: var(--paper-card); border: 1px solid var(--line); padding: 8px; border-radius: 8px 8px 0 0; }
@@ -2957,7 +2962,7 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .snap-targets { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .snap-targets label.inline { margin: 3px 0; }
 .canvas-status { display: flex; justify-content: space-between; gap: 12px; padding: 9px; background: var(--paper-card); border: 1px solid var(--line); border-radius: 0 0 8px 8px; font-size: 11px; color: var(--ink-2); }
-.unsaved { color: var(--cinnabar); } .shortcut-note { font-size: 11px; color: var(--stone); line-height: 1.7; margin: 8px 0; }
+.unsaved { color: var(--accent-ink); } .shortcut-note { font-size: 11px; color: var(--stone); line-height: 1.7; margin: 8px 0; }
 .inspector label, .tools-panel label { display: flex; flex-direction: column; gap: 5px; color: var(--ink-2); font-size: 11px; margin-bottom: 9px; }
 .inspector .property-grid > label { margin-bottom: 2px; }
 .color-adjust { margin: 14px 0; padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -2965,7 +2970,7 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .color-adjust summary::-webkit-details-marker { display: none; }
 .color-adjust summary::after { content: '›'; margin-left: auto; color: var(--stone); font-size: 18px; line-height: 1; transition: transform .15s; }
 .color-adjust[open] summary::after { transform: rotate(90deg); }
-.color-adjust summary span { color: var(--cinnabar); font-size: 11px; font-weight: 400; }
+.color-adjust summary span { color: var(--accent-ink); font-size: 11px; font-weight: 400; }
 .color-adjust summary:focus-visible, .adjust-reset-field:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 2px; }
 .adjust-list { display: grid; gap: 8px; margin: 10px 0; }
 .adjust-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) 38px 26px; gap: 4px; align-items: center; font-size: 11px; }

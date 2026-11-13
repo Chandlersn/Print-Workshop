@@ -10,8 +10,6 @@ import {
   sanitizeHidden, hiddenKeysOf, withHidden, visibleColumnsOf, canHideMore, pruneHidden,
 } from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import PageHeader from '../components/PageHeader.vue'
-import AppIcon from '../components/AppIcon.vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
 const datasets = ref([])
@@ -737,6 +735,9 @@ watch(() => cellNav.req, async (req) => {
   }
 }, { immediate: true }) // 打印页点击时本组件尚未挂载，挂载后需立即消费已到达的跳转请求
 
+
+// 顶栏持有「导入表格」按钮：暴露动作与其状态，页面内不再重复一行。
+defineExpose({ startImport, importing, errorMsg })
 </script>
 
 <template>
@@ -748,15 +749,6 @@ watch(() => cellNav.req, async (req) => {
     @dragleave="onDragLeave"
     @drop.prevent="onDrop"
   >
-    <PageHeader title="数据">
-      <template #actions>
-        <span v-if="errorMsg" class="error-text">{{ errorMsg }}</span>
-        <button class="btn-primary" :disabled="importing" @click="startImport">
-          <AppIcon name="upload" /> {{ importing ? '导入中…' : '导入数据文件' }}
-        </button>
-      </template>
-    </PageHeader>
-
     <div v-if="datasets.length === 0" class="empty-hint">
       <button class="dropzone" :disabled="importing" @click="startImport">
         <span class="dropzone-main">{{ importing ? '导入中…' : '把文件拖到这里，或点击选择' }}</span>
@@ -1079,17 +1071,19 @@ watch(() => cellNav.req, async (req) => {
 
 .error-text {
   font-size: 12px;
-  color: var(--cinnabar);
+  color: var(--danger);
 }
 
 .btn-primary {
   padding: 8px 20px;
   border: 1px solid var(--cinnabar);
   border-radius: 6px;
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
   font-size: 14px;
 }
+
+.btn-primary:active:not(:disabled) { background: var(--accent-active); border-color: var(--accent-active); color: var(--on-accent-active); }
 
 .btn-primary:disabled {
   opacity: 0.6;
@@ -1101,13 +1095,13 @@ watch(() => cellNav.req, async (req) => {
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--paper-card);
-  color: var(--cinnabar);
+  color: var(--danger);
   font-size: 12px;
 }
 
-.btn-danger:hover {
-  border-color: var(--cinnabar);
-  background: var(--cinnabar-soft);
+.btn-danger:hover, .btn-danger:active:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .empty-hint {
@@ -1164,7 +1158,7 @@ watch(() => cellNav.req, async (req) => {
   background: var(--paper-card);
 }
 
-.drag-main { font-size: 18px; font-weight: 700; color: var(--cinnabar); }
+.drag-main { font-size: 18px; font-weight: 700; color: var(--accent-ink); }
 .drag-sub { font-size: 12px; color: var(--ink-2); }
 
 /*
@@ -1230,7 +1224,7 @@ watch(() => cellNav.req, async (req) => {
 
 .mode-item.on {
   border-color: var(--cinnabar);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   background: var(--cinnabar-soft);
 }
 
@@ -1331,7 +1325,7 @@ watch(() => cellNav.req, async (req) => {
 
 .progress-pct {
   font-size: 12px;
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1406,7 +1400,7 @@ watch(() => cellNav.req, async (req) => {
 .ds-status-filter button.selected {
   border-color: var(--cinnabar);
   background: var(--cinnabar-soft);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
 }
 
 .batch-row {
@@ -1498,8 +1492,8 @@ watch(() => cellNav.req, async (req) => {
   border-radius: 8px;
   font-size: 11px;
   font-weight: 600;
-  color: #fff;
-  background: var(--cinnabar);
+  color: var(--on-accent);
+  background: var(--accent-solid);
   line-height: 1.5;
 }
 
@@ -1554,7 +1548,7 @@ watch(() => cellNav.req, async (req) => {
   border-bottom: 1px dashed var(--line-strong);
 }
 
-.alias-text:hover { color: var(--cinnabar); }
+.alias-text:hover { color: var(--accent-ink); }
 
 .alias-input {
   padding: 2px 6px;
@@ -1677,11 +1671,11 @@ watch(() => cellNav.req, async (req) => {
   opacity: 0.7; /* 灰度态 = 未启用 */
   transition: color 0.12s, border-color 0.12s, background 0.12s, opacity 0.12s;
 }
-.print-toggle:hover { border-color: var(--cinnabar); color: var(--cinnabar); opacity: 1; }
+.print-toggle:hover { border-color: var(--cinnabar); color: var(--accent-ink); opacity: 1; }
 .print-toggle.on {
   border-color: var(--cinnabar);
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
   opacity: 1;
   font-weight: 600;
 }
@@ -1703,7 +1697,7 @@ watch(() => cellNav.req, async (req) => {
 .col-head:hover .col-menu-btn,
 .col-menu-btn.on,
 .col-menu-btn:focus-visible { opacity: 0.75; }
-.col-menu-btn:hover { color: var(--cinnabar); opacity: 1; }
+.col-menu-btn:hover { color: var(--accent-ink); opacity: 1; }
 
 /* 工具栏的回头路：只在真有隐藏列时出现，是用户唯一的「找回列」入口 */
 .hidden-pill {
@@ -1711,10 +1705,10 @@ watch(() => cellNav.req, async (req) => {
   border: 1px solid var(--cinnabar);
   border-radius: 12px;
   background: var(--cinnabar-soft);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   font-size: 12px;
 }
-.hidden-pill:hover { background: var(--cinnabar); color: #fff; }
+.hidden-pill:hover { background: var(--accent-solid); color: var(--on-accent); }
 
 /* 浮层菜单（Teleport 到 body）：th 的 overflow:hidden 会裁掉留在表头里的浮层 */
 .col-menu {
@@ -1738,7 +1732,7 @@ watch(() => cellNav.req, async (req) => {
   font-size: 13px;
   text-align: left;
 }
-.cm-item:hover:not(:disabled) { background: var(--cinnabar-soft); color: var(--cinnabar); }
+.cm-item:hover:not(:disabled) { background: var(--cinnabar-soft); color: var(--accent-ink); }
 .cm-item:disabled { color: var(--stone); cursor: default; }
 .cm-hint {
   margin-top: 4px;
@@ -1772,8 +1766,8 @@ watch(() => cellNav.req, async (req) => {
   flex-shrink: 0;
   padding: 0 5px;
   border-radius: 8px;
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
   font-size: 10px;
   line-height: 1.5;
 }
@@ -1788,7 +1782,7 @@ watch(() => cellNav.req, async (req) => {
   font-size: 11px;
   cursor: pointer;
 }
-.row-del:hover { color: var(--cinnabar); border-color: var(--cinnabar); }
+.row-del:hover { color: var(--danger); border-color: var(--danger); }
 
 .pager {
   display: flex;
@@ -1823,10 +1817,10 @@ watch(() => cellNav.req, async (req) => {
   font-size: 12px;
   cursor: pointer;
 }
-.size-item:hover { color: var(--cinnabar); }
+.size-item:hover { color: var(--accent-ink); }
 .size-item.on {
   background: var(--cinnabar-soft);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   font-weight: 600;
 }
 

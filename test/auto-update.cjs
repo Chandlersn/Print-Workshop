@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
+const { pathToFileURL } = require('node:url')
 const { EventEmitter } = require('node:events')
 
 const ROOT = path.resolve(__dirname, '..')
@@ -161,10 +162,21 @@ async function main() {
     const settings = deferred()
     const script = fs.readFileSync(path.join(ROOT, 'src/App.vue'), 'utf8')
       .split('<script setup>')[1].split('</script>')[0].replace(/^import .+$/gm, '')
+    // 该用例剥掉 import 后在 vm 沙箱里直接跑 App.vue 脚本，所以模块级符号要在
+    // context 里补齐。配色用真实的 accent.js（ESM→动态 import），免得替身与源码走样。
+    const accent = await import(pathToFileURL(path.join(ROOT, 'src/lib/accent.js')).href)
     const snapshot = { phase: 'downloaded', at: 10, version: '0.7.0', info: { version: '0.7.0' } }
     const context = {
-      ...vue, onMounted: cb => { mounted = cb }, cellNav: vue.ref(null), designerNav: vue.reactive({}), photoNav: vue.reactive({}),
-      toUserMessage: e => e.message, document: { documentElement: { dataset: {} } },
+      ...vue, ...accent, onMounted: cb => { mounted = cb }, onBeforeUnmount: () => {},
+      cellNav: vue.ref(null), designerNav: vue.reactive({}), photoNav: vue.reactive({}),
+      toUserMessage: e => e.message,
+      // App.vue 顶层会 applyAccent() 写 :root 变量、并注册 pointer/keydown 监听，
+      // 这里给最小 DOM 桩，避免为配色改造改坏这条「执行真实脚本」的用例。
+      document: {
+        documentElement: { dataset: {}, style: { setProperty() {} } },
+        addEventListener() {}, removeEventListener() {},
+      },
+      localStorage: { getItem: () => null, setItem: () => {} },
       window: { printpress: {
         onUpdateState: cb => { notify = cb }, onUpdateAvailable() {},
         getAppMeta: async () => ({ version: '0.6.7', updateState: snapshot }),

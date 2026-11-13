@@ -22,11 +22,7 @@ defineProps({
 </script>
 
 <template>
-  <header class="page-header">
-    <div class="page-header__text">
-      <h2 class="page-header__title">{{ title }}</h2>
-      <p v-if="description" class="page-header__desc">{{ description }}</p>
-    </div>
+  <header v-if="$slots.actions" class="page-header" :aria-label="title">
     <div v-if="$slots.actions" class="page-header__actions">
       <slot name="actions" />
     </div>
@@ -39,7 +35,7 @@ defineProps({
 .page-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
   flex-wrap: wrap;
   margin-bottom: 20px;

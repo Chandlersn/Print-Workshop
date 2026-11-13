@@ -3,7 +3,7 @@
  * 应用外壳：顶部品牌栏 + 三页导航。
  * 三页规模足够小，用组件切换而非 vue-router，少一层依赖。
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import DatasetView from './views/DatasetView.vue'
 import PhotoLibraryView from './views/PhotoLibraryView.vue'
 import TemplateView from './views/TemplateView.vue'
@@ -11,7 +11,8 @@ import PrintCenterView from './views/PrintCenterView.vue'
 import BackgroundDesignerView from './views/BackgroundDesignerView.vue'
 import GuideDialog from './components/GuideDialog.vue'
 import AppIcon from './components/AppIcon.vue'
-import brandLogo from '../electron/brand/printpress-logo-v2.png'
+import BrandLogo from './components/BrandLogo.vue'
+import { ACCENT_PRESETS, readAccentPreference, saveAccentPreference, resolveAccent, accentVariables } from './lib/accent.js'
 import { toUserMessage } from '../electron/user-error.cjs'
 import { cellNav } from './lib/cell-nav.js'
 import { designerNav } from './lib/designer-nav.js'
@@ -28,6 +29,46 @@ const TABS = [
 const activeTab = ref('dataset')
 const env = ref(null)
 const theme = ref('light')
+
+// 顶栏动作直接驱动各页暴露的方法，页面内不再重复一行按钮。
+const datasetRef = ref(null)
+const templateRef = ref(null)
+
+// ── 配色：六个预设 + 自选强调色，写进 :root 的强调色变量 ──────────────
+const accentPreference = ref(readAccentPreference())
+const accentOpen = ref(false)
+const accentPicker = ref(null)
+const accentTrigger = ref(null)
+// 帮助下拉：与配色下拉同一套开合规则（点外部、Esc 关），但各自独立不互相关。
+const helpOpen = ref(false)
+const helpPicker = ref(null)
+const helpTrigger = ref(null)
+const accentSaveError = ref('')
+const accentColor = computed(() => resolveAccent(accentPreference.value))
+function onAccentPointer(event) {
+  if (accentOpen.value && !accentPicker.value?.contains(event.target)) accentOpen.value = false
+  if (helpOpen.value && !helpPicker.value?.contains(event.target)) helpOpen.value = false
+}
+function onAccentKey(event) {
+  if (event.key !== 'Escape') return
+  if (accentOpen.value) { accentOpen.value = false; event.stopPropagation(); accentTrigger.value?.focus() }
+  else if (helpOpen.value) { helpOpen.value = false; event.stopPropagation(); helpTrigger.value?.focus() }
+}
+onMounted(() => { document.addEventListener('pointerdown', onAccentPointer); document.addEventListener('keydown', onAccentKey) })
+onBeforeUnmount(() => { document.removeEventListener('pointerdown', onAccentPointer); document.removeEventListener('keydown', onAccentKey) })
+
+function applyAccent(next = accentPreference.value) {
+  const vars = accentVariables(next)
+  const root = document.documentElement.style
+  for (const [name, value] of Object.entries(vars)) root.setProperty(name, value)
+}
+
+function chooseAccent(id, color) {
+  accentPreference.value = { accentId: id, customColor: color ?? accentPreference.value.customColor }
+  applyAccent()
+  accentSaveError.value = saveAccentPreference(accentPreference.value) ? '' : '配色未能保存，重启后可能恢复默认。'
+}
+applyAccent()
 
 watch(() => designerNav.request, (request) => { if (request) activeTab.value = 'designer' })
 watch(() => designerNav.result, (result) => { if (result) activeTab.value = result.origin === 'print' ? 'print' : 'template' })
@@ -352,7 +393,7 @@ onMounted(async () => {
   <div class="app-shell">
     <header class="app-header">
       <div class="brand">
-        <img class="brand-logo" :src="brandLogo" alt="批印坊 Logo" width="34" height="34">
+        <BrandLogo :size="34" />
         <span class="brand-seal">批印坊</span>
         <span class="brand-sub">本地智能批量制作</span>
       </div>
@@ -369,11 +410,69 @@ onMounted(async () => {
         </button>
       </nav>
       <span class="tb-spacer"></span>
+      <!-- 页面主操作提到顶栏：各页原来头行只有一个右侧按钮、左半片空着，白占一整行。
+           放到这里与顶栏同行，页面内容就能从最顶开始。 -->
+      <button
+        v-if="activeTab === 'dataset' && datasetRef"
+        class="btn-primary header-action"
+        :disabled="datasetRef.importing"
+        @click="datasetRef.startImport()"
+      ><AppIcon name="upload" :size="15" /> {{ datasetRef.importing ? '导入中…' : '导入表格' }}</button>
+      <button
+        v-if="activeTab === 'template' && templateRef"
+        class="btn-primary header-action"
+        data-testid="header-new-template"
+        @click="templateRef.newTemplate()"
+      ><AppIcon name="add" :size="15" /> 新建模板</button>
+      <div ref="accentPicker" class="accent-picker">
+        <button
+          ref="accentTrigger"
+          class="theme-toggle accent-trigger"
+          :aria-expanded="accentOpen"
+          title="切换配色"
+          @click="accentOpen = !accentOpen"
+        ><i class="accent-dot" :style="{ background: accentColor }" aria-hidden="true"></i> 配色</button>
+        <div v-if="accentOpen" class="accent-menu" role="group" aria-label="工作台配色">
+          <button
+            v-for="item in ACCENT_PRESETS"
+            :key="item.id"
+            class="accent-option"
+            :class="{ active: accentPreference.accentId === item.id }"
+            :aria-pressed="accentPreference.accentId === item.id"
+            @click="chooseAccent(item.id); accentOpen = false"
+          ><i class="accent-dot" :style="{ background: item.color }" aria-hidden="true"></i>{{ item.label }}</button>
+          <label class="accent-custom">
+            <span>自选</span>
+            <input
+              type="color"
+              :value="accentColor"
+              aria-label="自选强调色"
+              @input="chooseAccent('custom', $event.target.value)"
+            />
+            <code>{{ accentColor.toUpperCase() }}</code>
+          </label>
+        </div>
+      </div>
       <button class="theme-toggle" :title="theme === 'dark' ? '切换浅色' : '切换深色'" @click="toggleTheme">
         {{ theme === 'dark' ? '浅色' : '深色' }}
       </button>
-      <button class="theme-toggle" @click="showGuide = true">说明</button>
-      <button class="theme-toggle" @click="openAbout">关于</button>
+      <!-- 说明与关于收纳进「帮助」：顶栏原来并排两枚同级按钮，占位与主操作同级，
+           实际都是低频入口。收起后顶栏只留真正高频的三项。 -->
+      <div ref="helpPicker" class="accent-picker">
+        <button
+          ref="helpTrigger"
+          class="theme-toggle accent-trigger"
+          data-testid="header-help"
+          :aria-expanded="helpOpen"
+          aria-haspopup="menu"
+          title="帮助"
+          @click="helpOpen = !helpOpen"
+        ><AppIcon name="help" :size="15" /> 帮助</button>
+        <div v-if="helpOpen" class="accent-menu" role="menu" aria-label="帮助">
+          <button class="accent-option" role="menuitem" data-testid="header-guide" @click="showGuide = true; helpOpen = false">使用说明</button>
+          <button class="accent-option" role="menuitem" data-testid="header-about" @click="openAbout(); helpOpen = false">关于批印坊</button>
+        </div>
+      </div>
     </header>
 
     <!-- 新版本横幅：启动检测到远程版本更大时出现。可一键更新（真下载 + 下载完成后重启安装），
@@ -405,10 +504,13 @@ onMounted(async () => {
     </div>
 
     <main class="app-main">
+      <p v-if="activeTab === 'dataset' && datasetRef?.errorMsg" class="header-error" role="alert">{{ datasetRef.errorMsg }}</p>
+      <p v-if="dataDirError" class="header-error" role="alert">{{ dataDirError }}</p>
+      <p v-if="accentSaveError" class="header-error" role="status">{{ accentSaveError }}</p>
       <KeepAlive include="TemplateView,BackgroundDesignerView,PrintCenterView">
-        <DatasetView v-if="activeTab === 'dataset'" />
+        <DatasetView v-if="activeTab === 'dataset'" ref="datasetRef" />
         <PhotoLibraryView v-else-if="activeTab === 'photos'" @navigate="activeTab = $event" />
-        <TemplateView v-else-if="activeTab === 'template'" />
+        <TemplateView v-else-if="activeTab === 'template'" ref="templateRef" />
         <BackgroundDesignerView v-else-if="activeTab === 'designer'" />
         <PrintCenterView v-else />
       </KeepAlive>
@@ -564,7 +666,7 @@ onMounted(async () => {
 
 .theme-toggle:hover {
   border-color: var(--cinnabar);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
 }
 
 /* 新版本横幅 */
@@ -587,7 +689,7 @@ onMounted(async () => {
 
 .ub-link {
   flex-shrink: 0;
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   text-decoration: underline;
 }
 
@@ -600,7 +702,7 @@ onMounted(async () => {
   border: 1px solid var(--cinnabar);
   border-radius: 5px;
   background: var(--paper-card);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   font-size: 12px;
 }
 
@@ -666,12 +768,12 @@ onMounted(async () => {
   flex: none;
   white-space: nowrap;
 }
-.brand-logo { width: 34px; height: 34px; flex: none; object-fit: contain; }
+.brand-logo-svg { flex: none; display: block; }
 
 .brand-seal {
   font-size: 20px;
   font-weight: 700;
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   letter-spacing: 2px;
 }
 
@@ -716,7 +818,7 @@ onMounted(async () => {
 }
 
 .nav-item.active .nav-label {
-  color: var(--cinnabar);
+  color: var(--accent-ink);
 }
 
 .nav-hint {
@@ -735,8 +837,38 @@ onMounted(async () => {
 .app-main {
   flex: 1;
   overflow: auto;
-  padding: 24px;
+  /* 页面头行已并入顶栏，顶部 24px 会读成一条空带；收掉顶部内边距，内容从最顶开始。 */
+  padding: 0 24px 24px;
 }
+
+/* ── 顶栏页面动作与配色 ─────────────────────────────────────────── */
+.header-action { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; }
+.header-error { color: var(--danger); margin: 8px 0; overflow-wrap: anywhere; }
+
+.accent-picker { position: relative; flex: none; }
+.accent-trigger { display: inline-flex; align-items: center; gap: 6px; }
+.accent-dot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--line-strong); flex: none;
+}
+.accent-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 60;
+  display: grid; gap: 2px; min-width: 168px; padding: 6px;
+  background: var(--paper-card); border: 1px solid var(--line-strong);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(43, 38, 34, 0.18);
+}
+.accent-option {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 9px; border: 0; background: transparent; text-align: left; font-size: 13px;
+}
+.accent-option:hover { background: var(--cinnabar-soft); }
+.accent-option.active { font-weight: 600; color: var(--cinnabar); }
+.accent-custom {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px; padding: 7px 9px;
+  border-top: 1px solid var(--line); font-size: 13px;
+}
+.accent-custom input[type='color'] { width: 28px; height: 22px; padding: 0; border: 1px solid var(--line-strong); border-radius: 4px; background: none; cursor: pointer; }
+.accent-custom code { font: 11px ui-monospace, Consolas, monospace; color: var(--ink-2); }
 
 .app-footer {
   display: flex;
@@ -761,7 +893,7 @@ onMounted(async () => {
   padding: 1px 7px;
   border: 1px solid var(--cinnabar);
   border-radius: 8px;
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   font-size: 10px;
 }
 
@@ -777,11 +909,11 @@ onMounted(async () => {
 
 .footer-btn:hover {
   border-color: var(--cinnabar);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
 }
 
 .footer-error {
-  color: var(--cinnabar);
+  color: var(--danger);
 }
 
 .onboard-mask {
@@ -856,10 +988,12 @@ onMounted(async () => {
 
 .onboard-next {
   padding: 8px 26px;
-  border: 1px solid var(--cinnabar);
+  border: 1px solid var(--accent-solid);
   border-radius: 6px;
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  /* 实底强调色上的前景取 accent.js 算出的黑/白，不写死白字：
+     选鲜黄这类高亮强调色时白字对比只剩 1.07:1。 */
+  color: var(--on-accent);
   font-size: 13px;
 }
 

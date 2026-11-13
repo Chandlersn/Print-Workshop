@@ -126,8 +126,13 @@ async function main() {
       if (g) { g.click(); await new Promise(r => setTimeout(r, 400)) }
       return 1`)
     const opened = await ev(`
-      const b = [...document.querySelectorAll('button')].find(e => e.textContent.trim() === '关于')
-      if (!b) return { opened: false }
+      // 「关于」已收进顶栏「帮助」下拉：先开菜单再点，不能只按文本找顶层按钮。
+      const help = document.querySelector('[data-testid="header-help"]')
+      if (!help) return { opened: false, reason: 'no-help-button' }
+      help.click()
+      await new Promise(r => setTimeout(r, 250))
+      const b = [...document.querySelectorAll('button')].find(e => e.textContent.trim() === '关于批印坊')
+      if (!b) return { opened: false, reason: 'no-about-item' }
       b.click()
       await new Promise(r => setTimeout(r, 900))
       return { opened: !!document.querySelector('.about') }`)

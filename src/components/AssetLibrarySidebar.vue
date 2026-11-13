@@ -420,8 +420,8 @@ onMounted(() => {
 .asset-search { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 13px; }
 .asset-filters { display: flex; flex-wrap: wrap; gap: 5px; }
 .chip { font-size: 11px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--ink-2); cursor: pointer; }
-.chip.on { border-color: var(--cinnabar); color: var(--cinnabar); background: var(--paper-card); }
-.asset-error { color: var(--warn); font-size: 11px; }
+.chip.on { border-color: var(--cinnabar); color: var(--accent-ink); background: var(--paper-card); }
+.asset-error { color: var(--danger); font-size: 11px; }
 .asset-purge { border: 1px solid var(--warn-line); background: var(--warn-soft); border-radius: 7px; padding: 9px; }
 .asset-purge p { font-size: 11px; line-height: 1.6; margin: 0 0 8px; color: var(--ink-2); }
 .asset-purge-actions { display: flex; gap: 7px; }
@@ -445,7 +445,7 @@ onMounted(() => {
 .asset-card:hover .asset-card-actions,
 .asset-card:focus-within .asset-card-actions,
 .asset-card.archived .asset-card-actions { opacity: 1; }
-.asset-card-actions .icon-button.on { color: var(--cinnabar); }
+.asset-card-actions .icon-button.on { color: var(--accent-ink); }
 .asset-edit { grid-area: edit; display: flex; flex-direction: column; gap: 5px; border-top: 1px solid var(--line); padding-top: 7px; }
 .asset-edit label { display: flex; flex-direction: column; font-size: 10px; color: var(--stone); gap: 2px; }
 .asset-edit input { padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); color: var(--ink); font-size: 12px; }
@@ -459,7 +459,7 @@ onMounted(() => {
    （工具栏底 ≈211px）；弹窗比可用空间还高时改为滚动，也不会顶到按钮上。 */
 .asset-missing-mask { position: fixed; inset: 0; background: rgba(30, 26, 20, 0.45); display: flex; align-items: center; justify-content: center; padding: 216px 20px 24px; overflow: auto; z-index: 120; }
 .asset-missing-box { width: 380px; max-width: calc(100vw - 40px); background: var(--paper-card); border: 1px solid var(--line-strong); border-radius: 10px; padding: 18px 20px; box-shadow: 0 8px 28px rgba(30, 26, 20, 0.18); }
-.asset-missing-title { margin: 0 0 8px; font-size: 15px; color: var(--cinnabar); }
+.asset-missing-title { margin: 0 0 8px; font-size: 15px; color: var(--danger); }
 .asset-missing-lead { margin: 0 0 8px; font-size: 13px; line-height: 1.7; color: var(--ink-2); }
 .asset-missing-list { margin: 0 0 8px; padding-left: 18px; max-height: 180px; overflow: auto; font-size: 12px; line-height: 1.8; color: var(--ink); }
 .asset-missing-hint { margin: 0 0 14px; font-size: 12px; color: var(--stone); }

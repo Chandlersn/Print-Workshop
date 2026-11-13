@@ -10,8 +10,6 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
 import CustomSelect from '../components/CustomSelect.vue'
 import { isNonFunctionalArea } from '../lib/interaction-area.js'
-import PageHeader from '../components/PageHeader.vue'
-import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DesignSurface from '../components/DesignSurface.vue'
 import TemplateFieldText from '../components/TemplateFieldText.vue'
@@ -1487,15 +1485,13 @@ onBeforeUnmount(() => {
   uploadedFontFaces = []
   unbindTemplateEvents()
 })
+
+// 顶栏持有「新建模板」按钮。
+defineExpose({ newTemplate })
 </script>
 
 <template>
   <section class="page">
-    <PageHeader title="模板工坊">
-      <template #actions>
-        <button class="btn-primary" @click="newTemplate"><AppIcon name="add" /> 新建模板</button>
-      </template>
-    </PageHeader>
 
     <!--
       提示条：原先挤在 page-head 右侧当 12px 小字，而操作点在下方工具栏/画布上，
@@ -1510,7 +1506,6 @@ onBeforeUnmount(() => {
 
     <div class="layout">
       <aside class="side">
-        <h3 class="side-title">模板</h3>
         <div class="tpl-tabs" role="tablist" aria-label="模板分类">
           <button
             type="button"
@@ -2147,9 +2142,9 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 .notice.success { background: var(--ok-soft); color: var(--ok); }
-.notice.error { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
+.notice.error { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
 /* 模板页的按钮都是类选择器（没有全局 button 元素样式），所以这里要写全，
-   并用 currentColor 跟随所在条带的配色（error 是琥珀色、success 是绿色） */
+   并用 currentColor 跟随所在条带的配色（error 是红色、success 是绿色） */
 .notice-close {
   margin-left: auto;
   flex-shrink: 0;
@@ -2166,10 +2161,11 @@ onBeforeUnmount(() => {
   padding: 7px 18px;
   border: 1px solid var(--cinnabar);
   border-radius: 6px;
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
   font-size: 13px;
 }
+.btn-primary:active:not(:disabled) { background: var(--accent-active); border-color: var(--accent-active); color: var(--on-accent-active); }
 
 .btn-ghost {
   padding: 6px 14px;
@@ -2180,18 +2176,18 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.btn-ghost:hover { border-color: var(--cinnabar); color: var(--cinnabar); }
+.btn-ghost:hover { border-color: var(--cinnabar); color: var(--accent-ink); }
 
 .btn-danger {
   padding: 6px 14px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--paper-card);
-  color: var(--cinnabar);
+  color: var(--danger);
   font-size: 12px;
 }
 
-.btn-danger:hover { border-color: var(--cinnabar); background: var(--cinnabar-soft); }
+.btn-danger:hover, .btn-danger:active:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); }
 
 .layout { display: flex; gap: 20px; align-items: flex-start; }
 
@@ -2290,7 +2286,7 @@ onBeforeUnmount(() => {
   color: var(--stone);
 }
 
-.font-download:hover { border-color: var(--cinnabar); color: var(--cinnabar); }
+.font-download:hover { border-color: var(--cinnabar); color: var(--accent-ink); }
 .font-list { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
 
 .font-row {
@@ -2308,7 +2304,7 @@ onBeforeUnmount(() => {
 .font-del {
   border: none;
   background: transparent;
-  color: var(--cinnabar);
+  color: var(--danger);
   font-size: 11px;
   padding: 2px 4px;
   flex-shrink: 0;
@@ -2524,7 +2520,7 @@ onBeforeUnmount(() => {
 
 .canvas-drop-btn:hover {
   border-color: var(--cinnabar);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   background: var(--cinnabar-soft);
 }
 
@@ -2662,8 +2658,8 @@ onBeforeUnmount(() => {
   left: -7px; /* 盒已无 padding，补偿回原来的视觉位置 */
   padding: 0 5px;
   border-radius: 4px;
-  background: var(--cinnabar);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
   font-size: 10px;
   line-height: 1.5;
 }
@@ -2778,7 +2774,7 @@ onBeforeUnmount(() => {
 
 .palette-toggle:hover {
   border-color: var(--cinnabar);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
 }
 
 .palette-chip {
@@ -2798,7 +2794,7 @@ onBeforeUnmount(() => {
 
 .palette-chip:hover:not(:disabled) {
   border-color: var(--cinnabar);
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   background: var(--cinnabar-soft);
 }
 
@@ -2809,7 +2805,7 @@ onBeforeUnmount(() => {
 
 .palette-empty { grid-column: 1 / -1; font-size: 12px; color: var(--stone); }
 
-.align-label { font-size: 12px; color: var(--cinnabar); margin-right: 4px; }
+.align-label { font-size: 12px; color: var(--accent-ink); margin-right: 4px; }
 
 .btn-mini { padding: 3px 10px; font-size: 12px; }
 
@@ -2847,14 +2843,14 @@ onBeforeUnmount(() => {
 }
 
 .fill-badge.warn {
-  color: var(--cinnabar);
-  border-color: var(--cinnabar);
+  color: var(--danger);
+  border-color: var(--danger);
 }
 
 .fill-badge.warn-strong {
-  color: #fff;
-  border-color: var(--cinnabar);
-  background: var(--cinnabar);
+  color: var(--on-danger);
+  border-color: var(--danger-solid);
+  background: var(--danger-solid);
   white-space: normal;
   line-height: 1.5;
 }

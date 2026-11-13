@@ -277,9 +277,9 @@ legend { padding: 0 6px; font-size: 12px; color: var(--stone); }
 label.check { flex-direction: row; align-items: center; gap: 6px; }
 .check input { margin: 0; accent-color: var(--cinnabar); }
 .processing-actions { justify-content: flex-start; margin-top: 16px; }
-.processing-error { color: var(--cinnabar); font-size: 12px; line-height: 1.6; }
+.processing-error { color: var(--danger); font-size: 12px; line-height: 1.6; }
 .processing-notice, .applied-status { color: var(--jade, #357456); font-size: 12px; line-height: 1.6; }
-.applied-status span { color: var(--cinnabar); }
+.applied-status span { color: var(--accent-ink); }
 .automatic-setting { margin: 12px 0; font-size: 12px; }
 .preset-controls { display: grid; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 @media (max-width: 820px) { .processing-editor { grid-template-columns: 1fr; } .processing-controls { grid-template-columns: 1fr 1fr; } }

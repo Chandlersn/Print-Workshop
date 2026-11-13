@@ -105,10 +105,10 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', outside, true)
 code { font: 11px ui-monospace, Consolas, monospace; }
 .chevron { margin-left: auto; }
 .pipette { flex: 0 0 34px; display: grid; place-items: center; border-left: 1px solid var(--line) !important; padding: 4px; }
-.pipette[aria-pressed="true"] { color: var(--cinnabar); background: var(--cinnabar-soft); }
+.pipette[aria-pressed="true"] { color: var(--accent-ink); background: var(--cinnabar-soft); }
 button:disabled { opacity: .45; cursor: default; }
 button:focus-visible, .color-square:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: -2px; }
-.pick-hint { margin: 0; color: var(--cinnabar); line-height: 1.5; }
+.pick-hint { margin: 0; color: var(--accent-ink); line-height: 1.5; }
 .color-panel { display: grid; gap: 9px; padding: 9px; background: var(--paper-card); border: 1px solid var(--line); border-radius: 7px; }
 .color-square { position: relative; height: 110px; background-image: linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent); border-radius: 4px; cursor: crosshair; touch-action: none; }
 .square-marker { position: absolute; width: 9px; height: 9px; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 0 1px #0009; transform: translate(-50%, -50%); pointer-events: none; }

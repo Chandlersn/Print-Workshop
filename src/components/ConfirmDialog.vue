@@ -51,7 +51,7 @@ defineEmits(['confirm', 'cancel'])
 .cd-title {
   margin: 0 0 8px;
   font-size: 15px;
-  color: var(--cinnabar, #b03a2e);
+  color: var(--danger, #a52d22);
 }
 
 .cd-msg {
@@ -82,9 +82,9 @@ defineEmits(['confirm', 'cancel'])
 .cd-btn:hover { background: var(--cinnabar-soft, rgba(176, 58, 46, 0.06)); }
 
 .cd-btn.danger {
-  background: var(--cinnabar, #b03a2e);
-  border-color: var(--cinnabar, #b03a2e);
-  color: #fff;
+  background: var(--danger-solid, #a52d22);
+  border-color: var(--danger-solid, #a52d22);
+  color: var(--on-danger, #fff);
 }
 
 .cd-btn.danger:hover { filter: brightness(1.08); }

@@ -1,7 +1,5 @@
 <script setup>
 import { onMounted, onBeforeUnmount, ref } from 'vue'
-import PageHeader from '../components/PageHeader.vue'
-import AppIcon from '../components/AppIcon.vue'
 import PhotoImportPanel from '../components/PhotoImportPanel.vue'
 import PhotoProcessingPanel from '../components/PhotoProcessingPanel.vue'
 import PhotoReviewPanel from '../components/PhotoReviewPanel.vue'
@@ -58,11 +56,6 @@ onMounted(async () => {
 
 <template>
   <section class="photo-library-view">
-    <PageHeader title="变量照片库" description="自动跟随数据页的配图选择，在这里选择照片文件夹即可。">
-      <template #actions>
-        <button class="btn-ghost" @click="emit('navigate', 'designer')"><AppIcon name="portrait" /> 前往底图制作 → 添加变量图</button>
-      </template>
-    </PageHeader>
     <p v-if="loading" role="status">正在读取当前配图名单…</p>
     <p v-if="error" role="alert">{{ error }}</p>
     <button v-if="incoming && !singleFromPrint" class="btn-ghost" data-testid="photo-return-print" @click="returnToPrint">返回打印预览</button>
@@ -76,5 +69,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.photo-library-view{max-width:1440px;margin:auto;padding:16px}.library-heading p,.empty-library p{color:var(--stone);line-height:1.6;margin:6px 0}.matching-context{display:flex;gap:16px;justify-content:space-between;align-items:center;margin:16px 0;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}.empty-library{text-align:center;padding:80px 20px;border:1px dashed var(--line);border-radius:16px}
+/* 头部那行只剩一个「前往底图制作」按钮，已删除（切页导航本来就覆盖这件事）。
+   整行去掉后顶部只剩容器自身的内边距，会读成一条空带，一并收掉让内容上移。 */
+.photo-library-view{max-width:1440px;margin:auto;padding:0 16px 16px}.library-heading p,.empty-library p{color:var(--stone);line-height:1.6;margin:6px 0}.matching-context{display:flex;gap:16px;justify-content:space-between;align-items:center;margin:16px 0;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--paper-card)}.empty-library{text-align:center;padding:80px 20px;border:1px dashed var(--line);border-radius:16px}
 </style>

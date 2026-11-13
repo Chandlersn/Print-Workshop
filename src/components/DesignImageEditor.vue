@@ -557,12 +557,13 @@ header { justify-content: space-between; } h3 { margin: 0; font-size: 17px; }
 .coordinate-tip { font-size: 12px; color: var(--stone, #777); }
 input { width: 76px; } input, select { padding: 5px; color: inherit; background: var(--paper-card, #fff); border: 1px solid var(--line-strong, #bbb); border-radius: 4px; }
 button { padding: 6px 10px; background: var(--paper-card, #fff); color: inherit; border: 1px solid var(--line-strong, #bbb); border-radius: 5px; cursor: pointer; }
-button[aria-pressed="true"] { border-color: var(--cinnabar, #b03a2e); color: var(--cinnabar, #b03a2e); background: #b03a2e0a; } button:disabled { opacity: .4; cursor: default; }
-button.primary { background: var(--cinnabar, #b03a2e); color: white; border-color: transparent; }
+button[aria-pressed="true"] { border-color: var(--cinnabar, #b03a2e); color: var(--accent-ink, #ab392d); background: var(--cinnabar-soft, #f3e0dd); } button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent-solid, #b03a2e); color: var(--on-accent, #fff); border-color: transparent; transition: none; }
+button.primary:active:not(:disabled) { background: var(--accent-active, #bd5a4f); color: var(--on-accent-active, #000); }
 .hint { font-size: 12px; color: var(--stone, #777); margin: 12px 0; }
 .image-viewport { overflow: auto; height: max(160px, calc(100vh - 340px)); background: #383838; border-radius: 6px; padding: 16px; box-sizing: border-box; }
 .image-board { position: relative; margin: auto; flex-shrink: 0; background: repeating-conic-gradient(#eee 0% 25%, #ccc 0% 50%) 0 0 / 16px 16px; touch-action: none; user-select: none; cursor: crosshair; }
 .image-board img, .image-board svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; } .image-board img { pointer-events: none; }
 .selection { cursor: move; } .image-coordinates { margin-top: 12px; } footer { margin-top: 14px; } footer span { flex: 1; font-size: 12px; color: var(--stone, #777); }
-.edit-error { box-sizing: border-box; height: 20px; margin: 4px 0 0; color: #b03a2e; font-size: 12px; line-height: 20px; white-space: nowrap; overflow: auto; }
+.edit-error { box-sizing: border-box; height: 20px; margin: 4px 0 0; color: var(--danger, #a52d22); font-size: 12px; line-height: 20px; white-space: nowrap; overflow: auto; }
 </style>

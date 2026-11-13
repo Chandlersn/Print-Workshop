@@ -148,7 +148,7 @@ onBeforeUnmount(() => {
   padding: 2px 6px;
   border: 1px solid var(--cinnabar);
   border-radius: 4px;
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   background: var(--paper-card);
   font-size: 11px;
   font-weight: 600;
@@ -214,7 +214,7 @@ onBeforeUnmount(() => {
 }
 
 .cs-option.selected {
-  color: var(--cinnabar);
+  color: var(--accent-ink);
   font-weight: 600;
 }
 

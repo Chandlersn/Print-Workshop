@@ -101,8 +101,13 @@ app.whenReady().then(async () => {
   const errors = []
   ui.webContents.on('console-message', (_event, level, message) => { if (level >= 3) { errors.push(message); console.error('RENDERER_ERROR', message) } })
   await ui.loadFile(path.join(ROOT,'dist/index.html'))
-  await wait(`Boolean([...document.querySelectorAll('button')].find(el=>el.textContent.trim()==='说明'))`, 'built-in guide entry')
-  await evaluate(`[...document.querySelectorAll('button')].find(el=>el.textContent.trim()==='说明').click()`)
+  // 说明已收进顶栏「帮助」下拉：先开菜单再点入口，不能再按顶层按钮文本找。
+  await wait(`Boolean(document.querySelector('[data-testid="header-help"]'))`, 'help entry')
+  await evaluate(`(async () => {
+    document.querySelector('[data-testid="header-help"]').click();
+    await new Promise(r => setTimeout(r, 200));
+    document.querySelector('[data-testid="header-guide"]').click();
+  })()`)
   await wait(`document.querySelectorAll('.gd-body h2').length===10`, 'guide renders current documentation')
   const expectedHeadings = [...fs.readFileSync(path.join(ROOT,'docs/使用说明.md'),'utf8').matchAll(/^##\s+(.+?)\s*$/gm)].map(match=>match[1])
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('.gd-body h2')].map(el=>el.textContent)`), expectedHeadings)
@@ -110,8 +115,75 @@ app.whenReady().then(async () => {
   await wait(`Boolean([...document.querySelectorAll('.gd-body h2')].find(el=>el.textContent==='变量照片与排版参考样图'))`, 'designer guide uses its source document')
   ok(true, 'The built-in guide and designer guide render the same documentation shipped in the repository')
   await click('[data-testid="guide-close"]')
-  await wait(`Boolean(document.querySelector('.brand-logo')?.complete && document.querySelector('.brand-logo')?.naturalWidth>0)`, 'new logo asset loads')
-  ok(true, 'New PrintPress batch-paper logo loads in the application header')
+  // 标志已从位图换成内联 SVG（BrandLogo.vue）：SVG 没有 complete/naturalWidth，
+  // 只能按「真实渲染尺寸 > 0 + 矢量路径仍在」判定，否则这条断言永远等不到。
+  await wait(`(()=>{const el=document.querySelector('.brand-logo-svg');if(!el)return false;
+    const box=el.getBoundingClientRect();
+    return box.width>0 && box.height>0 && el.querySelectorAll('path').length>0})()`, 'new logo asset renders')
+  ok(true, 'New PrintPress batch-paper logo renders as vector in the application header')
+  // 布局改造的正向断言：页面主操作提到顶栏，且与顶栏其他控件同一行。
+  // 只断言「没报错」等于没验证；这里查「该出现的出现了」。
+  // 注意顶栏动作是按 tab 条件渲染的，必须切到对应页再断言。
+  await wait(`Boolean([...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='模板'))`, 'template nav')
+  await evaluate(`[...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='模板').click()`)
+  await wait(`Boolean(document.querySelector('button[data-testid="header-new-template"]'))`, 'template action moved to header')
+  // 模板页左侧栏原有的「模板」副标题已删，侧栏因此整体上移：
+  // 断言该标题不存在，且侧栏首个可交互块紧贴页面上沿（与内容顶留白之间无额外标题占位）。
+  ok(await evaluate(`(() => {
+    const side = document.querySelector('.layout .side');
+    if (!side) return false;
+    const hasTitle = [...side.querySelectorAll('.side-title')].some(el => el.textContent.trim() === '模板');
+    const firstChild = side.firstElementChild;
+    const main = document.querySelector('.app-main');
+    if (!firstChild || !main) return false;
+    // 侧栏首块顶边应贴近主区顶部（容差覆盖页面内边距），不能被一个标题行顶下去
+    const gap = firstChild.getBoundingClientRect().top - main.getBoundingClientRect().top;
+    return !hasTitle && gap <= 24;
+  })()`), 'Template sidebar has no 模板 sub-title and starts at the top of the page')
+  ok(await evaluate(`(() => {
+    const btn = document.querySelector('button[data-testid="header-new-template"]');
+    const peer = document.querySelector('button[data-testid="header-help"]');
+    if (!btn || !peer) return false;
+    // 同一行：顶边差 < 8px，且都在应用顶栏内
+    const sameRow = Math.abs(btn.getBoundingClientRect().top - peer.getBoundingClientRect().top) < 8;
+    return sameRow && Boolean(btn.closest('.app-header'));
+  })()`), 'Page primary action shares the header row instead of a separate title row')
+  // 顶栏精简：打开数据目录已删（底栏已有同名入口），说明/关于已收进「帮助」，
+  // 顶栏不应再出现这两枚独立按钮。
+  ok(await evaluate(`(() => {
+    const btns = [...document.querySelectorAll('.app-header button')];
+    const texts = btns.map(b => b.textContent.trim());
+    const hasDataDir = btns.some(b => b.dataset.testid === 'header-open-data');
+    const looseGuide = texts.filter(t => t === '说明' || t === '关于').length;
+    const hasHelp = Boolean(document.querySelector('[data-testid="header-help"]'));
+    return !hasDataDir && looseGuide === 0 && hasHelp;
+  })()`), 'Header keeps one help entry: no duplicate open-data-dir, no loose 说明/关于 buttons')
+  // 「帮助」下拉里两个入口都要在，且点得开说明弹窗
+  ok(await evaluate(`(async () => {
+    const help = document.querySelector('[data-testid="header-help"]');
+    help.click();
+    await new Promise(r => setTimeout(r, 200));
+    const guide = document.querySelector('[data-testid="header-guide"]');
+    const about = document.querySelector('[data-testid="header-about"]');
+    const both = Boolean(guide && about);
+    guide.click();
+    await new Promise(r => setTimeout(r, 500));
+    const dialog = Boolean(document.querySelector('.gd-body'));
+    return both && dialog;
+  })()`), 'Help menu exposes 使用说明 and 关于批印坊, and the guide dialog opens from it')
+  ok(await evaluate(`(() => {
+    const close = document.querySelector('[data-testid="guide-close"]');
+    if (close) close.click();
+    return true;
+  })()`), 'Guide dialog closes again after the help-menu check')
+  await wait(`Boolean([...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='数据'))`, 'dataset nav')
+  await evaluate(`[...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='数据').click()`)
+  await wait(`Boolean([...document.querySelectorAll('button')].find(el=>el.textContent.includes('导入表格')))`, 'dataset import action')
+  ok(await evaluate(`(() => {
+    // 顶栏持有导入动作后，全页只应有一个「导入表格」按钮（旧头行已并入顶栏）
+    const hits = [...document.querySelectorAll('button')].filter(el => el.textContent.trim().includes('导入表格'));
+    return hits.length === 1 && Boolean(hits[0].closest('.app-header'));
+  })()`), 'Dataset import action appears exactly once, in the header, under its new name')
   await wait(`Boolean([...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='变量照片'))`, 'navigation')
   await evaluate(`[...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='变量照片').click()`)
   await wait(`Boolean(document.querySelector('[data-testid="photo-processing-panel"]')) && document.querySelector('[data-testid="photo-processing-panel"]').textContent.includes('制作样板')`, 'shared photo processing entry')
@@ -247,6 +319,28 @@ app.whenReady().then(async () => {
   await evaluate(`localStorage.setItem('printpress-background-designer-draft-v1',${JSON.stringify(JSON.stringify({design:doc,savedFingerprint:''}))})`)
   await evaluate(`[...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='底图制作').click()`)
   await wait(`Boolean(document.querySelector('[data-layer-id="portrait"]'))`, 'designer variable layer')
+  // 底图制作页工具栏（新建底图 … 保存工程）已按需求整排下移，不再贴死顶栏。
+  // 断言「这一排的第一枚按钮与顶栏底边之间有可见间距」，并确认它确实比顶栏低。
+  ok(await evaluate(`(() => {
+    const bar = document.querySelector('[data-testid="design-new"]');
+    const header = document.querySelector('.app-header');
+    if (!bar || !header) return false;
+    const gap = bar.getBoundingClientRect().top - header.getBoundingClientRect().bottom;
+    return gap >= 8;
+  })()`), 'Designer toolbar row sits below the app header with visible spacing')
+  // 打印中心同理：出片按钮排（逐条导出 / 直接打印 / 导出 PDF / 打印历史）也要与顶栏拉开可见间距。
+  await evaluate(`[...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='打印中心').click()`)
+  await wait(`Boolean(document.querySelector('.print-header .toolbar-actions button'))`, 'print center toolbar')
+  ok(await evaluate(`(() => {
+    const bar = document.querySelector('.print-header .toolbar-actions > button');
+    const header = document.querySelector('.app-header');
+    if (!bar || !header) return false;
+    const gap = bar.getBoundingClientRect().top - header.getBoundingClientRect().bottom;
+    return gap >= 8;
+  })()`), 'Print-center action row sits below the app header with visible spacing')
+  // 切页检查完必须切回底图制作：后续步骤要在这一页点图层，别把前序状态打断。
+  await evaluate(`[...document.querySelectorAll('.nav-label')].find(el=>el.textContent.trim()==='底图制作').click()`)
+  await wait(`Boolean(document.querySelector('[data-layer-id="portrait"]'))`, 'back to designer page')
   await click('[data-layer-id="portrait"]')
   await wait(`Boolean(document.querySelector('[data-testid="design-variable-reference"]:not(:disabled)')) && Boolean(document.querySelector('[data-photo-column="photo"]')?.complete)`, 'designer sample image')
   ok(await evaluate(`document.querySelector('[data-photo-column="photo"]').src.includes(${JSON.stringify(state.items[original.id])})`), 'Third page displays the exact result configured on the second page')
