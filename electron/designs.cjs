@@ -345,7 +345,10 @@ function canonicalFonts(doc, previous = {}) {
 }
 function listDesigns() {
   const legacy = new Map((loadJson('record-designs', { expect:'array' }) || []).map(item => [item.designRef?.id, { datasetId:item.datasetId, templateId:item.templateId, rowId:item.rowId }]))
-  return index().map(item => item.recordOwner || !legacy.has(item.id) ? item : { ...item, recordOwner:legacy.get(item.id) }).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+  return index().map(item => ({ ...item,
+    ...(!item.recordOwner && legacy.has(item.id) ? { recordOwner: legacy.get(item.id) } : {}),
+    ...(legacy.has(item.id) ? { recordInUse: true } : {}),
+  })).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
 }
 
 const sameRecordOwner = (a, b) => a && b && a.datasetId === b.datasetId && a.templateId === b.templateId && a.rowId === b.rowId
@@ -436,6 +439,12 @@ function saveDesign(input, options) {
     const all = index()
     const head = doc.id ? all.find(d => d.id === projectId(doc.id)) : null
     const recordOwner = options?.recordOwner || head?.recordOwner || null
+    if (options?.recordOwner && !head) {
+      const linked = (loadJson('record-designs', { expect:'array' }) || []).filter(item => sameRecordOwner(item, options.recordOwner))
+      if (all.some(item => sameRecordOwner(item.recordOwner, options.recordOwner) || linked.some(entry => entry.designRef?.id === item.id))) {
+        throw new Error('此人已有单人底图，请打开已有工程继续编辑')
+      }
+    }
     if (options?.recordOwner && head && !sameRecordOwner(head.recordOwner || (loadJson('record-designs', {expect:'array'}) || []).find(item => item.designRef?.id === head.id), options.recordOwner)) throw new Error('请选择此人的独立底图，或另存副本')
     if (doc.id && !head) throw new Error('底图工程不存在，若要恢复副本请使用另存为')
     if (head && doc.revision !== head.revision) {
@@ -483,18 +492,28 @@ function publishRevisionLocked(doc, { id, revision, createdAt, recordUse, record
   }
   return saved
 }
-function deleteDesign(id) {
+function deleteDesign(id, options = {}) {
   projectId(id)
   return withLock(() => {
     const all = index()
     if (!all.some(d => d.id === id)) throw new Error('底图工程不存在或已删除')
     const used = (loadJson('templates', { expect: 'array' }) || []).filter(t => t.backgroundDesign && t.backgroundDesign.id === id)
     if (used.length) throw new Error(`底图正在被模板使用：${used.map(t => t.name).join('、')}，请先移除引用`)
-    if ((loadJson('record-designs', { expect: 'array' }) || []).some(item => item.designRef?.id === id)) throw new Error('底图正在被单人海报使用，请先恢复该人员的模板默认底图')
-    saveJson('designs', all.filter(d => d.id !== id))
+    const entries = loadJson('record-designs', { expect: 'array' }) || []
+    const linked = entries.filter(item => item.designRef?.id === id)
+    if (linked.length && !options.detachRecord) throw new Error('底图正在被单人海报使用，请先恢复该人员的模板默认底图')
+    const owner = all.find(d => d.id === id)?.recordOwner
+    if (linked.length && (linked.length !== 1 || owner && !sameRecordOwner(owner, linked[0]))) throw new Error('单人底图关联异常，请先检查后再删除')
+    if (linked.length) saveJson('record-designs', entries.filter(item => item.designRef?.id !== id))
+    try { saveJson('designs', all.filter(d => d.id !== id)) } catch (err) {
+      if (linked.length) {
+        try { saveJson('record-designs', entries) } catch { throw new Error('删除未完成，单人底图关联恢复失败，请检查打印预览') }
+      }
+      throw err
+    }
     // Keep source bytes and revision documents for unsaved drafts and undo history.
     // 这些目录不会自己消失 —— 由 purgeOrphanDirs()（「关于 → 清理缓存与残留」）统一回收。
-    return { ok: true }
+    return { ok: true, restoredRecords: linked.length }
   })
 }
 

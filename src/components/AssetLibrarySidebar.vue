@@ -269,18 +269,19 @@ async function saveEdit(item) {
 // 清理未引用原件（I-32）：先列出既不在工程、也不在素材库的孤立原件，确认后才删
 const orphans = ref(null) // null=未扫描；{ items:[{hash,bytes}], bytes }=扫描结果
 const purgePending = ref(false)
+const cleanupMessage = ref(''), cleanupFailed = ref(false)
 async function scanOrphans() {
-  error.value = ''
+  cleanupMessage.value = ''; cleanupFailed.value = false
   try {
     const items = (await pp.listAssetOrphans([...props.draftAssetIds])) || []
     orphans.value = { items, bytes: items.reduce((s, i) => s + (i.bytes || 0), 0) }
     if (!items.length) {
-      error.value = '没有未引用的原件，无需清理。'
+      cleanupMessage.value = '没有未引用的原件，无需清理。'
       return
     }
     purgePending.value = true
   } catch (err) {
-    error.value = toUserMessage(err)
+    cleanupFailed.value = true; cleanupMessage.value = toUserMessage(err)
   }
 }
 async function confirmPurge() {
@@ -291,9 +292,9 @@ async function confirmPurge() {
     purgePending.value = false
     orphans.value = null
     await refresh()
-    error.value = `已清理 ${res.removed} 个孤立原件，实际释放 ${formatBytes(res.bytes || 0)}${res.kept ? `；${res.kept} 个因已被引用而跳过` : ''}${res.failed?.length ? `；${res.failed.length} 个删除失败，请重新扫描` : ''}。`
+    cleanupFailed.value = Boolean(res.failed?.length); cleanupMessage.value = `已清理 ${res.removed} 个孤立原件，实际释放 ${formatBytes(res.bytes || 0)}${res.kept ? `；${res.kept} 个因已被引用而跳过` : ''}${res.failed?.length ? `；${res.failed.length} 个删除失败，请重新扫描` : ''}。`
   } catch (err) {
-    error.value = toUserMessage(err)
+    cleanupFailed.value = true; cleanupMessage.value = toUserMessage(err)
     purgePending.value = false
   }
 }
@@ -314,29 +315,29 @@ onMounted(() => {
 
     <div class="asset-actions">
       <button data-testid="asset-import" :disabled="loading" @click="importDialog">＋ 导入图片</button>
-      <button data-testid="asset-cleanup" :disabled="loading" title="扫描并清理不被任何工程或素材库引用的孤立原件" @click="scanOrphans">清理未引用</button>
-      <button data-testid="asset-usage" :disabled="loading" @click="toggleUsage">{{ usageOpen ? '收起盘点' : '空间盘点' }}</button>
-      <button data-testid="asset-audit" @click="toggleAudit">{{ auditOpen ? '收起重复检查' : '重复素材检查' }}</button>
+      <button data-testid="asset-audit" :aria-expanded="auditOpen" @click="toggleAudit">{{ auditOpen ? '收起素材整理' : '素材整理' }}</button>
       <button data-testid="asset-reset-filter" v-if="hasFilters" @click="() => { query=''; activeTags=[]; favoriteOnly=false; includeArchived=false; resetPage(); refresh() }">清除筛选</button>
       <button class="asset-open-folder" data-testid="asset-open-folder" :disabled="loading" title="在系统文件管理器里打开素材库原件所在的文件夹" @click="openFolder">打开素材库文件夹</button>
     </div>
 
     <div v-if="auditOpen" class="asset-usage" data-testid="asset-audit-panel">
-      <strong>重复素材检查</strong>
-      <p>检查三个素材池，不删除或合并原件。跨池副本可能各有用途，理论重复空间不等于可释放空间。</p>
+      <strong>素材整理</strong>
+      <p>启动时自动清理可再生的旧缓存，素材原件会保留。</p>
       <p v-if="audit?.maintenance?.phase === 'running'" role="status">正在整理旧缩略图缓存…</p>
       <p v-else-if="audit?.maintenance?.phase === 'completed'">本次启动已删除 {{ audit.maintenance.removed }} 个旧缩略图缓存，实际释放 {{ formatBytes(audit.maintenance.bytes) }}<span v-if="audit.maintenance.skipped || audit.maintenance.failed">；跳过 {{ audit.maintenance.skipped }}，失败 {{ audit.maintenance.failed }}</span>。</p>
       <p v-else-if="audit?.maintenance?.phase === 'skipped'">本次启动未整理缓存：{{ audit.maintenance.reason }}。</p>
       <p v-if="!audit || audit.phase === 'idle'">尚未开始扫描。</p>
-      <p v-else-if="['starting', 'enumerating', 'checking', 'references'].includes(audit.phase)" role="status">后台检查中 · 已发现 {{ audit.files || 0 }} 份原件 · 已校验 {{ audit.checked || 0 }} 份跨池副本 <span v-if="audit.phase === 'references'">· 正在检查业务引用</span> <button @click="cancelAudit">取消</button></p>
+      <p v-else-if="['starting', 'enumerating', 'checking', 'references'].includes(audit.phase)" role="status">正在后台检查素材… <button @click="cancelAudit">取消检查</button></p>
       <p v-else-if="audit.phase === 'canceled'">扫描已取消。</p>
       <p v-else-if="audit.phase === 'failed'" class="asset-error">{{ audit.reason }}</p>
       <template v-else-if="audit.report">
-        <p>完成于 {{ new Date(audit.report.completedAt).toLocaleString() }} · {{ audit.report.complete ? '文件扫描完成' : '扫描不完整，请检查异常' }}</p>
-        <p>原件文件 {{ audit.report.files }} 份 · 大小合计 {{ formatBytes(audit.report.bytes) }}；跨池相同内容 {{ audit.report.groupCount }} 组 · 理论重复文件大小 {{ formatBytes(audit.report.theoreticalBytes) }}。</p>
+        <p>{{ audit.report.complete ? '素材检查已完成。' : '素材检查未完成，请查看异常。' }}发现 {{ audit.report.groupCount }} 组相同内容，可能被不同用途共用。</p>
+        <p v-if="audit.report.missingReferences">{{ audit.report.missingReferences }} 个被引用的素材在本次扫描中未找到，请检查原件。</p>
+        <details class="asset-maintenance-details" data-testid="asset-audit-details">
+        <summary>查看检查详情</summary>
+        <p>检查时间：{{ new Date(audit.report.completedAt).toLocaleString() }}。原件文件 {{ audit.report.files }} 份 · 大小合计 {{ formatBytes(audit.report.bytes) }}；跨池相同内容 {{ audit.report.groupCount }} 组 · 理论重复文件大小 {{ formatBytes(audit.report.theoreticalBytes) }}。</p>
         <p>结果是扫描时的快照；打印归档照片为独立副本，未保存草稿与快照中的内嵌图片未逐项核实，不能作为清理依据。</p>
         <p>本次未发现已保存的已知引用：{{ audit.report.noKnownReferences }} 项（仅供核查，不能据此清理）。</p>
-        <p v-if="audit.report.missingReferences">{{ audit.report.missingReferences }} 个被引用的素材在本次扫描中未找到，请检查原件。</p>
         <div v-for="group in audit.report.groups.items" :key="group.hash" class="asset-usage-row"><b>{{ group.hash.slice(0, 12) }}…</b> · {{ group.copies.map(copy => `${copy.pool} ${formatBytes(copy.bytes)}`).join(' / ') }}</div>
         <div v-if="audit.report.groups.pages > 1"><button :disabled="audit.report.groups.page <= 1" @click="changeAuditPage('groupsPage', audit.report.groups.page - 1)">上一页</button> 重复组 {{ audit.report.groups.page }}/{{ audit.report.groups.pages }} <button :disabled="audit.report.groups.page >= audit.report.groups.pages" @click="changeAuditPage('groupsPage', audit.report.groups.page + 1)">下一页</button></div>
         <details><summary>查看素材及已知引用（{{ audit.report.assets.total }}）</summary>
@@ -345,18 +346,33 @@ onMounted(() => {
         </details>
         <div v-for="(issue, index) in audit.report.issues.items" :key="index" class="asset-usage-row">{{ issue.pool }} {{ issue.hash ? issue.hash.slice(0, 12) + '…' : '' }}：{{ issue.reason }}</div>
         <div v-if="audit.report.issues.pages > 1"><button :disabled="audit.report.issues.page <= 1" @click="changeAuditPage('issuesPage', audit.report.issues.page - 1)">上一页</button> 异常 {{ audit.report.issues.page }}/{{ audit.report.issues.pages }} <button :disabled="audit.report.issues.page >= audit.report.issues.pages" @click="changeAuditPage('issuesPage', audit.report.issues.page + 1)">下一页</button></div>
+        </details>
       </template>
-      <button v-if="!audit || !['starting', 'enumerating', 'checking', 'references'].includes(audit.phase)" data-testid="asset-audit-restart" @click="restartAudit">重新检查</button>
-    </div>
-
-    <div v-if="usageOpen && usage" class="asset-usage" data-testid="asset-usage-panel">
-      <strong>本机资源占用</strong>
-      <p>原件 {{ usage.uniqueOriginals }} 份 · {{ formatBytes(usage.originalBytes) }}；缩略图 {{ formatBytes(usage.thumbnailBytes) }}；打印归档 {{ formatBytes(usage.archiveBytes) }}；导入暂存 {{ formatBytes(usage.stagingBytes) }}</p>
-      <p>可检查的孤立原件 {{ usage.orphanCount }} 份 · {{ formatBytes(usage.orphanBytes) }}（清理前会再次核对引用）</p>
-      <div v-for="item in usage.datasets" :key="item.datasetId" class="asset-usage-row">
-        <b>{{ item.name }}</b> · 照片 {{ item.photoCount }} 张 · 匹配 {{ item.matchedPeople }}/{{ item.rowCount }} 人<br>
-        逻辑占用 {{ formatBytes(item.logicalBytes) }} · 独占 {{ formatBytes(item.exclusiveBytes) }} · 共享 {{ formatBytes(item.sharedBytes) }}
-      </div>
+      <details class="asset-maintenance-details" data-testid="asset-maintenance-tools">
+        <summary>更多整理操作</summary>
+        <div class="maintenance-actions">
+          <button v-if="!audit || !['starting', 'enumerating', 'checking', 'references'].includes(audit.phase)" data-testid="asset-audit-restart" @click="restartAudit">重新检查</button>
+          <button data-testid="asset-usage" :disabled="loading" @click="toggleUsage">{{ usageOpen ? '收起空间用量' : '查看空间用量' }}</button>
+          <button class="maintenance-danger" data-testid="asset-cleanup" :disabled="loading" title="扫描并清理不被任何工程或素材库引用的孤立原件" @click="scanOrphans">清理未引用原件</button>
+        </div>
+        <p v-if="cleanupMessage" :class="{ 'asset-error': cleanupFailed }" :role="cleanupFailed ? 'alert' : 'status'">{{ cleanupMessage }}</p>
+        <div v-if="purgePending && orphans?.items.length" class="asset-purge" data-testid="asset-purge">
+          <p>将删除 <b>{{ orphans.items.length }}</b> 个不被任何工程或素材库引用的孤立原件，释放约 {{ (orphans.bytes / 1048576).toFixed(1) }} MB。<b>此操作不可恢复。</b></p>
+          <div class="asset-purge-actions">
+            <button data-testid="asset-purge-confirm" @click="confirmPurge">确认清理</button>
+            <button data-testid="asset-purge-cancel" @click="cancelPurge">取消</button>
+          </div>
+        </div>
+        <div v-if="usageOpen && usage" class="asset-usage-row" data-testid="asset-usage-panel">
+          <strong>本机资源占用</strong>
+          <p>原件 {{ usage.uniqueOriginals }} 份 · {{ formatBytes(usage.originalBytes) }}；缩略图 {{ formatBytes(usage.thumbnailBytes) }}；打印归档 {{ formatBytes(usage.archiveBytes) }}；导入暂存 {{ formatBytes(usage.stagingBytes) }}</p>
+          <p>可检查的孤立原件 {{ usage.orphanCount }} 份 · {{ formatBytes(usage.orphanBytes) }}（清理前会再次核对引用）</p>
+          <div v-for="item in usage.datasets" :key="item.datasetId" class="asset-usage-row">
+            <b>{{ item.name }}</b> · 照片 {{ item.photoCount }} 张 · 匹配 {{ item.matchedPeople }}/{{ item.rowCount }} 人<br>
+            逻辑占用 {{ formatBytes(item.logicalBytes) }} · 独占 {{ formatBytes(item.exclusiveBytes) }} · 共享 {{ formatBytes(item.sharedBytes) }}
+          </div>
+        </div>
+      </details>
     </div>
 
     <input
@@ -385,13 +401,6 @@ onMounted(() => {
     </div>
 
     <p v-if="error" class="asset-error" data-testid="asset-error">{{ error }}</p>
-    <div v-if="purgePending && orphans?.items.length" class="asset-purge" data-testid="asset-purge">
-      <p>将删除 <b>{{ orphans.items.length }}</b> 个不被任何工程或素材库引用的孤立原件，释放约 {{ (orphans.bytes / 1048576).toFixed(1) }} MB。<b>此操作不可恢复。</b></p>
-      <div class="asset-purge-actions">
-        <button data-testid="asset-purge-confirm" @click="confirmPurge">确认清理</button>
-        <button data-testid="asset-purge-cancel" @click="cancelPurge">取消</button>
-      </div>
-    </div>
     <p v-if="loading" class="muted">读取素材库中…</p>
     <p v-else-if="!items.length" class="muted">还没有素材。点「导入图片」收常用图；工程里粘贴的图在图层行上点「＋」即可加入。</p>
 
@@ -482,7 +491,13 @@ onMounted(() => {
 .asset-list { display: flex; flex-direction: column; gap: 7px; max-height: calc(100vh - 360px); overflow: auto; }
 .asset-usage{padding:9px;margin:8px 0;border:1px solid var(--line);border-radius:7px;background:var(--paper);font-size:11px;line-height:1.6;max-height:230px;overflow:auto}
 .asset-usage p{margin:5px 0;color:var(--stone)}
+.asset-usage p.asset-error { color: var(--danger); }
 .asset-usage-row{padding:5px 0;border-top:1px solid var(--line)}
+.asset-maintenance-details { margin-top: 9px; border-top: 1px solid var(--line); padding-top: 7px; }
+.asset-maintenance-details summary { cursor: pointer; color: var(--accent-ink); font-weight: 600; }
+.maintenance-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.maintenance-actions button { font-size: 11px; }
+.maintenance-actions .maintenance-danger { color: var(--danger); }
 .asset-card { display: grid; grid-template-columns: 46px 1fr auto; grid-template-areas: 'thumb meta actions' 'edit edit edit'; gap: 6px 8px; align-items: center; padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); cursor: pointer; }
 .asset-card.archived { opacity: 0.6; }
 .asset-thumb { grid-area: thumb; width: 46px; height: 46px; border-radius: 5px; overflow: hidden; background: var(--paper-card); display: flex; align-items: center; justify-content: center; }

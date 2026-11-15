@@ -15,6 +15,7 @@ const loading = ref(true)
 const guidance = ref('')
 const importPanel = ref(null), processingRefresh = ref(0)
 const singleFromPrint = ref(null), singleChanged = ref(false)
+const repairRowIndex = ref(-1)
 const incoming = photoNav.request?.origin === 'print' ? { ...photoNav.request } : null
 let alive = true
 function returnToPrint() {
@@ -47,7 +48,8 @@ onMounted(async () => {
     if (incoming) {
       const rowIndex = ds.recordIds?.indexOf(incoming.rowId) ?? -1
       if (rowIndex < 0) error.value = '人员记录已变化，请返回打印预览后重新选择。'
-      else singleFromPrint.value = { rowId: incoming.rowId, rowIndex, label: incoming.label }
+      else if (incoming.mode === 'repair') repairRowIndex.value = rowIndex
+      else if (incoming.mode !== 'repair') singleFromPrint.value = { rowId: incoming.rowId, rowIndex, label: incoming.label }
     }
   } catch (err) { if (alive) error.value = toUserMessage(err) }
   finally { if (alive) loading.value = false }
@@ -58,12 +60,13 @@ onMounted(async () => {
   <section class="photo-library-view">
     <p v-if="loading" role="status">正在读取当前配图名单…</p>
     <p v-if="error" role="alert">{{ error }}</p>
-    <button v-if="incoming && !singleFromPrint" class="btn-ghost" data-testid="photo-return-print" @click="returnToPrint">返回打印预览</button>
+    <p v-if="incoming?.mode === 'repair' && repairRowIndex >= 0 && !error" data-testid="photo-repair-context">正在处理第 {{ repairRowIndex + 1 }} 行「{{ incoming.label }}」的缺图，请在下方补充照片后返回打印预览。</p>
+    <button v-if="incoming && !singleFromPrint" class="btn-ghost" data-testid="photo-return-print" :disabled="importPanel?.isBusy" @click="returnToPrint">返回打印预览</button>
     <div v-if="!loading && !detail && !error" class="empty-library"><h2>先在数据页确定配图名单</h2><p>{{ guidance }}</p><button class="btn-primary" @click="emit('navigate', 'dataset')">前往数据页</button></div>
     <div v-if="detail" class="matching-context" data-testid="photo-auto-context"><span>当前配图：<strong>{{ detail.name }}</strong> · {{ detail.columns.find(c => c.key === detail.photoMatchColumn)?.alias || detail.photoMatchColumn }}</span><button class="btn-ghost" @click="emit('navigate', 'dataset')">返回数据页</button></div>
     <PhotoProcessingPanel v-if="detail" :key="`processing-${detail.id}`" :dataset-id="detail.id" :refresh-key="processingRefresh" @applied="importPanel?.refresh()" @navigate="page => emit('navigate', page)" />
     <PhotoReviewPanel v-if="detail" :key="`review-${detail.id}`" :dataset-id="detail.id" :column="detail.photoMatchColumn" :refresh-key="processingRefresh" @applied="importPanel?.refresh()" />
-    <PhotoImportPanel v-if="detail" ref="importPanel" :key="detail.id" embedded :dataset-id="detail.id" :columns="detail.columns" :match-column="detail.photoMatchColumn || ''" @report="processingRefresh++" @edit-cell="({ rowIndex, key }) => gotoCell(detail.id, rowIndex, key)" />
+    <PhotoImportPanel v-if="detail" ref="importPanel" :key="detail.id" embedded :dataset-id="detail.id" :columns="detail.columns" :match-column="detail.photoMatchColumn || ''" @report="processingRefresh++" @changed="singleChanged = true" @edit-cell="({ rowIndex, key }) => gotoCell(detail.id, rowIndex, key)" />
     <PhotoSingleEditor v-if="detail && singleFromPrint" :dataset-id="detail.id" :row="singleFromPrint" return-to-print @close="returnToPrint" @applied="singleApplied" />
   </section>
 </template>

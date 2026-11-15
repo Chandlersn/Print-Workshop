@@ -148,7 +148,7 @@ contextBridge.exposeInMainWorld('printpress', {
   touchDesign: (id) => invoke('design:touch', id),
   getDesign: (id, revision) => invoke('design:get', id, revision),
   saveDesign: (design, recordOwner) => invoke('design:save', design, recordOwner),
-  deleteDesign: (id) => invoke('design:delete', id),
+  deleteDesign: (id, options) => invoke('design:delete', id, options),
   purgeOrphanDesigns: () => invoke('design:purgeOrphanDirs'),
   uploadDesignImageDialog: () => invoke('design:importDialog'),
   uploadDesignImageBytes: (payload) => invoke('design:importBytes', payload),

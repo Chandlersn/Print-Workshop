@@ -879,9 +879,9 @@ const OPS = {
 
   'design:delete': {
     write: true,
-    params: { id: { required: true, desc: '底图工程 id' } },
-    fromIpc: (id) => ({ id }),
-    run: (p) => designs.deleteDesign(p.id),
+    params: { id: { required: true, desc: '底图工程 id' }, detachRecord: { required: false, desc: '删除单人底图时恢复该人员的默认底图' } },
+    fromIpc: (id, options) => ({ id, detachRecord: options?.detachRecord === true }),
+    run: (p) => designs.deleteDesign(p.id, { detachRecord: p.detachRecord === true }),
   },
 
   /**

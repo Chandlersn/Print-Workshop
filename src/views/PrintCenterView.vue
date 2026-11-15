@@ -281,7 +281,7 @@ watch(() => photoNav.result, result => {
   photoEditSeq++; photoEdit.value = null; photoDrag = null; photoInteraction.value = false
   returnedPhotoRowId = result.rowId
   // Returning activates this kept-alive view; onActivated reloads preview and preflight.
-  if (result.changed) say('已更新此人的照片，其他人员保持原样')
+  if (result.changed && result.mode !== 'repair') say('已更新此人的照片，其他人员保持原样')
 })
 async function clearRecordDesign() {
   const rowId = dsDetail.value?.recordIds?.[recordDesignRow.value]
@@ -303,7 +303,7 @@ watch(() => designerNav.result, async result => {
   if (result.rowId) {
     try { recordDesignInfo.value = await window.printpress.getRecordDesign({ datasetId:selDs.value, templateId:selTpl.value, rowId:result.rowId }) } catch { recordDesignInfo.value = null }
   }
-  if (!result.canceled) say('已保存此人的独立底图，其他人员保持原模板')
+  if (!result.canceled) say(result.restored ? '已删除此人的独立底图，恢复模板默认底图' : '已保存此人的独立底图，其他人员保持原模板')
 })
 
 async function loadDetail() {
@@ -511,6 +511,12 @@ function showPhotoIssues(status) {
 }
 
 function goPhotoIssue(item) {
+  if (item.status === 'missing') {
+    const rowId = dsDetail.value?.recordIds?.[item.rowIndex]
+    if (!rowId) { say('人员记录已变化，请重新预览'); return }
+    openSinglePhoto({ origin: 'print', mode: 'repair', datasetId: selDs.value, templateId: selTpl.value, rowId, rowIndex: item.rowIndex, label: item.name || rowPreview(dsDetail.value.rows[item.rowIndex] || {}) })
+    return
+  }
   if (photoPreflight.value?.photoColumn) gotoCell(selDs.value, item.rowIndex, photoPreflight.value.photoColumn)
 }
 
@@ -1190,7 +1196,16 @@ onActivated(async () => {
   if (!ready.value) return
   await loadDetail()
   const row = returnedPhotoRowId ? dsDetail.value?.recordIds?.indexOf(returnedPhotoRowId) : -1
-  if (row >= 0 && pageRecordIndexes.value.includes(row)) recordDesignRow.value = row
+  if (returnedPhotoRowId && row < 0) say('人员记录已变化，请重新选择并检查照片')
+  if (row >= 0 && !scopeNeedsReview.value) {
+    const rows = selRows.value || Array.from({ length: dsDetail.value?.rows?.length || 0 }, (_, i) => i)
+    const position = rows.indexOf(row)
+    if (position >= 0) {
+      previewPage.value = Math.floor(position / (previewInfo.value?.layout?.perPage || 1))
+      await nextTick()
+      recordDesignRow.value = row
+    } else say('该人员已不在当前出片范围，请重新选择并检查照片')
+  }
   returnedPhotoRowId = ''
   rebuildPreview(); loadPhotoPreflight()
 })

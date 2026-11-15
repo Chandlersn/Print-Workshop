@@ -5,7 +5,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import { photoProcessingChanged } from '../lib/photo-processing.js'
 
 const props = defineProps({ datasetId: { type: String, required: true }, columns: { type: Array, required: true }, matchColumn: { type: String, default: '' }, embedded: Boolean })
-const emit = defineEmits(['close', 'edit-cell', 'report'])
+const emit = defineEmits(['close', 'edit-cell', 'report', 'changed'])
 const column = computed(() => props.matchColumn || '')
 const result = ref(null)
 const busy = ref(false)
@@ -145,7 +145,8 @@ async function confirmDelete() {
   finally { busy.value = false }
 }
 
-defineExpose({ refresh })
+const isBusy = computed(() => busy.value || loading.value || Boolean(pendingSelection.value))
+defineExpose({ refresh, isBusy })
 async function importFolder(mode = 'append') {
   const token = ++generation
   if (pendingSelection.value?.token) window.printpress.cancelPhotoSelection(pendingSelection.value.token).catch(() => {})
@@ -185,6 +186,8 @@ async function commitImport() {
     if (alive && token === generation && !response.canceled) {
       result.value = response.report
       photoStates.value = {}
+      emit('report', response.report)
+      emit('changed')
     }
   } catch (err) {
     if (alive && token === generation) error.value = cancelRequested.value ? '导入已取消，原照片清单保持不变。' : toUserMessage(err)

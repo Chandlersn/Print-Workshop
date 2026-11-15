@@ -161,6 +161,7 @@ const dirty = computed(() => fingerprint(design.value) !== savedFingerprint.valu
 const projects = ref([])
 const sharedProjects = computed(() => projects.value.filter(project => !project.recordOwner))
 const individualProjects = computed(() => projects.value.filter(project => project.recordOwner))
+const editingIndividual = computed(() => context.value?.origin === 'print' || individualProjects.value.some(project => project.id === design.value.id))
 const presets = ref([])
 const selectedIds = ref([])
 const inspectorPanel = ref(null)
@@ -847,6 +848,7 @@ async function loadIndividualProject(project) {
 }
 async function save(copy = false, apply = false) {
   if (busy.value) return
+  if (copy && editingIndividual.value) { fail('单人底图直接保存即可，不需要另存副本。'); return }
   endGesture(); finishKeyboardMove(); clearFeedback()
   if (apply && dimensionMismatch.value) { fail('工程尺寸与模板不一致，请先点击“采用模板尺寸”。'); return }
   busy.value = true
@@ -856,6 +858,18 @@ async function save(copy = false, apply = false) {
     const contentBeforeCopy = fingerprint(design.value)
     const ownerSource = context.value?.origin === 'print' ? context.value : projects.value.find(project => project.id === design.value.id)?.recordOwner
     const owner = ownerSource ? {datasetId:ownerSource.datasetId,templateId:ownerSource.templateId,rowId:ownerSource.rowId} : undefined
+    if (owner && !submitted.id) {
+      const matches = individualProjects.value.filter(project => project.recordOwner?.datasetId === owner.datasetId && project.recordOwner?.templateId === owner.templateId && project.recordOwner?.rowId === owner.rowId)
+      const existing = matches.find(project => project.id === context.value?.designRef?.id) || matches[0]
+      if (existing) { submitted.id = existing.id; submitted.revision = existing.revision }
+    }
+    // The applied version can lag behind a saved-but-not-applied edit. Keep
+    // editing the applied content while using the observed project head for
+    // conflict detection; any later concurrent save still fails normally.
+    if (context.value?.origin === 'print' && context.value.hasOverride && submitted.id === context.value.designRef?.id && submitted.revision === context.value.designRef?.revision) {
+      const existing = individualProjects.value.find(project => project.id === submitted.id)
+      if (existing && existing.revision > submitted.revision) submitted.revision = existing.revision
+    }
     const saved = await window.printpress.saveDesign(submitted, owner)
     // Edits made while the write is in flight are retained and remain dirty.
     if (fingerprint(design.value) === contentBeforeCopy) { design.value = normalizeDesign(saved); sessionToken.value++ }
@@ -867,7 +881,7 @@ async function save(copy = false, apply = false) {
     }
     // 落点就是主进程规范化后的文档本身：它的指纹永远非空，比较基准只能是它。
     savedFingerprint.value = fingerprint(saved)
-    message.value = dirty.value ? '已保存提交时的版本；之后的修改尚未保存。' : `已保存 · 第 ${saved.revision} 版`
+    message.value = dirty.value ? '已保存提交时的版本；之后的修改尚未保存。' : owner ? '单人底图已保存。' : `已保存 · 第 ${saved.revision} 版`
     await refreshProjects()
     persistDraft()
     if (apply && context.value) {
@@ -881,14 +895,16 @@ async function save(copy = false, apply = false) {
 function deleteProject(project) {
   if (busy.value) return
   pending.value = {
-    title: '删除底图工程', message: `删除“${project.name}”的所有保存版本？被模板引用的工程无法删除。${design.value.id === project.id && dirty.value ? '\n当前工程的未保存修改也将清除。' : ''}`,
+    title: '删除底图工程', message: project.recordOwner ? `删除“${project.name}”？如果此底图正在使用，该人员将恢复模板默认底图。${design.value.id === project.id && dirty.value ? '\n当前工程的未保存修改也将清除。' : ''}` : `删除“${project.name}”的所有保存版本？被模板引用的工程无法删除。${design.value.id === project.id && dirty.value ? '\n当前工程的未保存修改也将清除。' : ''}`,
     confirmText: '删除工程', action: async () => {
       busy.value = true
       try {
-        await window.printpress.deleteDesign(project.id)
+        const result = await window.printpress.deleteDesign(project.id, project.recordOwner ? { detachRecord: true } : undefined)
+        const request = context.value?.origin === 'print' && design.value.id === project.id && result.restoredRecords ? context.value : null
         if (design.value.id === project.id) replaceDesign(blank(), null)
         await refreshProjects()
-        message.value = '工程已删除。'
+        message.value = result.restoredRecords ? '工程已删除，该人员已恢复模板默认底图。' : '工程已删除。'
+        if (request) designerNav.result = { nonce:request.nonce, origin:'print', datasetId:request.datasetId, templateId:request.templateId, rowId:request.rowId, restored:true }
       } catch (err) { fail(err) }
       finally { busy.value = false }
     },
@@ -2279,7 +2295,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <details class="designer-more">
           <summary title="更多工程操作"><AppIcon name="more" /> 更多</summary>
           <div class="designer-more-menu">
-            <button data-testid="design-copy" :disabled="busy" @click="save(true); $event.currentTarget.closest('details').open = false"><AppIcon name="copy" /> 另存副本</button>
+            <button v-if="!editingIndividual" data-testid="design-copy" :disabled="busy" @click="save(true); $event.currentTarget.closest('details').open = false"><AppIcon name="copy" /> 另存副本</button>
             <button data-testid="design-export-package" :disabled="busy" title="导出已保存版本的工程包" @click="openPackageExport(); $event.currentTarget.closest('details').open = false"><AppIcon name="download" /> 导出工程包</button>
             <button data-testid="design-import-package" :disabled="busy" title="导入批印坊工程包或 Photoshop 文件" @click="importPackage(); $event.currentTarget.closest('details').open = false"><AppIcon name="upload" /> 导入工程 / PSD</button>
           </div>
@@ -2332,10 +2348,10 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         </details>
         <details class="projects-panel" data-testid="designer-individual-projects">
           <summary><span><AppIcon name="folder" :size="16" /> 单人海报工程</span><span class="panel-count">{{ individualProjects.length }}</span></summary>
-          <p class="muted">可打开查看；要应用到人员，请从打印中心选择对应人员后打开。恢复默认后可删除不再使用的工程。</p>
+          <p class="muted">「使用中」表示底图已应用到人员；删除它会恢复该人员的模板默认底图。</p>
           <div class="project-list">
-            <div v-for="project in individualProjects" :key="project.id" class="project-row" :class="{ current: project.id === design.id }">
-              <button class="project-open" :disabled="busy || !canOpenIndividual(project)" :title="canOpenIndividual(project) ? project.name : '该工程属于其他人员'" @click="loadIndividualProject(project)"><b>{{ project.name }}</b><small>单人底图 · v{{ project.revision }}</small></button>
+            <div v-for="project in individualProjects" :key="project.id" class="project-row" :class="{ current: project.id === design.id, 'in-use': project.recordInUse }" :data-project-id="project.id">
+              <button class="project-open" :disabled="busy || !canOpenIndividual(project)" :title="canOpenIndividual(project) ? project.name : '该工程属于其他人员'" @click="loadIndividualProject(project)"><b>{{ project.name }}</b><small>单人底图 <span v-if="project.recordInUse" class="project-in-use" data-testid="individual-design-in-use">使用中</span></small></button>
               <button class="icon-button" :disabled="busy" :aria-label="`删除工程 ${project.name}`" :title="`删除工程 ${project.name}`" @click="deleteProject(project)"><AppIcon name="trash" :size="15" /></button>
             </div>
           </div>
@@ -2866,6 +2882,8 @@ h3 span { font-weight: 400; font-size: 10px; color: var(--stone); } h4 { font-si
 .project-list { max-height: 190px; overflow: auto; }
 .project-row { display: flex; align-items: center; margin: 3px 0; border-radius: 5px; border: 1px solid var(--line); }
 .project-row.current { border-color: var(--cinnabar); }
+.project-row.in-use { background: var(--cinnabar-soft); box-shadow: inset 3px 0 0 var(--cinnabar); }
+.project-in-use { display: inline-block; margin-left: 4px; padding: 1px 5px; border-radius: 4px; color: var(--accent-ink); background: var(--paper-card); font-weight: 600; }
 .project-open { flex: 1; min-width: 0; text-align: left; border: 0; background: transparent; padding: 7px; }
 .project-open b, .project-open small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-open b { font-weight: 500; } .project-open small { font-size: 10px; color: var(--stone); margin-top: 4px; }
