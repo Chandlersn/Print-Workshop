@@ -10,8 +10,10 @@ import {
   sanitizeHidden, hiddenKeysOf, withHidden, visibleColumnsOf, canHideMore, pruneHidden,
 } from '../lib/column-visibility.cjs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import CodeGeneratorDialog from '../components/CodeGeneratorDialog.vue'
 import { toUserMessage } from '../../electron/user-error.cjs'
 
+const emit = defineEmits(['return-to-print'])
 const datasets = ref([])
 const activeId = ref(activeDataset.value)
 const detail = ref(null)
@@ -28,6 +30,41 @@ const gridBusy = ref(false)
 const editingCell = ref(null) // { rowIndex, key }
 const editingValue = ref('')
 let pendingCellSave = null
+let datasetLoadSeq = 0
+const returnToPrintAvailable = ref(false)
+
+async function prepareLeave() {
+  if (pendingCellSave && !(await pendingCellSave)) return false
+  if (editingCell.value && !(await commitEdit())) return false
+  return true
+}
+async function returnToPrint() {
+  if (!(await prepareLeave())) return
+  returnToPrintAvailable.value = false
+  emit('return-to-print')
+}
+
+const codeOpen = ref(false)
+const codeResult = ref(null)
+async function openCodeGenerator() {
+  if (pendingCellSave && !(await pendingCellSave)) return
+  if (editingCell.value && !(await commitEdit())) return
+  codeOpen.value = true
+}
+async function onCodesApplied(result) {
+  codeOpen.value = false
+  codeResult.value = result
+  try {
+    await refreshList(result.datasetId)
+    if (activeId.value === result.datasetId && detail.value) {
+      if (hiddenSet.value.has(result.key)) applyHidden([...hiddenSet.value].filter(key => key !== result.key))
+      page.value = Math.floor(result.firstRow / PAGE_SIZE)
+      await nextTick()
+      const header = [...document.querySelectorAll('.edit-grid th[data-col-key]')].find(el => el.dataset.colKey === result.key)
+      header?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    }
+  } catch (err) { errorMsg.value = extractError(err) }
+}
 
 const pageCount = computed(() => (detail.value ? Math.max(1, Math.ceil(detail.value.rows.length / PAGE_SIZE)) : 1))
 const pageStart = computed(() => page.value * PAGE_SIZE)
@@ -290,6 +327,9 @@ async function selectDataset(id) {
     if (pendingCellSave && !(await pendingCellSave)) return
     if (editingCell.value && !(await commitEdit())) return
   }
+  const changed = id !== activeId.value
+  const seq = ++datasetLoadSeq
+  if (changed) returnToPrintAvailable.value = false
   const summary = datasets.value.find(d => d.id === id)
   if (summary) activeBatchKey.value = batchKeyOf(summary)
   activeId.value = id
@@ -299,12 +339,15 @@ async function selectDataset(id) {
   // 页码必须归零：切到行数更少的数据集时，旧的 page 会让 pagedRows 直接算成空，
   // 而分页器只在 pageCount > 1 时渲染——表格空白、分页器也没了，成死路。
   // removeRow / appendRow 都会重置，唯独切换数据集这条路径漏了。
-  page.value = 0
+  if (changed) page.value = 0
   try {
     const result = await window.printpress.getDataset(id)
-    if (activeId.value === id) detail.value = result
+    if (activeId.value === id && seq === datasetLoadSeq) {
+      detail.value = result
+      page.value = Math.min(page.value, Math.max(0, Math.ceil(result.rows.length / PAGE_SIZE) - 1))
+    }
   } catch (err) {
-    errorMsg.value = extractError(err)
+    if (seq === datasetLoadSeq) errorMsg.value = extractError(err)
   }
 }
 
@@ -722,6 +765,7 @@ watch(() => cellNav.req, async (req) => {
     const el = document.querySelector(`[data-ri="${req.rowIndex}"][data-ck="${CSS.escape(req.key)}"]`)
     if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
     beginEdit(req.rowIndex, req.key, detail.value.rows[req.rowIndex][req.key])
+    returnToPrintAvailable.value = true
     flashCell.value = { rowIndex: req.rowIndex, key: req.key }
     clearTimeout(flashTimer)
     flashTimer = setTimeout(() => { flashCell.value = null }, 2600)
@@ -737,7 +781,7 @@ watch(() => cellNav.req, async (req) => {
 
 
 // 顶栏持有「导入表格」按钮：暴露动作与其状态，页面内不再重复一行。
-defineExpose({ startImport, importing, errorMsg })
+defineExpose({ startImport, importing, errorMsg, prepareLeave })
 </script>
 
 <template>
@@ -832,6 +876,14 @@ defineExpose({ startImport, importing, errorMsg })
           数据表格（点击单元格即可修改）
           <span class="grid-meta">{{ detail.rows.length }} 行 · 列头点名字改名，「印」控制字段是否进入模板设计页，「▾」控制这一列显示不显示</span>
         </h3>
+        <div v-if="codeResult && codeResult.datasetId === detail.id" class="code-result" role="status">
+          已生成 {{ codeResult.count }} 条编码，写入「{{ codeResult.columnName }}」列。
+          <button aria-label="关闭提示" @click="codeResult = null">关闭</button>
+        </div>
+        <div v-if="returnToPrintAvailable" class="code-result" role="status">
+          已定位到打印检查中的数据，修改后可返回打印中心。
+          <button @click="returnToPrint">保存并返回打印中心</button>
+        </div>
         <div class="grid-toolbar">
           <span class="muted">配图：{{ columns.find(c => c.key === detail.photoMatchColumn)?.alias || detail.photoMatchColumn || '未启用（点击列头选择）' }}</span>
           <span class="tb-hint">空值打印时留空，补齐后再打印即可通过校验</span>
@@ -854,6 +906,7 @@ defineExpose({ startImport, importing, errorMsg })
               @click="setSize(opt.value)"
             >{{ opt.label }}</button>
           </div>
+          <button class="btn-ghost" :disabled="gridBusy" @click="openCodeGenerator">生成编码</button>
           <button class="btn-ghost" :disabled="gridBusy" @click="appendRow">＋ 添加一行</button>
         </div>
         <div class="table-scroll">
@@ -861,7 +914,7 @@ defineExpose({ startImport, importing, errorMsg })
             <thead>
               <tr>
                 <th class="rownum-col">#</th>
-                <th v-for="col in visibleColumns" :key="col.key" class="col-head">
+                <th v-for="col in visibleColumns" :key="col.key" :data-col-key="col.key" class="col-head">
                   <template v-if="editingKey === col.key">
                     <input
                       v-model="editingAlias"
@@ -913,6 +966,7 @@ defineExpose({ startImport, importing, errorMsg })
                     v-model="editingValue"
                     class="cell-input"
                     autofocus
+                    @click.stop
                     @keyup.enter="commitEdit"
                     @keyup.esc="cancelEdit"
                     @blur="commitEdit"
@@ -941,6 +995,8 @@ defineExpose({ startImport, importing, errorMsg })
         <span class="drag-sub">支持 {{ IMPORT_EXTS_TEXT }}</span>
       </div>
     </div>
+
+    <CodeGeneratorDialog :open="codeOpen" :dataset="detail" @close="codeOpen = false" @applied="onCodesApplied" />
 
     <!-- 工作表选择弹窗 -->
     <div v-if="sheetPicker" class="onboard-mask">
@@ -1063,6 +1119,8 @@ defineExpose({ startImport, importing, errorMsg })
 </template>
 
 <style scoped>
+.code-result { padding: 8px 12px; margin: 8px 0; background: var(--cinnabar-soft); color: var(--ink); border-radius: 6px; font-size: 13px; }
+.code-result button { margin-left: 8px; color: var(--ink-2); background: transparent; border: 0; cursor: pointer; }
 .head-actions {
   display: flex;
   align-items: center;

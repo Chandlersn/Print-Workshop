@@ -76,19 +76,20 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(jobDir, 'photos', 'copy.jpg'), 'PHOTO COPY')
   await evaluate(`document.querySelectorAll('.nav-label')[4].click()`)
   await click('.history-trigger')
-  await waitFor(`!!document.querySelector('.job-del')`, '打印历史')
-  await click('.job-del')
+  await waitFor(`!!document.querySelector('.row-actions .job-del')`, '打印历史')
+  await click('.row-actions .job-del')
+  await waitFor(`!!document.querySelector('.cd-msg')`, '删除确认弹窗')
   ok(await evaluate(`document.querySelector('.cd-msg').textContent.includes('PDF') && document.querySelector('.cd-msg').textContent.includes('归档照片副本')`), '删除确认明确照片副本与保留数据')
   const originalRm = fs.rmSync
   try {
     fs.rmSync = function(target, options) { if (target===jobDir) throw new Error('验收：文件占用'); return originalRm.call(fs,target,options) }
     await click('.cd-btn.danger')
-    await waitFor(`document.body.textContent.includes('删除失败')`, '删除失败提示')
-    ok(print.listJobs().some(j => j.id === job.id) && fs.existsSync(jobDir) && await evaluate(`!!document.querySelector('.job-del')`), '清理失败真实界面提示失败，记录和归档均保留')
+    await waitFor(`document.body.textContent.includes('失败 1 条')`, '删除失败提示')
+    ok(print.listJobs().some(j => j.id === job.id) && fs.existsSync(jobDir) && await evaluate(`!!document.querySelector('.row-actions .job-del')`), '清理失败真实界面提示失败，记录和归档均保留')
   } finally { fs.rmSync = originalRm }
-  await click('.job-del')
+  await click('.row-actions .job-del')
   await click('.cd-btn.danger')
-  await waitFor(`!document.querySelector('.job-del') && document.body.textContent.includes('已删除该打印记录及归档件')`, '删除成功')
+  await waitFor(`!document.querySelector('.row-actions .job-del') && document.body.textContent.includes('已删除')`, '删除成功')
   ok(!fs.existsSync(jobDir) && print.listJobs().length===0 && JSON.parse(fs.readFileSync(path.join(process.env.PRINTPRESS_DATA_DIR, 'print-jobs.json.bak'), 'utf8')).length===0, '真实删除释放快照照片目录、主索引和恢复备份记录')
   await evaluate(`document.querySelectorAll('.nav-label')[0].click()`)
   await waitFor(`document.querySelectorAll('.ds-item').length>0`, '返回数据页')

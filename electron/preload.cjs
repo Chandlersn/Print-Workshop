@@ -91,6 +91,8 @@ contextBridge.exposeInMainWorld('printpress', {
   renameColumn: (id, key, alias) => invoke('dataset:renameColumn', id, key, alias),
   updateCell: (datasetId, rowIndex, key, value) =>
     invoke('dataset:updateCell', { datasetId, rowIndex, key, value }),
+  previewCodes: (payload) => invoke('dataset:previewCodes', payload),
+  applyCodes: (token) => invoke('dataset:applyCodes', { token }),
   addRow: (id) => invoke('dataset:addRow', id),
   deleteRow: (datasetId, rowIndex) => invoke('dataset:deleteRow', { datasetId, rowIndex }),
   setColumnPrint: (datasetId, key, printOn) =>

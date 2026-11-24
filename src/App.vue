@@ -33,6 +33,15 @@ const theme = ref('light')
 // 顶栏动作直接驱动各页暴露的方法，页面内不再重复一行按钮。
 const datasetRef = ref(null)
 const templateRef = ref(null)
+let tabChangePending = false
+async function navigateTo(tab) {
+  if (tab === activeTab.value || tabChangePending) return
+  tabChangePending = true
+  try {
+    if (activeTab.value === 'dataset' && datasetRef.value && !(await datasetRef.value.prepareLeave())) return
+    activeTab.value = tab
+  } finally { tabChangePending = false }
+}
 
 // ── 配色：六个预设 + 自选强调色，写进 :root 的强调色变量 ──────────────
 const accentPreference = ref(readAccentPreference())
@@ -403,7 +412,7 @@ onMounted(async () => {
           :key="tab.id"
           class="nav-item"
           :class="{ active: activeTab === tab.id }"
-          @click="activeTab = tab.id"
+          @click="navigateTo(tab.id)"
         >
           <span class="nav-label"><AppIcon :name="{ dataset: 'table', photos: 'portrait', designer: 'brush', template: 'layout', print: 'print' }[tab.id]" :size="16" /> {{ tab.label }}</span>
           <span class="nav-hint">{{ tab.hint }}</span>
@@ -508,7 +517,7 @@ onMounted(async () => {
       <p v-if="dataDirError" class="header-error" role="alert">{{ dataDirError }}</p>
       <p v-if="accentSaveError" class="header-error" role="status">{{ accentSaveError }}</p>
       <KeepAlive include="TemplateView,BackgroundDesignerView,PrintCenterView">
-        <DatasetView v-if="activeTab === 'dataset'" ref="datasetRef" />
+        <DatasetView v-if="activeTab === 'dataset'" ref="datasetRef" @return-to-print="navigateTo('print')" />
         <PhotoLibraryView v-else-if="activeTab === 'photos'" @navigate="activeTab = $event" />
         <TemplateView v-else-if="activeTab === 'template'" ref="templateRef" />
         <BackgroundDesignerView v-else-if="activeTab === 'designer'" />

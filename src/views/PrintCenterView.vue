@@ -125,6 +125,8 @@ async function cancelOutput() {
   } catch (err) { say(`取消失败：${toUserMessage(err)}`) }
 }
 const toast = ref('')
+let toastTimer = null
+onBeforeUnmount(() => clearTimeout(toastTimer))
 const outputRecordWarning = ref('')
 /** 预览请求序号：晚到的旧响应据此丢弃（见 rebuildPreview） */
 let previewSeq = 0
@@ -415,9 +417,15 @@ const frameTotalH = computed(() => frameH.value * (previewInfo.value?.renderedPa
  */
 const layoutFallback = computed(() => layoutFallbackText(previewInfo.value?.layout))
 
-function say(msg) {
+function dismissToast() {
+  clearTimeout(toastTimer)
+  toastTimer = null
+  toast.value = ''
+}
+function say(msg, persistent = false) {
+  clearTimeout(toastTimer)
   toast.value = msg
-  setTimeout(() => { if (toast.value === msg) toast.value = '' }, 4000)
+  toastTimer = persistent ? null : setTimeout(dismissToast, 6000)
 }
 
 watch(jobs, (items) => { const valid = new Set(items.map(job => job.id)); selectedJobIds.value = selectedJobIds.value.filter(id => valid.has(id)) })
@@ -463,12 +471,12 @@ async function rebuildPreview() {
     previewHtml.value = built.html
     previewInfo.value = built
     // 新选择预览成功：旧选择的失败提示已过时，立即清掉不让它挂在界面上
-    if (toast.value) toast.value = ''
+    if (toast.value.startsWith('预览失败：')) dismissToast()
   } catch (err) {
     if (seq !== previewSeq) return
     previewHtml.value = ''
     previewInfo.value = null
-    say(`预览失败：${toUserMessage(err)}`)
+    say(`预览失败：${toUserMessage(err)}`, true)
   } finally { if (seq === previewSeq) previewLoading.value = false }
 }
 
@@ -921,9 +929,9 @@ async function exportIndividualImages() {
     })
     outputRecordWarning.value = r.recordWarning || ''
     if (r.canceled) say('已取消选择保存文件夹')
-    else say(`已导出 ${r.count} 张 ${r.format === 'jpeg' ? 'JPG' : String(r.format || 'png').toUpperCase()} 图片（${r.dpi} dpi），保存到：${r.directory}`)
+    else say(`已导出 ${r.count} 张 ${r.format === 'jpeg' ? 'JPG' : String(r.format || 'png').toUpperCase()} 图片（${r.dpi} dpi），保存到：${r.directory}`, true)
   } catch (err) {
-    say(`图片导出失败：${toUserMessage(err)}`)
+    say(`图片导出失败：${toUserMessage(err)}`, true)
   } finally {
     activeJobKey.value = ''
     taskProgress.value = null
@@ -1057,19 +1065,19 @@ async function execute(action, preflightFingerprint) {
       if (r.canceled) { say('已取消导出'); return }
       // 体积用**真实字节数**报（估算只是模型，见 I-49）；页数分批时以实际合并结果为准
       const pages = r.pages ?? previewInfo.value?.pageCount ?? '?'
-      say(`PDF 已导出（${pages} 页${r.bytes ? ` · ${formatBytes(r.bytes)}` : ''}）${outputResultText(r.output)}`)
+      say(`PDF 已导出（${pages} 页${r.bytes ? ` · ${formatBytes(r.bytes)}` : ''}）${outputResultText(r.output)}`, true)
     } else {
       const r = await window.printpress.printSend(payload)
       outputRecordWarning.value = r.recordWarning || ''
-      if (r.ok) say(`已发送打印机${outputResultText(r.output)}`)
+      if (r.ok) say(`已发送打印机${outputResultText(r.output)}`, true)
       // Chromium 的 print 回调给的是英文（'Print job canceled' / 'Invalid printer settings'），
       // 不能直接贴给用户；给一个贴合场景的兜底（I-48）
-      else say(toUserMessage(r.error, '打印没有完成，可能被取消或打印机不可用。'))
+      else say(toUserMessage(r.error, '打印没有完成，可能被取消或打印机不可用。'), true)
     }
   } catch (err) {
     // 用户自己点了取消不算「失败」，别加前缀吓人；只洗一次，别洗两遍
     const msg = toUserMessage(err)
-    say(`${msg.includes('已取消') ? '' : '执行失败：'}${msg}`)
+    say(`${msg.includes('已取消') ? '' : '执行失败：'}${msg}`, true)
   } finally { activeJobKey.value = ''; taskProgress.value = null; cancelRequested.value = false }
   // 成功打印/导出会回写数据集状态（侧栏「已打 N」变色），两处清单都要刷新。
   // 刷新放回 try里：这两行原本在 try 之外，一次刷新失败（IPC 断开/库被锁）
@@ -1638,7 +1646,7 @@ onDeactivated(() => {
     />
 
     <transition name="fade">
-      <div v-if="toast" class="toast">{{ toast }}</div>
+      <div v-if="toast" class="toast" role="status">{{ toast }} <button type="button" aria-label="关闭提示" @click="dismissToast">×</button></div>
     </transition>
   </section>
 </template>
@@ -2207,6 +2215,7 @@ onDeactivated(() => {
   font-size: 13px;
   z-index: 120;
 }
+.toast button { color: inherit; background: transparent; border: 0; font-size: 18px; cursor: pointer; margin-left: 8px; }
 
 .fade-enter-active,
 .fade-leave-active {

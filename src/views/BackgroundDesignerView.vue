@@ -275,11 +275,11 @@ function openImageMenu(event, layer) {
   imageMenu.value = { id: layer.id, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 120)) }
   nextTick(() => document.querySelector('[data-testid="design-image-menu"] button:not(:disabled)')?.focus())
 }
-async function editReferenceSample(refresh = false) {
+async function editReferenceSample() {
   const layer = single.value?.referenceFor ? design.value.layers.find(item => item.id === single.value.referenceFor) : single.value
   if (!layer?.variable || singleBlocked.value || busy.value || modalOpen.value) return false
   const existing = design.value.layers.find(item => item.referenceFor === layer.id)
-  if (existing && !refresh) { selectedIds.value = [existing.id]; return true }
+  if (existing) { selectedIds.value = [existing.id]; return true }
   if (!editableSelection(design.value, [layer.id]).includes(layer.id) || (existing && !editableSelection(design.value, [existing.id]).includes(existing.id))) { fail('请先解锁变量框和参考样图。'); return false }
   const source = variablePhotoSample.value, session = sessionToken.value
   if (!source) { fail('请先到变量照片页导入并选择样板照片。'); return false }
@@ -308,11 +308,6 @@ async function editReferenceSample(refresh = false) {
     return true
   } catch (err) { fail(err); return false }
   finally { busy.value = false }
-}
-function selectVariableFrame() {
-  const id = single.value?.referenceFor
-  if (design.value.layers.some(layer => layer.id === id && layer.variable)) selectedIds.value = [id]
-  else fail('关联的变量框已删除；这张图片仍仅供排版参考。')
 }
 async function openImageEdit(mode) {
   imageMenu.value = null
@@ -2532,12 +2527,6 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
           <button data-testid="design-image-crop" :disabled="singleBlocked || (single.variable && !variablePhotoSample)" @click="openImageEdit('crop')"><AppIcon name="crop" /> 裁剪…</button>
           <button data-testid="design-image-erase" :disabled="singleBlocked || (single.variable && !variablePhotoSample)" @click="openImageEdit('erase')"><AppIcon name="brush" /> 魔法擦除…</button>
         </div>
-        <div v-if="single?.referenceFor" class="reference-sample-note" data-testid="design-reference-note">
-          <strong>参考样图 · 仅用于底图排版</strong>
-          <p>这里的裁剪、擦除、图章、颜色和图层效果只修改参考样图，不打印，也不应用到整批照片。批量处理请到变量照片页。</p>
-          <button data-testid="design-reference-frame" @click="selectVariableFrame">选择变量框（调整实际输出位置）</button>
-          <button data-testid="design-reference-refresh" :disabled="singleBlocked || !variablePhotoSample || busy" @click="editReferenceSample(true)">重新取样（重置参考修改）</button>
-        </div>
         <template v-if="selectedGroup">
           <label>分组名称<input data-testid="design-group-name" :value="selectedGroup.name" maxlength="120" @change="renameGroup($event.target.value)"></label>
           <label>组透明度 %<input data-testid="design-group-opacity" type="number" min="0" max="100" step="1" :value="Math.round((selectedGroup.opacity ?? 1) * 100)" @input="groupOpacityInput($event.target.value)" @change="groupOpacityChange()"></label>
@@ -3016,8 +3005,6 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; } fieldset:disabled {
 .guide-row input { flex: 1; width: 65px; padding: 5px 3px; }
 .guide-outside { color: var(--warn); flex-shrink: 0; font-size: 10px; }
 .export-mask { position: fixed; inset: 0; z-index: 130; background: #201b1666; display: flex; align-items: center; justify-content: center; }
-.reference-sample-note { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-card); font-size: 12px; }
-.reference-sample-note p { color: var(--stone); line-height: 1.6; margin: 6px 0; }
 .export-dialog { width: 410px; padding: 24px; border-radius: 10px; background: var(--paper-card); border: 1px solid var(--line-strong); box-shadow: var(--shadow); }
 .export-dialog h3 { font-size: 16px; margin: 0 0 12px; }
 .export-dialog p { font-size: 12px; line-height: 1.8; color: var(--ink-2); }

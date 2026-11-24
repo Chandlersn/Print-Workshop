@@ -107,6 +107,8 @@ const ADDED_CHANNELS = [
   'dataset:setPhotoMatchColumn',
   'dataset:importFile',
   'dataset:deleteBatch',
+  'dataset:previewCodes',
+  'dataset:applyCodes',
   'template:uploadBackground',
   'template:uploadBackgroundBytes',
   'template:discardBackground',

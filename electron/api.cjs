@@ -510,6 +510,15 @@ const OPS = {
     run: (p) => dataset.updateCell(String(p.datasetId), Number(p.rowIndex), String(p.key), p.value),
   },
 
+  'dataset:previewCodes': {
+    params: { datasetId: { required: true }, format: { required: true } },
+    run: (p) => dataset.previewCodes(p),
+  },
+  'dataset:applyCodes': {
+    write: true,
+    params: { token: { required: true } },
+    run: (p) => dataset.applyCodes(p.token),
+  },
   'dataset:addRow': {
     write: true,
     params: { id: { required: true, desc: '数据集 id' } },

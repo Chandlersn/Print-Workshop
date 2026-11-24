@@ -376,6 +376,72 @@ function updateCell(id, rowIndex, key, value) {
   }
 }
 
+// Keep the preview in the main process so confirmation writes the displayed values.
+const codePreviews = new Map()
+function previewCodes(options) {
+  const ds = findDs(String(options.datasetId))
+  const target = options.targetKey ? ds.columns.find(c => c.key === options.targetKey) : null
+  if (options.targetKey && !target) throw new Error('目标列不存在')
+  const name = String(options.newColumn || '').trim()
+  if (!target && (!name || name.length > 100)) throw new Error('请输入不超过 100 字的新列名称')
+  const format = String(options.format || '')
+  if (!format || format.length > 500) throw new Error('请输入不超过 500 字的编码规则')
+  const start = Number(options.start), width = Number(options.width), step = Number(options.step)
+  if (!Number.isSafeInteger(start) || start < 0 || !Number.isInteger(width) || width < 1 || width > 16 || !Number.isSafeInteger(step) || step < 1) throw new Error('流水号设置无效')
+  const parts = format.split(/(\{[^{}]*\})/g)
+  if (parts.some(p => /[{}]/.test(p) && !/^\{(?:流水号|日期|随机:[1-9]|随机:1[0-6]|字段:[^{}]+)\}$/.test(p))) throw new Error('规则中存在无法识别的占位符')
+  const fieldKeys = parts.filter(p => p.startsWith('{字段:')).map(p => p.slice(4, -1))
+  if (fieldKeys.some(key => !ds.columns.some(c => c.key === key))) throw new Error('规则中选择的字段不存在')
+  const date = new Date()
+  const day = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`
+  const used = new Set(target ? ds.rows.map(r => String(r[target.key] ?? '')).filter(v => v.trim()) : [])
+  const updates = []
+  let serial = start, skipped = 0
+  for (let i = 0; i < ds.rows.length; i++) {
+    const row = ds.rows[i]
+    if (target && !isEmpty(row[target.key])) { skipped++; continue }
+    if (fieldKeys.some(key => isEmpty(row[key]))) throw new Error(`第 ${i + 1} 行的规则字段为空，请先补齐`)
+    let value, tries = 0
+    do {
+      if (!Number.isSafeInteger(serial)) throw new Error('流水号超出支持范围')
+      value = parts.map(p => {
+        if (p === '{流水号}') return String(serial).padStart(width, '0')
+        if (p === '{日期}') return day
+        if (p.startsWith('{字段:')) return String(row[p.slice(4, -1)] ?? '')
+        if (p.startsWith('{随机:')) return Array.from({ length: Number(p.slice(4, -1)) }, () => '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'[crypto.randomInt(36)]).join('')
+        return p
+      }).join('')
+      serial += step
+      if (!value.trim() || value.length > 1000) throw new Error(`第 ${i + 1} 行生成的编码为空或过长`)
+      if (++tries > 10000) throw new Error('无法生成不重复的编码，请添加流水号或增加随机字符长度')
+    } while (used.has(value))
+    used.add(value)
+    updates.push({ rowIndex: i, value })
+  }
+  if (!updates.length) throw new Error('没有需要生成编码的空行')
+  const token = crypto.randomBytes(24).toString('hex')
+  codePreviews.clear()
+  codePreviews.set(token, { datasetId: ds.id, snapshot: JSON.stringify(ds), targetKey: target?.key, name, updates, expires: Date.now() + 900000 })
+  return { token, count: updates.length, skipped, samples: updates.slice(0, 10) }
+}
+function applyCodes(token) {
+  const preview = codePreviews.get(String(token))
+  if (!preview || preview.expires < Date.now()) throw new Error('预览已失效，请重新生成预览')
+  const list = loadAll(), ds = list.find(d => d.id === preview.datasetId)
+  if (!ds || JSON.stringify(ds) !== preview.snapshot) throw new Error('数据集已发生变化，请重新生成预览')
+  let key = preview.targetKey
+  if (!key) {
+    do { key = 'code_' + crypto.randomBytes(6).toString('hex') } while (ds.columns.some(c => c.key === key))
+    ds.columns.push({ key, alias: preview.name, type: 'text', filled: 0, avgLen: 0, printOn: false })
+    ds.rows.forEach(row => { row[key] = '' })
+  }
+  preview.updates.forEach(({ rowIndex, value }) => { ds.rows[rowIndex][key] = value })
+  recomputeColumnStats(ds, key)
+  persistAll(list)
+  codePreviews.delete(String(token))
+  return { count: preview.updates.length, key }
+}
+
 /** 追加空行（全部列为空串），返回新行号 */
 function addRow(id) {
   const list = loadAll()
@@ -472,6 +538,8 @@ module.exports = {
   deleteBatch,
   renameColumn,
   updateCell,
+  previewCodes,
+  applyCodes,
   addRow,
   deleteRow,
   setColumnPrint,
