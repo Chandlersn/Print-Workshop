@@ -1,17 +1,7 @@
-/**
- * 示例资产生成器（构建期运行）：
- * - 4 张示例模板底图：直接写 SVG 文件（Chromium background-image/img 原生支持
- *   SVG，无需光栅化；viewBox 即比例依据）
- * - 应用图标：SVG → 512px PNG（capturePage 在本环境多张连做会崩渲染进程，
- *   故每次进程只做一张，用 --only=<file> 逐张调用）
- * 运行：node 写 SVG 自动完成；图标：npx electron scripts/seed-assets.cjs --only=icon
- */
-const { app, BrowserWindow } = require('electron')
 const path = require('path')
 const fs = require('fs')
 
 const OUT_BG = path.join(__dirname, '..', 'build', 'seed', 'print-bg')
-const OUT_ICON = path.join(__dirname, '..', 'build', 'icon.png')
 
 const DESIGNS = [
   {
@@ -77,12 +67,6 @@ const DESIGNS = [
   },
 ]
 
-const ICON_SVG = `
-  <rect width="512" height="512" rx="96" fill="#b03a2e"/>
-  <rect x="52" y="52" width="408" height="408" rx="60" fill="none" stroke="#f6f2e9" stroke-width="10"/>
-  <text x="256" y="352" text-anchor="middle" font-family="KaiTi,SimSun,serif" font-size="280" font-weight="bold" fill="#f6f2e9">印</text>
-`
-
 function writeSvg(name, w, h, svg) {
   const out = path.join(OUT_BG, name)
   const body = `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">${svg}</svg>`
@@ -90,34 +74,6 @@ function writeSvg(name, w, h, svg) {
   console.log('生成', name)
 }
 
-// ---------- 主流程分支 1：写 SVG（纯 Node，默认） ----------
-const onlyArg = process.argv.find((a) => a.startsWith('--only='))
-
-if (!onlyArg) {
-  fs.mkdirSync(OUT_BG, { recursive: true })
-  for (const d of DESIGNS) writeSvg(d.file, d.w, d.h, d.svg)
-  console.log('SEED_SVG_OK')
-  process.exit(0)
-}
-
-// ---------- 分支 2：图标光栅化（Electron，单张） ----------
-app.disableHardwareAcceleration()
-app.commandLine.appendSwitch('disable-gpu')
-app.commandLine.appendSwitch('in-process-gpu')
-
-app.whenReady().then(async () => {
-  const tmp = path.join(OUT_BG, '.tmp-icon.html')
-  fs.writeFileSync(tmp, `<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0}html,body{width:512px;height:512px;overflow:hidden}</style></head><body><svg viewBox="0 0 512 512" width="512" height="512" xmlns="http://www.w3.org/2000/svg">${ICON_SVG}</svg></body></html>`, 'utf-8')
-  const win = new BrowserWindow({ show: false, useContentSize: true, webPreferences: { sandbox: false } })
-  win.setContentSize(512, 512)
-  const { pathToFileURL } = require('url')
-  await win.loadURL(pathToFileURL(tmp).toString())
-  await new Promise((r) => setTimeout(r, 300))
-  const img = await win.webContents.capturePage({ x: 0, y: 0, width: 512, height: 512 })
-  fs.writeFileSync(OUT_ICON, img.toPNG())
-  fs.unlinkSync(tmp)
-  console.log('ICON_OK', img.getSize().width + 'x' + img.getSize().height)
-  // PNG 已落盘，进程随后可能因渲染层崩溃退出——直接硬退出不给它机会
-  app.exit(0)
-  process.exit(0)
-}).catch((e) => { console.error('ICON_FAIL', e); process.exit(1) })
+fs.mkdirSync(OUT_BG, { recursive: true })
+for (const d of DESIGNS) writeSvg(d.file, d.w, d.h, d.svg)
+console.log('SEED_SVG_OK')

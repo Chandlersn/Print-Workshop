@@ -420,10 +420,6 @@ function closeSheetPicker() {
   sheetItems.value = []
 }
 
-function sheetHeaderLabel(item) {
-  return item.headerInput >= 0 ? `第 ${item.headerInput + 1} 行` : '自动'
-}
-
 // ---- 导入进度（主进程分阶段推送，消解大文件导入的等待焦虑） ----
 const importProgress = ref(null) // { pct, label }
 let unbindImportProgress = null
@@ -1121,12 +1117,6 @@ defineExpose({ startImport, importing, errorMsg, prepareLeave })
 <style scoped>
 .code-result { padding: 8px 12px; margin: 8px 0; background: var(--cinnabar-soft); color: var(--ink); border-radius: 6px; font-size: 13px; }
 .code-result button { margin-left: 8px; color: var(--ink-2); background: transparent; border: 0; cursor: pointer; }
-.head-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .error-text {
   font-size: 12px;
   color: var(--danger);
@@ -1170,7 +1160,6 @@ defineExpose({ startImport, importing, errorMsg, prepareLeave })
   margin-top: 12vh;
 }
 
-.hint-main { font-size: 15px; color: var(--ink-2); }
 .hint-sub { font-size: 12px; color: var(--stone); margin: 0; }
 
 .dropzone {

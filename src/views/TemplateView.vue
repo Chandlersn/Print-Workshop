@@ -2128,8 +2128,6 @@ defineExpose({ newTemplate })
 </template>
 
 <style scoped>
-.head-actions { display: flex; align-items: center; gap: 12px; }
-
 /* 提示条：与底图制作页 `.notice` 同一套（整条带底色、按钮靠右） */
 .notice {
   display: flex;

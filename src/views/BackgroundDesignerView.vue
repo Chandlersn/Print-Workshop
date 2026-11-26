@@ -280,7 +280,7 @@ async function editReferenceSample() {
   if (!layer?.variable || singleBlocked.value || busy.value || modalOpen.value) return false
   const existing = design.value.layers.find(item => item.referenceFor === layer.id)
   if (existing) { selectedIds.value = [existing.id]; return true }
-  if (!editableSelection(design.value, [layer.id]).includes(layer.id) || (existing && !editableSelection(design.value, [existing.id]).includes(existing.id))) { fail('请先解锁变量框和参考样图。'); return false }
+  if (!editableSelection(design.value, [layer.id]).includes(layer.id)) { fail('请先解锁变量框。'); return false }
   const source = variablePhotoSample.value, session = sessionToken.value
   if (!source) { fail('请先到变量照片页导入并选择样板照片。'); return false }
   busy.value = true
@@ -294,14 +294,12 @@ async function editReferenceSample() {
     if (!active || session !== sessionToken.value || source !== variablePhotoSample.value) return false
     const current = design.value.layers.find(item => item.id === layer.id)
     if (!current?.variable || !editableSelection(design.value, [layer.id]).includes(layer.id)) throw new Error('变量图已变化或锁定，请重新选择。')
-    const id = existing?.id || uid('reference')
+    const id = uid('reference')
     if (!commit(doc => {
       doc.assets[asset.id] = asset
       const index = doc.layers.findIndex(item => item.id === layer.id)
       const sample = referenceImageLayer(doc.layers[index], asset, id)
-      const sampleIndex = doc.layers.findIndex(item => item.id === id)
-      if (sampleIndex >= 0) doc.layers[sampleIndex] = sample
-      else doc.layers.splice(index + 1, 0, sample)
+      doc.layers.splice(index + 1, 0, sample)
     })) return false
     selectedIds.value = [id]
     message.value = '已打开参考样图，可使用普通图片的全部编辑工具；修改仅供排版参考，不影响批量照片。'
@@ -2270,7 +2268,7 @@ onBeforeUnmount(() => { deactivate(); canvasObserver?.disconnect(); detachRulerD
         <button class="primary" :disabled="busy || portraitInserting || !portraitColumn" @click="addPortrait">插入变量图</button> <button @click="portraitPicker = false">取消</button>
       </section>
     </div>
-    <PageHeader class="designer-page-header" title="底图制作" description="图片、固定文字与形状分别编辑，保存后用于打印模板。">
+    <PageHeader class="designer-page-header" title="底图制作">
       <template #actions>
         <button data-testid="design-new" class="primary" :disabled="busy" @click="newDesign"><AppIcon name="add" /> 新建底图</button>
         <label class="preset-picker" title="内置版面与常用工程：选「内置模板」是「已有就打开、没有才新建」——不会每点一次就多一个同名工程；「常用」里只列你自己保存过的工程，选中直接打开那份（也不会复制）">

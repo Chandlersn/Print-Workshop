@@ -26,7 +26,7 @@ const ROOT = path.resolve(__dirname, '..')
 const MAX_LIST = 20
 // 本次实际误删的入口与发布资源；自查不能只检查存在的条目，还须检查必需文件是否缺失。
 const REQUIRED_FILES = [
-  'bin/pp.cjs', 'build/icon.png',
+  'bin/pp.cjs', 'electron/brand/printpress-logo-v2.png',
   'build/seed/print-bg/demo-award-landscape.svg',
   'build/seed/print-bg/demo-cert-landscape.svg',
   'build/seed/print-bg/demo-cert-portrait.svg',

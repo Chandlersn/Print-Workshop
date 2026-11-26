@@ -108,15 +108,15 @@ check('入口、图标与四张内置底图缺失时准确报出，恢复后自�
   const dir = makeTmp()
   const missing = checkRoot.findMissingRequiredFiles(dir)
   assert.equal(missing.length, 6)
-  assert.ok(missing.includes('bin/pp.cjs') && missing.includes('build/icon.png'))
+  assert.ok(missing.includes('bin/pp.cjs') && missing.includes('electron/brand/printpress-logo-v2.png'))
   for (const name of missing) {
     const target = path.join(dir, name)
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(path.join(ROOT, name), target)
   }
   assert.deepEqual(checkRoot.findMissingRequiredFiles(dir), [])
-  fs.unlinkSync(path.join(dir, 'build/icon.png'))
-  assert.deepEqual(checkRoot.findMissingRequiredFiles(dir), ['build/icon.png'])
+  fs.unlinkSync(path.join(dir, 'electron/brand/printpress-logo-v2.png'))
+  assert.deepEqual(checkRoot.findMissingRequiredFiles(dir), ['electron/brand/printpress-logo-v2.png'])
   assert.deepEqual(checkRoot.findMissingRequiredFiles(ROOT), [], '实际工程恢复后六个文件都在')
 })
 check('工程根目录里没有任何「列得出来、stat 解析不了」的条目', () => {

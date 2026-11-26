@@ -221,7 +221,7 @@ console.log('== 4c. 底图的上传入口与删除方式（前端静态核查）
 
 console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删文件 ==')
 {
-  const ICON = path.join(__dirname, '..', 'build', 'icon.png')
+  const PNG = path.join(__dirname, 'fixtures', 'tiny.png')
   const JPG = path.join(__dirname, 'fixtures', 'design-portrait.jpg')
   // 模板底图现在以 assetId 引用内容寻址原件（临时池 ephemeral-assets/<hash>.<ext>，I-51），按原件真实路径定位
   const abs = (id) => path.join(TMP, designs.assetInfo(id).path)
@@ -231,7 +231,7 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   const ds = dataset.importFromFile(fp, '底图名单')
   dataset.setColumnPrint(ds.id, '姓名', true)
 
-  const a = templates.uploadBackground(ICON)
+  const a = templates.uploadBackground(PNG)
   const b = templates.uploadBackground(JPG)
   // abs() 要读原件 json，丢弃后会读不到；先把路径字符串快照下来，删完只用于 existsSync
   const absA = abs(a.background)
@@ -268,7 +268,7 @@ console.log('== 4d. 底图文件与模板记录解耦：换图 / 删图当场删
   fs.unlinkSync(outside)
 
   // 删模板连带清底图（仅当该原件不再被任何模板引用）
-  const c = templates.uploadBackground(ICON)
+  const c = templates.uploadBackground(PNG)
   const absC = abs(c.background)
   const tpl = templates.saveTemplate({
     name: '待删模板', datasetId: ds.id, pageSize: { w: 210, h: 297 },

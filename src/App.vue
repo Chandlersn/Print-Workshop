@@ -90,7 +90,6 @@ watch(cellNav, (r) => {
 })
 
 // 数据目录自定义：迁移结果与重启确认
-const dataDirMsg = ref('')
 const dataDirError = ref('')
 const showRestart = ref(false)
 const pendingReset = ref(false)

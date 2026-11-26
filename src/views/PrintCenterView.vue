@@ -1226,7 +1226,7 @@ onDeactivated(() => {
 
 <template>
   <section class="page">
-    <PageHeader class="print-header" title="打印中心" description="预览 · 导出 · 打印">
+    <PageHeader class="print-header" title="打印中心">
       <template #actions>
         <div class="toolbar-actions" aria-label="出片操作">
           <button class="btn" :disabled="!ready || busy || mismatched || scopeNeedsReview || photoEditBusy || photoEditDirty || photoInteraction || imageNameFieldOptions.length < 2" @click="exportIndividualImages"><AppIcon name="image" /> {{ busy && activeJobKey.startsWith('images-') ? '正在导出图片…' : `逐条导出 ${imageFormatLabel}` }}</button>
@@ -1661,8 +1661,6 @@ onDeactivated(() => {
 /* 这排按钮（逐条导出 / 直接打印 / 导出 PDF / 打印历史）与顶栏贴得太紧，读起来像顶栏的一部分。
    只在本页加顶部留白，与底图制作页同口径——PageHeader 是全局组件，改它会连带其他页。 */
 .print-header { margin-top: 14px; margin-bottom: 8px; }
-.print-header :deep(.page-header__text) { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
-.print-header :deep(.page-header__desc) { margin: 0; padding: 0; line-height: 1.4; }
 .print-header :deep(.page-header__actions) { gap: 8px; }
 
 .toolbar {
