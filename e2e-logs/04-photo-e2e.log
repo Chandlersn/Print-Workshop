@@ -1,0 +1,29 @@
+
+> printpress@0.7.4 test:photo-e2e
+> node test/helpers/electron-runner.cjs test/photo-e2e.cjs
+
+
+  ok - 外链原图主动从 file 页面加载
+  ok - 21 张不同原图在真实打印窗口解码完成
+  ok - PDF 保留 JPEG 原始码流
+  ok - 实际 PDF 包含 21 页
+  ok - 缺少原件时阻断打印加载
+  ok - 快照引用相对照片文件，无内联照片
+  ok - 迁移整个任务目录后，普通文件页面仍可解码全部照片
+  ok - 数据页移除照片匹配按钮及遮挡弹窗
+  ok - 导入后自动以首张匹配照片统一像素尺寸，完成后才使用处理结果
+  ok - 匹配照片自动入库后直接显示表格，不再重复展示照片卡片
+  ok - 真实 UI 显示具体缺图行
+  ok - 真实 UI 提示多人共用照片
+  ok - 共享同一照片的多行同步选择并只计一张
+  ok - 删除导入照片不会删除外部原件
+  ok - 批量删除后可重新导入并恢复自动处理
+  ok - 搜索结果同时显示筛选数量与名单总量
+  ok - 缺图状态筛选与姓名搜索共同生效
+  ok - 界面导出保留原始行号和所选识别字段
+  ok - 缺失缩略图自动回退系统原件，多行共用照片也能正常显示
+  ok - 修改名单后重新检查得到最新匹配
+PHOTO_E2E_FAIL Error: 等待失败：点击行号补录
+    at waitFor (D:\a\Print-Workshop\Print-Workshop\test\photo-e2e.cjs:31:9)
+    at async D:\a\Print-Workshop\Print-Workshop\test\photo-e2e.cjs:211:3
+PHOTO_IMAGE_STATE []
