@@ -69,7 +69,12 @@ function rowPreviewOf(ds, row) {
 
 /** 规范化行级选择：去重、越界丢弃、按原行序升序——打印顺序跟随名单顺序，而非勾选顺序 */
 function normalizeSelection(selection, total) {
-  return [...new Set(selection.map(Number))]
+  const indexes = selection.map(value => {
+    if (typeof value === 'number') return value
+    if (typeof value === 'string' && /^\d+$/.test(value.trim())) return Number(value)
+    throw new Error('打印范围包含无效行号，请传入从 0 开始的行号数组')
+  })
+  return [...new Set(indexes)]
     .filter((i) => Number.isInteger(i) && i >= 0 && i < total)
     .sort((a, b) => a - b)
 }
@@ -91,7 +96,8 @@ function resolveScope(ds, { rows, range } = {}) {
     const to = Math.max(from, Math.min(rawTo, n))
     return { from, to }
   }
-  if (Array.isArray(rows)) {
+  if (rows != null) {
+    if (!Array.isArray(rows)) throw new Error('打印范围必须是行号数组')
     const selection = normalizeSelection(rows, ds.rows.length)
     if (!selection.length) throw new Error('请至少勾选一行再出片')
     if (range) {
@@ -400,9 +406,10 @@ async function warmBatchBakes(templateId, outputDpi) {
  * `encodeDerivatives` 缺省 true（出片）。预览传 false：只规划、不生成派生件，
  * 整批预估为其他页读取尺寸元数据，不读取所有照片字节，也不为预览生成派生件。
  */
-function buildBatchHtml(datasetId, templateId, rows, { range, previewPage, outputDpi, encodeDerivatives } = {}) {
+function buildBatchHtml(datasetId, templateId, rows, { range, previewPage, outputDpi, encodeDerivatives, requirePrintableFields } = {}) {
   const ds = dataset.getDataset(String(datasetId))
   const tpl = templates.getTemplate(String(templateId))
+  if (requirePrintableFields) templates.assertPrintableFields(tpl, ds)
   const spec = renderEngine.pageSpec(tpl.pageSize)
   let scope = resolveScope(ds, { rows, range })
   const fullScope = scope

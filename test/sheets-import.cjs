@@ -113,9 +113,27 @@ async function main() {
   const dsM = dataset.getDataset(resMerge[0].id)
   ok(dsM.rows.length === 3, '两表数据行拼接（2+1）', dsM.rows.length)
   ok(dsM.columns.some((c) => c.alias === '来源工作表'), '自动加来源列', dsM.columns.map((c) => c.alias))
-  ok(dsM.rows.every((r) => r['来源工作表'] === dsM.rows[0]['来源工作表'] || true) &&
+  ok(dsM.rows.slice(0, 2).every(r => r['来源工作表'] === '01-A机构') &&
      dsM.rows[2]['来源工作表'] === '02-B机构', '来源列取自表名', dsM.rows[2])
   ok(dsM.rows[0]['选手姓名'] === '张三' && dsM.rows[2]['选手姓名'] === '王五', '列并集对齐正确')
+
+  const repeated = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(repeated, XLSX.utils.aoa_to_sheet([
+    ['项目', '项目', '', '来源工作表'], ['首项', '次项', '备注', '用户值'],
+  ]), '一表')
+  XLSX.utils.book_append_sheet(repeated, XLSX.utils.aoa_to_sheet([
+    ['来源工作表', '项目'], ['另一来源', '独项'],
+  ]), '二表')
+  const repeatedFile = path.join(TMP, 'repeated.xlsx')
+  XLSX.writeFile(repeated, repeatedFile)
+  const [merged] = await dataset.importSheets(repeatedFile, {
+    mode: 'merge', selections: repeated.SheetNames.map(name => ({ name, headerRow: 0 })),
+  })
+  const { columns, rows } = dataset.getDataset(merged.id)
+  const values = rows.map(row => columns.map(col => row[col.key]))
+  ok(JSON.stringify(values) === JSON.stringify([
+    ['首项', '次项', '备注', '用户值', '一表'], ['独项', '', '', '另一来源', '二表'],
+  ]), '同名列按出现顺序对齐，空表头与原有来源列均保留', values)
 
   console.log('== 6. 边界与守卫 ==')
   let threw = false

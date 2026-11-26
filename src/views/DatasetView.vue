@@ -345,6 +345,7 @@ async function selectDataset(id) {
     if (activeId.value === id && seq === datasetLoadSeq) {
       detail.value = result
       page.value = Math.min(page.value, Math.max(0, Math.ceil(result.rows.length / PAGE_SIZE) - 1))
+      return true
     }
   } catch (err) {
     if (seq === datasetLoadSeq) errorMsg.value = extractError(err)
@@ -548,15 +549,21 @@ async function removeRow(rowIndex) {
 }
 
 async function appendRow() {
-  if (!detail.value) return
+  if (!detail.value || gridBusy.value) return
+  const id = detail.value.id
+  const seq = datasetLoadSeq
   gridBusy.value = true
   try {
-    const r = await window.printpress.addRow(detail.value.id)
-    await selectDataset(detail.value.id)
-    page.value = Math.floor(r.rowIndex / PAGE_SIZE) // 按新行号直接落到目标页
-    const last = r.rowIndex
+    const r = await window.printpress.addRow(id)
+    const summary = datasets.value.find(ds => ds.id === id)
+    if (summary) summary.rowCount = r.rowCount
+    if (activeId.value !== id || seq !== datasetLoadSeq || editingCell.value) return
+    if (!(await selectDataset(id)) || detail.value?.id !== id || editingCell.value) return
+    const last = detail.value.recordIds.indexOf(r.rowId)
+    if (last < 0) return
+    page.value = Math.floor(last / PAGE_SIZE)
     const firstKey = detail.value.columns[0]?.key
-    if (firstKey) beginEdit(last, firstKey, '') // 新行直接进入编辑
+    if (firstKey) beginEdit(last, firstKey, detail.value.rows[last][firstKey])
   } catch (err) {
     errorMsg.value = extractError(err)
   } finally {

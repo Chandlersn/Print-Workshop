@@ -7,7 +7,7 @@ const { pathToFileURL } = require('url')
 const ROOT = path.resolve(__dirname, '..')
 const CODE = path.resolve(process.env.PRINTPRESS_REVIEW_CODE || ROOT)
 const displayScale = Number(process.env.PRINTPRESS_REVIEW_SCALE || 1.25)
-const runName = process.env.PRINTPRESS_REVIEW_RUN || `source-${displayScale}`
+const runName = process.env.PRINTPRESS_REVIEW_RUN || `source-${displayScale}-${Date.now()}`
 const output = path.join(ROOT, '.workbuddy-ai/tmp/print-images-review', runName)
 const temp = fs.mkdtempSync(path.join(__dirname, '.tmp-print-images-e2e-'))
 const data = path.join(temp, 'data')
@@ -181,6 +181,10 @@ async function main() {
   }
 
   mod('store').saveJson('settings', { onboarded: true })
+  const legacy = { ...templates.getTemplate(tpl.id), id: 'legacy-unbound', name: '旧版未绑定模板', datasetId: '' }
+  mod('store').saveJson('templates', [...mod('store').loadJson('templates'), legacy])
+  print.createJob({ datasetId: ds.id, datasetName: ds.name, templateId: legacy.id, templateName: legacy.name,
+    mode: 'pdf', status: 'ok', recordCount: 1, totalRows: 20, partial: true, selection: [0], selectionIds: [ds.recordIds[0]] })
   print.createJob({ datasetId: ds.id, datasetName: ds.name, templateId: tpl.id, templateName: tpl.name,
     mode: 'pdf', status: 'ok', recordCount: 20, snapshotHtml: '<html>review</html>' })
   mod('ipc').registerIpc()
@@ -190,7 +194,8 @@ async function main() {
   const evaluate = code => ui.webContents.executeJavaScript(code)
   async function waitFor(code, label) {
     for (let i = 0; i < 200; i++) { if (await evaluate(code)) return; await new Promise(r => setTimeout(r, 50)) }
-    throw new Error('UI timeout: ' + label)
+    const status = await evaluate(`[...document.querySelectorAll('.modal-title,.toast,.range-count')].map(el => el.textContent.trim()).join(' / ')`)
+    throw new Error('UI timeout: ' + label + ' (' + status + ')')
   }
   await ui.loadURL(pathToFileURL(path.join(CODE, 'dist/index.html')).href)
   await waitFor(`document.querySelectorAll('.nav-label').length===5`, 'app tabs')
@@ -208,6 +213,12 @@ async function main() {
   dataset.updateCell(ds.id, 0, '姓名', '')
   await evaluate(`document.querySelector('.history-trigger').click()`)
   await waitFor(`!!document.querySelector('.history-modal .row-actions')`, 'history reopened')
+  await evaluate(`(() => { const row = [...document.querySelectorAll('.history-modal tbody tr')].find(el => el.textContent.includes('旧版未绑定模板')); [...row.querySelectorAll('button')].find(el => el.textContent === '重打').click() })()`)
+  await waitFor(`document.querySelector('.modal-title')?.textContent.includes('打印前校验') && document.querySelector('.range-count')?.textContent.includes('本次 1 人')`, 'legacy reprint restores the selected person')
+  check(await evaluate(`!document.querySelector('.history-modal')`), '旧版未绑定模板重打恢复历史名单和原选人员')
+  await evaluate(`Array.from(document.querySelectorAll('.modal-actions button')).find(el=>el.textContent==='返回补全').click()`)
+  await evaluate(`document.querySelector('.history-trigger').click()`)
+  await waitFor(`!!document.querySelector('.history-modal .row-actions')`, 'history reopened after legacy reprint')
   await evaluate(`Array.from(document.querySelectorAll('.history-modal .row-actions button')).find(el => el.textContent==='重打').click()`)
   await waitFor(`Array.from(document.querySelectorAll('.modal-title')).some(el=>el.textContent.includes('打印前校验'))`, 'reprint validation')
   check(await evaluate(`!document.querySelector('.history-modal')`), 'reprint closes history before opening validation')
@@ -254,7 +265,7 @@ async function main() {
     await waitFor(`document.querySelector('.history-modal tbody tr')?.textContent.includes('导出 PNG')`, 'live PNG history refreshed')
     check(print.listJobs()[0].mode === 'images' && print.listJobs()[0].recordCount === 20, 'PNG success immediately refreshes the history dialog')
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(output, 'ui-png-reprint')] })
-    await evaluate(`(() => { const row=[...document.querySelectorAll('.history-modal tbody tr')].find(el=>el.querySelector('.partial-tag')?.textContent.includes('部分 1/20')); [...row.querySelectorAll('button')].find(el=>el.textContent==='重打').click() })()`)
+    await evaluate(`(() => { const row=[...document.querySelectorAll('.history-modal tbody tr')].find(el=>el.textContent.includes('导出 PNG') && el.querySelector('.partial-tag')?.textContent.includes('部分 1/20')); [...row.querySelectorAll('button')].find(el=>el.textContent==='重打').click() })()`)
     await waitFor(`!document.querySelector('.history-modal') && document.querySelector('.toast')?.textContent.includes('已导出 1 张 PNG')`, 'PNG history reprint')
     const repeated = print.listJobs()[0]
     check(repeated.mode === 'images' && repeated.recordCount === 1 && repeated.outputDpi === 150 && repeated.imageNameFields.join(',') === '编号,姓名',

@@ -14,6 +14,7 @@ const randomLength = ref(6)
 const validRandomLength = computed(() => Number.isInteger(randomLength.value) && randomLength.value >= 1 && randomLength.value <= 16)
 const start = ref(1), width = ref(4), step = ref(1)
 const preview = ref(null), error = ref(''), busy = ref(false)
+const previewRevision = ref(0)
 const input = ref(null)
 let selectionStart = 0, selectionEnd = 0
 watch(() => props.open, open => {
@@ -39,7 +40,7 @@ async function insert(value) {
   input.value?.setSelectionRange(selectionStart, selectionEnd)
 }
 function close() { if (!busy.value) emit('close') }
-watch([() => props.open, () => props.dataset?.id, format, target, name, start, width, step], (_, __, onCleanup) => {
+watch([() => props.open, () => props.dataset?.id, format, target, name, start, width, step, previewRevision], (_, __, onCleanup) => {
   preview.value = null
   error.value = ''
   if (!props.open || !props.dataset) return
@@ -62,7 +63,13 @@ async function apply() {
     const firstRow = preview.value.samples[0]?.rowIndex ?? 0
     preview.value = null
     emit('applied', { ...result, datasetId, columnName: columnName || '编码', firstRow })
-  } catch (err) { preview.value = null; error.value = toUserMessage(err) }
+  } catch (err) {
+    previewRevision.value++
+    const message = toUserMessage(err)
+    error.value = message.includes('请重新生成预览')
+      ? '上次预览已失效，请核对更新后的样码，再确认写入。'
+      : message
+  }
   finally { busy.value = false }
 }
 </script>

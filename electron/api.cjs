@@ -60,7 +60,7 @@ const printTasks = new Map()
 
 function registerPrintTask(jobKey) {
   if (printTasks.has(jobKey)) throw new Error('同一出片任务正在执行，请等待完成')
-  const task = { canceled: false }
+  const task = { canceled: false, cancelable: true }
   printTasks.set(jobKey, task)
   return task
 }
@@ -119,6 +119,7 @@ function assertFieldsFilled(scope, tpl, field1, field2) {
 function cancelPrintTask(jobKey) {
   const task = printTasks.get(String(jobKey))
   if (!task) return { ok: false, reason: '任务不存在或已结束' }
+  if (!task.cancelable) return { ok: false, reason: '最后一批已开始提交' }
   task.canceled = true
   return { ok: true }
 }
@@ -512,7 +513,7 @@ const OPS = {
 
   'dataset:previewCodes': {
     params: { datasetId: { required: true }, format: { required: true } },
-    run: (p) => dataset.previewCodes(p),
+    run: (p, ctx) => dataset.previewCodes(p, ctx.persistCodePreview),
   },
   'dataset:applyCodes': {
     write: true,
@@ -1368,6 +1369,7 @@ const OPS = {
     },
     run: (p) => printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, {
       previewPage: p.previewPage,
+      requirePrintableFields: true,
       outputDpi: p.outputDpi,
       encodeDerivatives: false,
     }),
@@ -1403,7 +1405,7 @@ const OPS = {
       // 固定图片烘焙（I-50）：必须在同步的 buildBatchHtml **之前** await——它要拉离屏窗口截图。
       // 放在保存/打印对话框之前是有意的：烘出来的是内容寻址的缓存件，用户取消也只是白热一次缓存。
       await printDomain.warmBatchBakes(String(p.templateId), p.outputDpi)
-      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { outputDpi: p.outputDpi })
+      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { outputDpi: p.outputDpi, requirePrintableFields: true })
       const fingerprint = printInputFingerprint(String(p.datasetId), String(p.templateId))
 
       let savePath = p.savePath ? String(p.savePath) : ''
@@ -1434,7 +1436,7 @@ const OPS = {
         let r
         if (batches.length <= 1) {
           onProgress({ phase: 'single', batches: 1 })
-          // 单批：一条 printToPDF 直写最终文件，与分批上线前的逐字节行为一致
+          // 单批无需合并，生成完整 PDF 后原子替换目标文件。
           r = await ctx.printer.exportPdf(built.html, savePath)
         } else {
           r = await printBatch.exportPdfBatched({
@@ -1556,7 +1558,7 @@ const OPS = {
       const used = new Set()
       let count = 0
       const files = []
-      const whole = printDomain.buildBatchHtml(dsId, tplId, p.rows, { outputDpi: dpi })
+      const whole = printDomain.buildBatchHtml(dsId, tplId, p.rows, { outputDpi: dpi, requirePrintableFields: true })
       const fingerprint = printInputFingerprint(dsId, tplId)
       const guardedDomain = guardedPrintDomain(dsId, tplId, fingerprint)
       const jobBase = {
@@ -1646,12 +1648,13 @@ const OPS = {
       // 固定图片烘焙（I-50）：必须在同步的 buildBatchHtml **之前** await——它要拉离屏窗口截图。
       // 放在保存/打印对话框之前是有意的：烘出来的是内容寻址的缓存件，用户取消也只是白热一次缓存。
       await printDomain.warmBatchBakes(String(p.templateId), p.outputDpi)
-      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { outputDpi: p.outputDpi })
+      const built = printDomain.buildBatchHtml(String(p.datasetId), String(p.templateId), p.rows, { outputDpi: p.outputDpi, requirePrintableFields: true })
       const fingerprint = printInputFingerprint(String(p.datasetId), String(p.templateId))
       const silent = Boolean(p && p.silent)
       const jobKey = p.jobKey ? String(p.jobKey) : newJobKey()
       const task = registerPrintTask(jobKey)
       const onProgress = (x) => {
+        if (x.phase === 'single' || (x.phase === 'submit-start' && x.index === x.batches)) task.cancelable = false
         try { ctx.emit('print:progress', { jobKey, ...x }) } catch { /* 进度事件异常不阻断出片 */ }
       }
       const batches = printDomain.planBatches(built.recordCount, built.layout, p.batchRows ?? (built.photoAssets.length ? 25 : 100))
@@ -1702,6 +1705,7 @@ const OPS = {
       if (r.ok && printDomain.shouldMarkPrinted(built.scope)) {
         try { dataset.markPrinted(String(p.datasetId), 'print') } catch { recordWarning = '打印任务已发送，但数据集打印状态未保存，请勿重复打印。' }
       }
+      const status = r.ok ? 'ok' : printBatch.isPrinterCancellation(r) ? 'canceled' : 'failed'
       try { printDomain.createJob({
         templateId: String(p.templateId),
         templateName: built.templateName,
@@ -1715,12 +1719,12 @@ const OPS = {
         selectionIds: built.selectionIds,
         snapshotHtml: built.snapshotHtml,
         photoAssets: built.photoAssets,
-        status: r.ok ? 'ok' : 'canceled',
+        status,
         detail: r.ok
           ? `${silent ? '静默直打' : '打印对话框确认'}${r.batches > 1 ? `（${r.batches} 批）` : ''}${describeOutput(r.output || built.output, r.bake || built.bake)}`
           : String(r.error || ''),
-      }) } catch { recordWarning = r.ok ? '打印任务已发送，但打印记录未完整保存，请勿重复打印。' : '打印已取消，但未能保存取消记录。' }
-      return { ...r, output: r.output || built.output, jobKey, scope: built.scope, recordWarning }
+      }) } catch { recordWarning = r.ok ? '打印任务已发送，但打印记录未完整保存，请勿重复打印。' : '打印未完成，且未能保存任务记录。' }
+      return { ...r, canceled: status === 'canceled', output: r.output || built.output, jobKey, scope: built.scope, recordWarning }
     },
   },
 
@@ -1774,6 +1778,7 @@ function normalizeCtx(ctx) {
   const c = ctx || {}
   return {
     allowWrite: Boolean(c.allowWrite),
+    persistCodePreview: c.persistCodePreview === true,
     app: c.app || {},
     dialog: c.dialog || null,
     printer: c.printer || null,

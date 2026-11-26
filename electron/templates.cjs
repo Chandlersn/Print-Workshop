@@ -187,13 +187,7 @@ function saveTemplate(template, options = {}) {
   else if (template.photoProcessingRecipe) template.photoProcessingRecipe = require('./photo-processing-pixels.cjs').normalizeRecipe(template.photoProcessingRecipe)
   // 出口把关：画布上每个字段都必须对上数据集已激活打印的列——
   // 总数对不上（换数据集残留的失效字段 / 数据页事后取消「印」）不允许保存通过
-  const m = matchFields(template, ds)
-  if (!m.ok) {
-    throw new Error(
-      `模板 ${m.fieldCount} 个字段中有 ${m.missing.length} 个校验未通过：` +
-      `${m.missing.map((x) => `「${x.label}」`).join('')}在数据集「${ds.name}」中不存在或未激活打印。` +
-      '请删除画布上的失效字段，或去数据页表格列头点「印」激活后重试')
-  }
+  assertPrintableFields(template, ds)
   const list = loadAll()
   const now = new Date().toISOString()
   if (template.id) {
@@ -447,6 +441,16 @@ function matchFields(tpl, ds) {
   }
 }
 
+function assertPrintableFields(template, ds) {
+  const m = matchFields(template, ds)
+  if (!m.ok) {
+    throw new Error(
+      `模板 ${m.fieldCount} 个字段中有 ${m.missing.length} 个校验未通过：` +
+      `${m.missing.map((x) => `「${x.label}」`).join('')}在数据集「${ds.name}」中不存在或未激活打印。` +
+      '请删除画布上的失效字段，或去数据页表格列头点「印」激活后重试')
+  }
+}
+
 /** 已存模板 × 数据集匹配校验（换绑预检、打印中心前置警告共用） */
 function matchDataset(templateId, datasetId) {
   const tpl = getTemplate(String(templateId))
@@ -488,6 +492,7 @@ module.exports = {
   ratioDiff,
   fontUsedBy,
   matchFields,
+  assertPrintableFields,
   matchDataset,
   rebindDataset,
   listBackgroundAssetIds,

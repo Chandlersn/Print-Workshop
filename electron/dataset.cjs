@@ -11,6 +11,7 @@
  */
 const path = require('path')
 const crypto = require('crypto')
+const codePreviews = require('./code-preview-cache.cjs')
 const { loadJson, saveJson } = require('./store.cjs')
 const { buildColumns, isReservedKey } = require('./keys.cjs')
 const { importGrid } = require('./importer/index.cjs')
@@ -220,24 +221,33 @@ async function importSheets(filePath, { selections, mode, onProgress = () => {} 
     report({ stage: 'build', pct: 70, label: `合并 ${parsed.length} 个工作表…` })
     await yieldUi()
     const unionHeads = []
-    const seen = new Set()
-    for (const p of parsed) {
-      for (const h of p.sliced[0]) {
-        const key = String(h).trim()
-        if (key && !seen.has(key)) { seen.add(key); unionHeads.push(key) }
-      }
-    }
-    unionHeads.push('来源工作表')
+    // 各表按“原名 + 第几次出现”对齐，包括有数据的空表头。
+    const positionsByName = new Map()
+    const mappings = parsed.map(({ sliced }) => {
+      const occurrences = new Map()
+      return sliced[0].map(header => {
+        const name = String(header).trim()
+        const occurrence = occurrences.get(name) || 0
+        occurrences.set(name, occurrence + 1)
+        if (!positionsByName.has(name)) positionsByName.set(name, [])
+        const positions = positionsByName.get(name)
+        if (occurrence === positions.length) {
+          positions.push(unionHeads.length)
+          unionHeads.push(name)
+        }
+        return positions[occurrence]
+      })
+    })
+    let sourceName = '来源工作表'
+    for (let suffix = 2; positionsByName.has(sourceName); suffix++) sourceName = `来源工作表_${suffix}`
+    unionHeads.push(sourceName)
     const rows2d = [unionHeads]
-    for (const p of parsed) {
-      const headIndex = new Map()
-      p.sliced[0].forEach((h, i) => headIndex.set(String(h).trim(), i))
+    for (const [sheetIndex, p] of parsed.entries()) {
+      const positions = mappings[sheetIndex]
       for (const r of p.sliced.slice(1)) {
-        const out = unionHeads.map((h) => {
-          if (h === '来源工作表') return p.name
-          const i = headIndex.get(h)
-          return i === undefined || i >= r.length ? '' : r[i]
-        })
+        const out = Array(unionHeads.length).fill('')
+        positions.forEach((dest, i) => { out[dest] = r[i] ?? '' })
+        out[out.length - 1] = p.name
         rows2d.push(out)
       }
     }
@@ -376,9 +386,11 @@ function updateCell(id, rowIndex, key, value) {
   }
 }
 
-// Keep the preview in the main process so confirmation writes the displayed values.
-const codePreviews = new Map()
-function previewCodes(options) {
+function datasetFingerprint(ds) {
+  return crypto.createHash('sha256').update(JSON.stringify(ds)).digest('hex')
+}
+
+function previewCodes(options, persist = false) {
   const ds = findDs(String(options.datasetId))
   const target = options.targetKey ? ds.columns.find(c => c.key === options.targetKey) : null
   if (options.targetKey && !target) throw new Error('目标列不存在')
@@ -389,6 +401,8 @@ function previewCodes(options) {
   const start = Number(options.start), width = Number(options.width), step = Number(options.step)
   if (!Number.isSafeInteger(start) || start < 0 || !Number.isInteger(width) || width < 1 || width > 16 || !Number.isSafeInteger(step) || step < 1) throw new Error('流水号设置无效')
   const parts = format.split(/(\{[^{}]*\})/g)
+  const hasSerial = parts.includes('{流水号}')
+  const hasRandom = parts.some(p => p.startsWith('{随机:'))
   if (parts.some(p => /[{}]/.test(p) && !/^\{(?:流水号|日期|随机:[1-9]|随机:1[0-6]|字段:[^{}]+)\}$/.test(p))) throw new Error('规则中存在无法识别的占位符')
   const fieldKeys = parts.filter(p => p.startsWith('{字段:')).map(p => p.slice(4, -1))
   if (fieldKeys.some(key => !ds.columns.some(c => c.key === key))) throw new Error('规则中选择的字段不存在')
@@ -402,8 +416,8 @@ function previewCodes(options) {
     if (target && !isEmpty(row[target.key])) { skipped++; continue }
     if (fieldKeys.some(key => isEmpty(row[key]))) throw new Error(`第 ${i + 1} 行的规则字段为空，请先补齐`)
     let value, tries = 0
-    do {
-      if (!Number.isSafeInteger(serial)) throw new Error('流水号超出支持范围')
+    for (;;) {
+      if (hasSerial && !Number.isSafeInteger(serial)) throw new Error('流水号超出支持范围')
       value = parts.map(p => {
         if (p === '{流水号}') return String(serial).padStart(width, '0')
         if (p === '{日期}') return day
@@ -411,24 +425,23 @@ function previewCodes(options) {
         if (p.startsWith('{随机:')) return Array.from({ length: Number(p.slice(4, -1)) }, () => '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'[crypto.randomInt(36)]).join('')
         return p
       }).join('')
-      serial += step
+      if (hasSerial) serial += step
       if (!value.trim() || value.length > 1000) throw new Error(`第 ${i + 1} 行生成的编码为空或过长`)
-      if (++tries > 10000) throw new Error('无法生成不重复的编码，请添加流水号或增加随机字符长度')
-    } while (used.has(value))
+      if (!used.has(value)) break
+      if (!hasSerial && (!hasRandom || ++tries >= 10000)) throw new Error('无法生成不重复的编码，请添加流水号或增加随机字符长度')
+    }
     used.add(value)
     updates.push({ rowIndex: i, value })
   }
   if (!updates.length) throw new Error('没有需要生成编码的空行')
-  const token = crypto.randomBytes(24).toString('hex')
-  codePreviews.clear()
-  codePreviews.set(token, { datasetId: ds.id, snapshot: JSON.stringify(ds), targetKey: target?.key, name, updates, expires: Date.now() + 900000 })
+  const token = codePreviews.save({ datasetId: ds.id, snapshot: datasetFingerprint(ds), targetKey: target?.key, name, updates }, persist)
   return { token, count: updates.length, skipped, samples: updates.slice(0, 10) }
 }
 function applyCodes(token) {
   const preview = codePreviews.get(String(token))
-  if (!preview || preview.expires < Date.now()) throw new Error('预览已失效，请重新生成预览')
+  if (!preview) throw new Error('预览已失效，请重新生成预览')
   const list = loadAll(), ds = list.find(d => d.id === preview.datasetId)
-  if (!ds || JSON.stringify(ds) !== preview.snapshot) throw new Error('数据集已发生变化，请重新生成预览')
+  if (!ds || datasetFingerprint(ds) !== preview.snapshot) throw new Error('数据集已发生变化，请重新生成预览')
   let key = preview.targetKey
   if (!key) {
     do { key = 'code_' + crypto.randomBytes(6).toString('hex') } while (ds.columns.some(c => c.key === key))
@@ -438,7 +451,7 @@ function applyCodes(token) {
   preview.updates.forEach(({ rowIndex, value }) => { ds.rows[rowIndex][key] = value })
   recomputeColumnStats(ds, key)
   persistAll(list)
-  codePreviews.delete(String(token))
+  codePreviews.remove(String(token))
   return { count: preview.updates.length, key }
 }
 
@@ -453,7 +466,7 @@ function addRow(id) {
   ds.recordIds.push(newId('row'))
   recomputeColumnStats(ds)
   persistAll(list)
-  return { ok: true, rowIndex: ds.rows.length - 1, rowCount: ds.rows.length }
+  return { ok: true, rowIndex: ds.rows.length - 1, rowId: ds.recordIds[ds.rows.length - 1], rowCount: ds.rows.length }
 }
 
 /** 删除行（0 基行号），删后重算全部列统计 */

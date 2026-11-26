@@ -194,6 +194,7 @@ const PKG = require(path.join(REPO_ROOT, 'package.json'))
  * assertCapabilities 能给出统一的 GUI_REQUIRED 错误，而不是各自崩在不同地方。
  */
 const CTX = {
+  persistCodePreview: true, // 预览与确认由两次独立的命令执行。
   allowWrite: Boolean(flags['allow-write']),
   app: {
     version: PKG.version,

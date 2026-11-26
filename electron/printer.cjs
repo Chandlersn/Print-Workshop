@@ -7,6 +7,7 @@
  */
 const path = require('path')
 const fs = require('fs')
+const { writeFileAtomic } = require('./atomic-write.cjs')
 const os = require('os')
 const { pathToFileURL } = require('url')
 const { BrowserWindow, shell, session, nativeImage } = require('electron')
@@ -210,7 +211,7 @@ async function printToPdfBuffer(html, { timeoutMs, partition } = {}) {
 /** 导出 PDF：preferCSSPageSize 让 @page 尺寸（毫米）直接决定纸张 */
 async function exportPdf(html, savePath, { partition } = {}) {
   const buf = await printToPdfBuffer(html, { partition })
-  fs.writeFileSync(savePath, buf)
+  writeFileAtomic(savePath, buf)
   return { ok: true, path: savePath, bytes: buf.length }
 }
 

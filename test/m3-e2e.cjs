@@ -7,6 +7,7 @@
 const { app, BrowserWindow, protocol, net } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const assert = require('assert/strict')
 const { rmDeep } = require('./helpers/rm.cjs')
 const { pathToFileURL } = require('url')
 
@@ -86,8 +87,7 @@ async function main() {
   const built = printDomain.buildBatchHtml('ds_e2e', 'tpl_e2e')
   if (built.recordCount !== 120) throw new Error(`recordCount=${built.recordCount}`)
 
-  // 单窗口单次加载（M3 验证过的稳定模式；printer.loadHtml 自带窗口级重试），
-  // 底图 pp:// 检查在同一页面内做——正文 .page 的背景正是 pp:// URL。
+  // 用页面检查底图协议，再经实际导出入口核对 PDF 及替换失败的行为。
   const out = path.join(__dirname, '.tmp-out')
   fs.mkdirSync(out, { recursive: true })
   const pdfPath = path.join(out, 'batch-120.pdf')
@@ -104,12 +104,22 @@ async function main() {
     )
     if (bgLoaded !== 'ok') throw new Error('pp:// 底图加载失败')
 
-    const buf = await win.webContents.printToPDF({
-      printBackground: true,
-      preferCSSPageSize: true,
-      margins: { marginType: 'none' },
-    })
-    fs.writeFileSync(pdfPath, buf)
+    await printer.exportPdf(built.html, pdfPath)
+    const buf = fs.readFileSync(pdfPath)
+    const filesBefore = fs.readdirSync(out).sort()
+    const write = fs.writeFileSync
+    fs.writeFileSync = (target, bytes, ...args) => {
+      if (Buffer.isBuffer(bytes) && bytes.toString('ascii', 0, 5) === '%PDF-') {
+        write(target, bytes.subarray(0, 12), ...args)
+        throw new Error('模拟磁盘写满')
+      }
+      return write(target, bytes, ...args)
+    }
+    try {
+      await assert.rejects(printer.exportPdf('<p>新内容</p>', pdfPath), /模拟磁盘写满/)
+    } finally { fs.writeFileSync = write }
+    assert.deepEqual(fs.readFileSync(pdfPath), buf, '写入中断后旧 PDF 应逐字节保留')
+    assert.deepEqual(fs.readdirSync(out).sort(), filesBefore, '写入中断不残留半成品')
 
     const pages = (buf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length
     console.log(`E2E_OK pdf=${pdfPath}`)

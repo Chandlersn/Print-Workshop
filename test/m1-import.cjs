@@ -119,6 +119,12 @@ async function main() {
   dataset.deleteDataset(ds2.id)
   assert(dataset.listDatasets().length === 2, '删除生效', dataset.listDatasets().length)
 
+  const collisionFile = path.join(process.env.PRINTPRESS_DATA_DIR, 'collision.csv')
+  fs.writeFileSync(collisionFile, '姓名,姓名,姓名_2\n甲,乙,丙\n')
+  const collision = dataset.getDataset(dataset.importFromFile(collisionFile).id)
+  assert(collision.columns.map(c => collision.rows[0][c.key]).join(',') === '甲,乙,丙', '重名列与显式后缀列各保留原值')
+  assert(collision.rows[0]['姓名_2'] === '丙', '显式后缀列保留原字段键')
+
   console.log(`\n结果: ${pass} 通过, ${fail} 失败`)
   process.exit(fail > 0 ? 1 : 0)
 }

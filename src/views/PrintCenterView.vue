@@ -98,7 +98,12 @@ const previewLoading = ref(false)
 const activeJobKey = ref('')
 const taskProgress = ref(null)
 const cancelRequested = ref(false)
-const cancelable = computed(() => activeJobKey.value && !activeJobKey.value.startsWith('images-') && !cancelRequested.value && !['single', 'merge', 'publish', 'finished'].includes(taskProgress.value?.phase))
+const cancelable = computed(() => {
+  const progress = taskProgress.value
+  const lastSubmission = progress?.phase.startsWith('submit-') && progress.index === progress.batches
+  return activeJobKey.value && !activeJobKey.value.startsWith('images-') && !cancelRequested.value &&
+    !lastSubmission && !['single', 'merge', 'publish', 'finished'].includes(progress?.phase)
+})
 const progressText = computed(() => {
   const p = taskProgress.value
   if (cancelRequested.value) return '正在取消，等待当前批次结束；已提交的打印内容无法撤回。'
@@ -309,9 +314,13 @@ watch(() => designerNav.result, async result => {
 })
 
 async function loadDetail() {
+  const id = selDs.value
   dsDetail.value = null
-  if (!selDs.value) return
-  try { dsDetail.value = await window.printpress.getDataset(selDs.value) } catch { /* 预览/打印会兜底报错 */ }
+  if (!id) return
+  try {
+    const detail = await window.printpress.getDataset(id)
+    if (selDs.value === id) dsDetail.value = detail
+  } catch { /* 预览/打印会兜底报错 */ }
 }
 
 /** 设置出片范围：null = 全量；数组 = 部分。同时记录行数快照供漂移守卫比对 */
@@ -820,7 +829,7 @@ watch(selTpl, () => {
   selDs.value = (tpl && tpl.datasetId && datasets.value.some((d) => d.id === tpl.datasetId))
     ? tpl.datasetId
     : ''
-})
+}, { flush: 'sync' }) // 先处理模板默认名单，历史补打随后可恢复原名单。
 
 // 模板字段 × 绑定数据集匹配检查：缺失是结构性错误（导出必白版），前置警告并阻断。
 // 竞态守卫：快速连切模板时，旧请求的慢响应不得覆盖新选择的结果。
@@ -828,11 +837,11 @@ let mismatchSeq = 0
 const mismatch = ref(null)
 const mismatched = computed(() => Boolean(mismatch.value && !mismatch.value.ok))
 watch([selTpl, selDs], async () => {
+  const seq = ++mismatchSeq
   mismatch.value = null
   if (!selTpl.value || !selDs.value) return
   const tpl = templates.value.find((t) => t.id === selTpl.value)
   if (!tpl || !tpl.datasetId || tpl.datasetId !== selDs.value) return // 兼容路径（临时选择）不在此检
-  const seq = ++mismatchSeq
   try {
     const r = await window.printpress.matchDataset(selTpl.value, selDs.value)
     if (seq === mismatchSeq) mismatch.value = r
@@ -1072,7 +1081,8 @@ async function execute(action, preflightFingerprint) {
       if (r.ok) say(`已发送打印机${outputResultText(r.output)}`, true)
       // Chromium 的 print 回调给的是英文（'Print job canceled' / 'Invalid printer settings'），
       // 不能直接贴给用户；给一个贴合场景的兜底（I-48）
-      else say(toUserMessage(r.error, '打印没有完成，可能被取消或打印机不可用。'), true)
+      else if (r.canceled) say('已取消打印')
+      else say(toUserMessage(r.error, '打印失败，请检查打印机连接和打印设置后重试。'), true)
     }
   } catch (err) {
     // 用户自己点了取消不算「失败」，别加前缀吓人；只洗一次，别洗两遍
@@ -1187,7 +1197,9 @@ async function reprint(job) {
     await exportIndividualImages()
     return
   }
-  runAction(job.mode === 'print' ? 'print' : 'pdf')
+  // 等范围监听器启动页面预检，再发起这次补打的最终预检。
+  await nextTick()
+  await runAction(job.mode === 'print' ? 'print' : 'pdf')
 }
 
 function fmtTime(iso) {

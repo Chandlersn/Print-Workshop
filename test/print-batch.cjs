@@ -91,6 +91,48 @@ async function run() {
   check(true, '分批期间输入变化时停止，不混用前后名单内容')
   await api.call('print:exportPdf', { ...params, rows: [0, 1], savePath: path.join(tmp, 'single.pdf') }, { allowWrite: true, printer: printer() })
   check(countPdfPagesFromFile(path.join(tmp, 'single.pdf')) === 2, '单批兼容出口')
+
+  const sends = printer()
+  const ctx = { allowWrite: true, printer: sends }
+  for (const rows of [1, '1', false, [null], [false], [''], [0, {}]]) {
+    await assert.rejects(api.call('print:send', { ...params, rows }, ctx), /行号/)
+  }
+  check(sends.sends.length === 0, '错误范围不会扩大为全量，也不会选中首行')
+  const subset = await api.call('print:send', { ...params, rows: ['1'] }, ctx)
+  check(subset.scope.selected === 1 && subset.scope.partial, '数字字符串数组仍按指定人员出片')
+
+  let lateCancellation
+  const beforePrint = require('../electron/dataset.cjs').getDataset(ds.id).printCount
+  const complete = await api.call('print:send', params, { ...ctx, emit: (_, event) => {
+    if (event.phase === 'submit-done' && event.index === event.batches) {
+      lateCancellation = api.call('print:cancel', { jobKey: params.jobKey }, ctx)
+    }
+  } })
+  check(complete.ok && complete.submitted === 3 && lateCancellation?.ok === false &&
+    domain.listJobs()[0].status === 'ok' && require('../electron/dataset.cjs').getDataset(ds.id).printCount === beforePrint + 1,
+    '末批已提交时不能取消，全量打印留成功记录并回写一次')
+
+  for (const [error, status] of [['Invalid printer settings', 'failed'], ['Print job canceled', 'canceled']]) {
+    const device = { sendToPrinter: async () => ({ ok: false, error }) }
+    const single = await api.call('print:send', { ...params, rows: [0] }, { ...ctx, printer: device })
+    check(!single.ok && single.canceled === (status === 'canceled') && domain.listJobs()[0].status === status, '单批正确区分设备反馈：' + error)
+    let calls = 0
+    const twoBatches = { sendToPrinter: async () => ++calls === 1 ? { ok: true } : device.sendToPrinter() }
+    await assert.rejects(api.call('print:send', params, { ...ctx, printer: twoBatches }), /已提交/)
+    check(domain.listJobs()[0].status === status && calls === 2, '分批正确区分设备反馈并停止后续提交：' + error)
+  }
+
+  const datasets = store.loadJson('datasets')
+  datasets[0].columns[0].printOn = false
+  datasets[0].columns.push({ key: 'code', alias: '编号' })
+  store.saveJson('datasets', datasets)
+  const imageDir = path.join(tmp, 'images')
+  const disabled = { ...params, rows: [0], field1: 'name', field2: 'code', allowIncomplete: true, outputDir: imageDir }
+  for (const op of ['print:send', 'print:exportPdf', 'print:exportImages']) {
+    await assert.rejects(api.call(op, disabled, ctx), /未激活打印/)
+  }
+  assert.throws(() => api.call('print:generate', disabled, ctx), /未激活打印/)
+  check(sends.sends.length === 4 && fs.readdirSync(imageDir).length === 0, '停用的模板字段拦截打印、PDF、图片与 HTML 输出')
   console.log(`分批出片：${checks} 项通过`)
 }
 run().catch(err => { console.error(err); process.exitCode = 1 }).finally(() => rmDeep(tmp))

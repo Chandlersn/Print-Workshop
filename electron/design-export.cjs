@@ -1,7 +1,7 @@
 /** 出图按请求的像素尺寸渲染，与编辑器视口无关；PNG / JPEG / WebP 共用同一条渲染管线。 */
 const fs = require('fs')
 const path = require('path')
-const crypto = require('crypto')
+const { writeFileAtomic } = require('./atomic-write.cjs')
 const { normalizeDesign, renderDesign, shadowRegion } = require('./design-layout.cjs')
 const designs = require('./designs.cjs')
 const { fontFaceCss } = require('./render-engine.cjs')
@@ -194,13 +194,7 @@ function outputPath(filePath, format) {
 
 function atomicWrite(filePath, bytes, format) {
   const target = outputPath(filePath, format)
-  const temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomBytes(6).toString('hex')}.tmp`)
-  try {
-    fs.writeFileSync(temp, bytes, { flag: 'wx' })
-    fs.renameSync(temp, target)
-  } finally {
-    if (fs.existsSync(temp)) fs.unlinkSync(temp)
-  }
+  writeFileAtomic(target, bytes)
   return target
 }
 

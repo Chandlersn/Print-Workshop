@@ -30,12 +30,17 @@ function normalizeHeaderKey(raw) {
  * key 规范化后如撞名，追加 _2 / _3；alias 保留用户原始表头。
  */
 function buildColumns(headers) {
-  const seen = new Map()
+  const bases = headers.map(normalizeHeaderKey)
+  const reserved = new Set(bases)
+  const nextSuffix = new Map()
   return headers.map((raw, index) => {
-    let key = normalizeHeaderKey(raw)
-    const count = seen.get(key) || 0
-    seen.set(key, count + 1)
-    if (count > 0) key = `${key}_${count + 1}`
+    const base = bases[index]
+    let key = base
+    let suffix = nextSuffix.get(base) || 2
+    if (nextSuffix.has(base)) {
+      do { key = `${base}_${suffix++}` } while (reserved.has(key))
+    }
+    nextSuffix.set(base, suffix)
     const alias = raw === null || raw === undefined || String(raw).trim() === ''
       ? `列${index + 1}`
       : String(raw).trim()

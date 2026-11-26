@@ -133,6 +133,10 @@ async function exportPdfBatched(o) {
   }
 }
 
+function isPrinterCancellation(result) {
+  return result?.canceled === true || /^(?:print job )?cancell?ed$/i.test(String(result?.error || '').trim())
+}
+
 /**
  * 分批直接送打印。没有临时文件（纸不经过磁盘），失败/取消只涉及未提交的批。
  * 非静默时每批由系统对话框确认设备和设置；Electron 不返回对话框选中的设备，
@@ -159,15 +163,15 @@ async function sendToPrinterBatched(o) {
       partition: `temp:print-batch-${i + 1}-${tempStamp()}`,
     })
     if (!r || !r.ok) {
+      if (isPrinterCancellation(r)) throw canceledError('print', { submitted })
       throw new Error(`第 ${i + 1}/${batches.length} 批送打印失败：${(r && r.error) || '未知原因'}`
         + `${submitted ? `（前 ${submitted} 批已提交系统队列，无法撤回）` : ''}`)
     }
     submitted++
     submittedRows += b.rows
     onProgress({ phase: 'submit-done', index: i + 1, batches: batches.length, submitted, rows: submittedRows })
-    if (shouldCancel()) throw canceledError('print', { submitted })
   }
   return { ok: true, submitted, rows: submittedRows, batches: batches.length, output, bake }
 }
 
-module.exports = { exportPdfBatched, sendToPrinterBatched, canceledError }
+module.exports = { exportPdfBatched, sendToPrinterBatched, canceledError, isPrinterCancellation }
